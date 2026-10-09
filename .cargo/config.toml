@@ -1,0 +1,3 @@
+# Static CRT: no vcruntime140.dll dependency, so the exe runs on PCs without the VC++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

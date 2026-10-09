@@ -1,0 +1,22 @@
+{
+  "name": "Xbox",
+  "lighting": {
+    "color": [5, 0, 0],
+    "player_leds": "Off",
+    "led_brightness": "Low"
+  },
+  "touchpad": {
+    "mode": "Mouse"
+  },
+  "mappings": [
+    {
+      "button": "Mute",
+      "mute": true,
+      "gesture": "LongPress",
+      "action": { "kind": "profile", "name": "DualSense" }
+    }
+  ],
+  "virtual": {
+    "kind": "Xbox360"
+  }
+}

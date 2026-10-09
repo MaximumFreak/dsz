@@ -1,0 +1,9 @@
+[package]
+name = "ds-proto"
+description = "DualSense / DualSense Edge wire protocol: input parsing, output reports, adaptive triggers, Bluetooth haptics streaming"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

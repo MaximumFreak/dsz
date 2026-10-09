@@ -1,0 +1,23 @@
+{
+  "name": "DualSense",
+  "lighting": {
+    "mute_led": "Toggle"
+  },
+  "mappings": [
+    {
+      "button": "Ps",
+      "mute": true,
+      "action": { "kind": "key", "vk": 71, "win": true }
+    },
+    {
+      "button": "Mute",
+      "mute": true,
+      "gesture": "LongPress",
+      "action": { "kind": "profile", "name": "Xbox" }
+    }
+  ],
+  "virtual": {
+    "kind": "DualSense",
+    "game_leds": true
+  }
+}
