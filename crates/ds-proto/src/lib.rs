@@ -1,10 +1,11 @@
-//! DualSense and DualSense Edge wire protocol.
+//! DualSense, DualSense Edge, and DualShock 4 wire protocol.
 //!
 //! Everything in here is pure: byte layouts, CRCs, and encoders. No I/O.
 //! USB indexes are the base; Bluetooth adds one because of the extra header byte after the
 //! report id.
 
 pub mod crc;
+pub mod ds4;
 pub mod input;
 pub mod output;
 pub mod stream;
@@ -37,6 +38,11 @@ pub enum Connection {
 pub enum Model {
     DualSense,
     DualSenseEdge,
+    /// Physical DualShock 4, v1 or v2, or a clone that speaks its reports.
+    DualShock4,
+    /// Sony's USB wireless adapter (`054C:0BA0`). USB reports, with a status
+    /// bit for whether a controller is on the radio.
+    DualShock4Dongle,
 }
 
 impl Model {
@@ -52,11 +58,17 @@ impl Model {
         match self {
             Model::DualSense => "DualSense",
             Model::DualSenseEdge => "DualSense Edge",
+            Model::DualShock4 => "DualShock 4",
+            Model::DualShock4Dongle => "DualShock 4 (USB adapter)",
         }
     }
 
     pub fn is_edge(self) -> bool {
         self == Model::DualSenseEdge
+    }
+
+    pub fn is_dualshock4(self) -> bool {
+        matches!(self, Model::DualShock4 | Model::DualShock4Dongle)
     }
 }
 

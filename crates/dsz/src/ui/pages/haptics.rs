@@ -38,8 +38,17 @@ impl App {
             "Haptics & audio",
             "Wireless haptic feedback over Bluetooth: feel game audio, button clicks, and rumble through the voice-coil actuators.",
         );
-        let bt = dev.map(|d| d.is_bluetooth()).unwrap_or(true);
-        if !bt {
+        let ds4 = dev.map(|d| d.model.is_dualshock4()).unwrap_or(false);
+        if ds4 {
+            note(
+                ui,
+                "A DualShock 4 has rumble motors, not the DualSense voice coils. Rumble and button clicks use classic rumble. The haptic stream and the speaker are DualSense only.",
+                WARN,
+            );
+            ui.add_space(10.0);
+        }
+        let bt = dev.map(|d| d.is_bluetooth()).unwrap_or(true) && !ds4;
+        if !bt && !ds4 {
             note(
                 ui,
                 "This controller is on USB. PCM haptics stream over Bluetooth only, so rumble and button clicks use classic rumble here.",

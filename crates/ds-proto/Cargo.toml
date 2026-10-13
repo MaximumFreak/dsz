@@ -1,6 +1,6 @@
 [package]
 name = "ds-proto"
-description = "DualSense / DualSense Edge wire protocol: input parsing, output reports, adaptive triggers, Bluetooth haptics streaming"
+description = "DualSense, DualSense Edge, and DualShock 4 wire protocol: input parsing, output reports, adaptive triggers, Bluetooth haptics streaming"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

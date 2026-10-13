@@ -32,6 +32,14 @@ impl App {
         dev: Option<&Arc<Device>>,
     ) {
         page_header(ui, "Lighting", "Lightbar, player indicator, and mute light. Changes show on the controller as you make them.");
+        if dev.map(|d| d.model.is_dualshock4()).unwrap_or(false) {
+            note(
+                ui,
+                "The lightbar follows this page. Player indicators and the mute light are DualSense only, so those controls do nothing on a DualShock 4.",
+                WARN,
+            );
+            ui.add_space(10.0);
+        }
         let input = dev.map(|d| d.live.lock().input).unwrap_or_default();
         let now = Instant::now();
 

@@ -214,6 +214,9 @@ pub enum ParseError {
     NotState(u8),
     /// A touch point off the pad: not a real state report.
     Implausible,
+    /// Sony's USB adapter reporting that no controller is on the radio.
+    /// The rest of the report is zeros and must not be used as input.
+    NotConnected,
 }
 
 /// Type nibble (low four bits of byte 1) of a Bluetooth `0x31` report that
@@ -291,6 +294,9 @@ pub fn parse(
     model: Model,
     check_crc: bool,
 ) -> Result<InputState, ParseError> {
+    if model.is_dualshock4() {
+        return crate::ds4::parse_input(report, conn, model, check_crc);
+    }
     if report.is_empty() {
         return Err(ParseError::TooShort);
     }

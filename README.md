@@ -1,6 +1,6 @@
 # DSZ - DualSense Zen
 
-**DSZ - DualSense Zen** is a fast, native Windows companion for the PlayStation DualSense and DualSense Edge controllers, written in Rust: lighting, adaptive triggers, Bluetooth haptics and speaker audio, gyro and touchpad mouse, button mapping, virtual Xbox 360 / DualSense / DualShock 4 controllers, and per-game profiles.
+**DSZ - DualSense Zen** is a fast, native Windows companion for the PlayStation DualSense, DualSense Edge, and DualShock 4 controllers, written in Rust: lighting, adaptive triggers, Bluetooth haptics and speaker audio, gyro and touchpad mouse, button mapping, virtual Xbox 360 / DualSense / DualShock 4 controllers, and per-game profiles.
 
 ## Why use it
 
@@ -12,7 +12,7 @@
 
 ### What to know first
 
-- **Windows 10 or 11 only**, for the DualSense and DualSense Edge. It doesn't drive a physical DualShock 4.
+- **Windows 10 or 11 only**, for the DualSense, DualSense Edge, and DualShock 4 (an official pad, Sony's USB adapter, or a common pad that speaks the DualShock 4 reports). A DualShock 4 gets buttons, sticks, gyro, the touchpad, the lightbar, and classic rumble. Adaptive triggers, the Bluetooth haptic stream, and the speaker are DualSense only.
 - **Virtual controllers need two free, open-source drivers:** usbip-win2 (0.9.7.7) and HidHide. The app installs either in one click (see [Drivers](#drivers)). Without them it still does lighting, triggers, haptics from system audio, mouse modes, and mappings, but games see the real controller.
 - **Close other controller apps while it runs.** Only one app can drive the controller at a time. If buttons double up or lights flicker in a Steam game, turn Steam Input off for that game.
 - **This is an early release (0.1)**, tested on one PC with a DualSense Edge over Bluetooth. Expect rough edges, and please report them.
@@ -64,7 +64,7 @@ A fresh install starts with two profiles, from `crates\dsz\defaults\`: **Xbox** 
 
 | Area | Features |
 |---|---|
-| Connection | Bluetooth and USB, DualSense and Edge, hot-plug in under a second. Read timeouts never drop the device and write errors back off and retry; a controller goes away only when Windows removes its node. Bluetooth input CRCs are checked |
+| Connection | Bluetooth and USB; DualSense, Edge, and DualShock 4 (official pads, Sony's USB adapter, and common DS4-shaped gamepads), hot-plug in under a second. Read timeouts never drop the device and write errors back off and retry; a controller goes away only when Windows removes its node. Bluetooth input CRCs are checked, and a DualShock 4 clone whose CRC never matches is still read |
 | Lighting | Static, rainbow, breathing, strobe, battery gradient, off; brightness and speed; player LEDs (player 1–5, custom, battery gauge); mute LED (off, on, pulse, toggle with button); low-battery warning (a double blink every 2.5 s, 15 % by default) |
 | Adaptive triggers | Resistance, weapon, vibration, slope, per-zone resistance and vibration (drag to paint), bow, galloping, machine, and named presets (Very soft to Rigid, GameCube click, Choppy, Vibrate pulse) built from those effects; live zone preview with the current pull |
 | Wireless haptics | PCM haptics over Bluetooth (report `0x32`, one every 32/3000 s), from system audio (WASAPI loopback, any output device) with high-pass and low-pass filtering, stereo, and gain; button clicks placed under the grip you pressed; trigger texture. The stream takes the actuators only while something needs it (system audio, clicks, trigger texture, game haptics, a test pulse); the rest of the time rumble goes to the controller's own rumble emulation (power and "improved rumble" apply). While streaming, or with "Rumble as haptics" on, rumble plays through a rumble-to-haptics conversion: heavy motor 34–50 Hz on the left, light motor 85–110 Hz on the right, weak rumble lifted, smoothed. The `0x31` control report keeps flowing alongside, and changes from a game or mod are sent at once instead of on the next 8 ms tick. Game actuator channels from a virtual DualSense mix into the same stream (see Virtual controller) |

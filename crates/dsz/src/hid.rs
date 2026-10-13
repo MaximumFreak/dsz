@@ -108,7 +108,7 @@ fn query(path: &str) -> Option<DeviceInfo> {
             serial: String::new(),
             product: String::new(),
         };
-        if info.vid != ds_proto::SONY_VID || ds_proto::Model::from_pid(info.pid).is_none() {
+        if ds_proto::ds4::identify(info.vid, info.pid).is_none() {
             return Some(info);
         }
         let mut pp: PHIDP_PREPARSED_DATA = std::mem::zeroed();
@@ -194,15 +194,11 @@ pub fn enumerate_with(virtual_only: bool) -> Vec<DeviceInfo> {
             let path = from_wide(path_slice);
             let lower = path.to_ascii_lowercase();
             // Cheap pre-filter on the path before opening anything.
-            if !lower.contains("vid_054c")
-                && !lower.contains("vid&0002054c")
-                && !lower.contains("054c")
-            {
+            if !ds_proto::ds4::hid_path_matches(&lower) {
                 continue;
             }
             if let Some(info) = query(&path) {
-                if info.vid == ds_proto::SONY_VID
-                    && ds_proto::Model::from_pid(info.pid).is_some()
+                if ds_proto::ds4::identify(info.vid, info.pid).is_some()
                     && info.usage_page == 0x01
                     && info.usage == 0x05
                     && info.input_len > 0

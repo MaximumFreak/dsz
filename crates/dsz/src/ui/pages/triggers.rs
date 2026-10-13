@@ -452,6 +452,14 @@ impl App {
             "Adaptive triggers",
             "Resistance and vibration for L2 and R2. Pull a trigger to feel it while you edit.",
         );
+        if dev.map(|d| d.model.is_dualshock4()).unwrap_or(false) {
+            note(
+                ui,
+                "Adaptive triggers are a DualSense feature. On a DualShock 4, L2 and R2 stay ordinary analog triggers.",
+                WARN,
+            );
+            ui.add_space(10.0);
+        }
         let input = dev.map(|d| d.live.lock().input).unwrap_or_default();
         let mut copy: Option<(bool, TriggerEffect)> = None;
         two_columns(ui, |ui, col| {
