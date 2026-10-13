@@ -5,6 +5,7 @@
 //! API for game mods.
 
 mod applog;
+mod audio_led;
 mod composer;
 mod device;
 mod dsdetect;

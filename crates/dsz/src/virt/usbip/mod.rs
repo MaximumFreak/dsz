@@ -132,10 +132,11 @@ pub struct DsSink {
 
 impl DsSink {
     /// Answer for a feature-report `GET_REPORT`; `None` declines it.
-    pub fn feature(&self, model: Model, id: u8) -> Option<Vec<u8>> {
+    /// `devnum` is this pad's slot, so a DualShock 4's MAC matches its USB serial.
+    pub fn feature(&self, model: Model, id: u8, devnum: u32) -> Option<Vec<u8>> {
         let m = self.mirror.lock();
         if model == Model::DualShock4 {
-            return d::ds4::feature(id, m.calibration.as_deref());
+            return d::ds4::feature(id, m.calibration.as_deref(), &ds4_mac(devnum));
         }
         m.answer(id)
     }
@@ -144,11 +145,60 @@ impl DsSink {
 const GUID_VHCI: GUID = GUID::from_u128(0xB4030C06_DC5F_4FCC_87EB_E5515A0935C0);
 const IOCTL_PLUGOUT_HARDWARE: u32 = win::ctl_code(0x22, 0x801, 0, 3);
 const IOCTL_PLUGIN_HARDWARE_ONCE: u32 = win::ctl_code(0x22, 0x806, 0, 3);
-/// `vhci::ioctl::plugin_hardware` in 0.9.7.7: size, port, busid[32],
-/// service[32], host[1025], padding. 0.9.7.8 appends serial[16]; we serve
-/// our serial in the device descriptor instead, so it is never needed.
-const PLUGIN_SIZE: usize = 1100;
-const PLUGIN_SIZE_WITH_SERIAL: usize = 1116;
+/// One `vhci::ioctl::plugin_hardware` layout. `size` is what that release's
+/// driver compares against `sizeof` before it does anything. `busid` is
+/// where `busid[32]` starts; `service[32]` and `host[1025]` follow it.
+/// The serial and `wsk_events` fields, when the layout has them, stay
+/// zero: an empty serial leaves the device descriptor's own serial.
+#[derive(Clone, Copy)]
+struct PluginLayout {
+    size: usize,
+    busid: usize,
+}
+
+/// Newest first. 0.9.7.x through 0.9.7.7 is 1100 bytes (size, port,
+/// busid, service, host). 0.9.7.8 appends serial[16] (1116). 0.9.8.0
+/// appends `wsk_events` (1120) at the same string offsets. 0.9.8.1
+/// inserts `location_hash` after `port`, so the strings move four bytes
+/// later (1124). Plugout stays 8 bytes in all of these.
+const PLUGIN_LAYOUTS: [PluginLayout; 4] = [
+    PluginLayout { size: 1124, busid: 12 },
+    PluginLayout { size: 1120, busid: 8 },
+    PluginLayout { size: 1116, busid: 8 },
+    PluginLayout { size: 1100, busid: 8 },
+];
+
+/// Try the layout that matches `usbip.exe`'s version first. Anything else,
+/// including a version we do not know, starts at the newest: a mismatch is
+/// rejected before the driver connects.
+fn plugin_layouts(version: Option<[u16; 4]>) -> [PluginLayout; 4] {
+    let preferred = match version {
+        Some([0, 9, 8, 1]) => 1124,
+        Some([0, 9, 8, 0]) => 1120,
+        Some([0, 9, 7, 8]) => 1116,
+        Some([0, 9, 7, _]) => 1100,
+        _ => 1124,
+    };
+    let mut layouts = PLUGIN_LAYOUTS;
+    if let Some(i) = layouts.iter().position(|l| l.size == preferred) {
+        layouts.swap(0, i);
+    }
+    layouts
+}
+
+fn plugin_request(layout: PluginLayout, busid: &str, service: &str, host: &str) -> Vec<u8> {
+    let mut req = vec![0u8; layout.size];
+    req[..4].copy_from_slice(&(layout.size as u32).to_le_bytes());
+    let put = |req: &mut [u8], at: usize, len: usize, s: &str| {
+        let b = s.as_bytes();
+        let n = b.len().min(len - 1);
+        req[at..at + n].copy_from_slice(&b[..n]);
+    };
+    put(&mut req, layout.busid, 32, busid);
+    put(&mut req, layout.busid + 32, 32, service);
+    put(&mut req, layout.busid + 64, 1025, host);
+    req
+}
 
 const MS: Duration = Duration::from_millis(1);
 /// Resend the last input report when nothing new arrived for this long.
@@ -158,6 +208,29 @@ const RING_FRAMES: usize = 9600;
 
 /// Serial prefix that marks our virtual controllers in device instance ids.
 pub const SERIAL_PREFIX: &str = "DSZV";
+
+/// Serial prefix of a virtual DualShock 4: `02` (a locally administered
+/// address, which no real pad has) and then "DSZ" in ASCII.
+pub const DS4_SERIAL_PREFIX: &str = "0244535A";
+
+/// USB serial of a virtual DualShock 4: [`DS4_SERIAL_PREFIX`] and the slot,
+/// 12 hex digits in all. Steam treats a pad as a DualShock 4 only when its
+/// serial is 12 hex digits and matches feature report `0x12`. `DSZV1` is not
+/// hex, so Steam takes the pad as a generic gamepad and the game shows Xbox
+/// prompts.
+pub fn ds4_serial(devnum: u32) -> String {
+    format!("{DS4_SERIAL_PREFIX}{:04X}", devnum & 0xFFFF)
+}
+
+/// The same identity as six MAC bytes, in transmission order.
+pub fn ds4_mac(devnum: u32) -> [u8; 6] {
+    let s = ds4_serial(devnum);
+    let mut m = [0u8; 6];
+    for i in 0..6 {
+        m[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    m
+}
 
 /// Whether a usbip-win2 host controller we may use is present.
 pub fn available() -> bool {
@@ -221,16 +294,23 @@ fn driver_date() -> Option<String> {
 /// Why the installed usbip-win2 must not be used, if it mustn't. 0.9.7.8
 /// corrupts kernel memory (its author's release note; it crashed the
 /// reference PC twice, once with a game opening the virtual DualSense).
-pub fn blocked() -> Option<String> {
-    let bad_version = driver_version()
-        .map(|v| v[..] == [0, 9, 7, 8])
-        .unwrap_or(false);
-    // 0.9.7.8's driver was built in early July 2026; catch it even when
-    // usbip.exe is missing.
-    let bad_date = driver_date()
+///
+/// The version is `usbip.exe`'s and the date is the loaded driver's, so they
+/// can disagree (an old exe left next to a newer driver). 0.9.7.8's driver
+/// was built in early July 2026, and that date refuses it whatever the exe
+/// says, except for a 0.9.8.x exe: those releases came out in September.
+fn refuse_release(version: Option<[u16; 4]>, date: Option<&str>) -> bool {
+    if version == Some([0, 9, 7, 8]) {
+        return true;
+    }
+    let bad_date = date
         .map(|d| d.starts_with("07/0") && d.ends_with("/2026"))
         .unwrap_or(false);
-    (bad_version || bad_date).then(|| {
+    bad_date && !matches!(version, Some([0, 9, 8, _]))
+}
+
+pub fn blocked() -> Option<String> {
+    refuse_release(driver_version(), driver_date().as_deref()).then(|| {
         "usbip-win2 0.9.7.8 is installed. That release can corrupt memory and crash Windows (its author's warning), \
 so DualSense mode stays off. Uninstall it, restart, and install 0.9.7.7."
             .to_string()
@@ -245,12 +325,12 @@ pub fn is_virtual_path(path: &str) -> bool {
 }
 
 /// Whether a device instance, or one of its parents, is our virtual
-/// controller (its USB serial starts with [`SERIAL_PREFIX`]).
+/// controller (its USB serial starts with [`SERIAL_PREFIX`], or
+/// [`DS4_SERIAL_PREFIX`] for a virtual DualShock 4).
 pub fn is_ours_instance(id: &str) -> bool {
-    let tag = format!("\\{SERIAL_PREFIX}");
     let mut id = id.to_string();
     for _ in 0..4 {
-        if id.to_ascii_uppercase().contains(&tag) {
+        if has_our_serial(&id) {
             return true;
         }
         match win::parent_instance_id(&id) {
@@ -259,6 +339,12 @@ pub fn is_ours_instance(id: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether one instance id (no parents) carries one of our serials.
+fn has_our_serial(id: &str) -> bool {
+    let id = id.to_ascii_uppercase();
+    id.contains(&format!("\\{SERIAL_PREFIX}")) || id.contains(&format!("\\{DS4_SERIAL_PREFIX}"))
 }
 
 // ------------------------------------------------------------------ audio
@@ -554,29 +640,27 @@ impl UsbPad {
         if let Some(why) = blocked() {
             return Err(io::Error::new(io::ErrorKind::Unsupported, why));
         }
-        before_attach(&format!("{SERIAL_PREFIX}{slot}"));
+        let serial = match model {
+            Model::DualShock4 => ds4_serial(slot),
+            _ => format!("{SERIAL_PREFIX}{slot}"),
+        };
+        before_attach(&serial);
         let h = win::open_overlapped(vhci_path)?;
         let mut ov = win::Overlapped::new()?;
-        let mut out = vec![0u8; PLUGIN_SIZE_WITH_SERIAL];
+        let layouts = plugin_layouts(driver_version());
+        let mut out = vec![0u8; layouts.iter().map(|l| l.size).max().unwrap_or(0)];
         let mut last = None;
-        // Later releases may grow the struct; the driver rejects a size it
-        // doesn't expect before doing anything, so try the known ones.
-        for size in [PLUGIN_SIZE, PLUGIN_SIZE_WITH_SERIAL] {
-            let mut req = vec![0u8; size];
-            req[..4].copy_from_slice(&(size as u32).to_le_bytes());
-            let put = |req: &mut [u8], at: usize, len: usize, s: &str| {
-                let b = s.as_bytes();
-                let n = b.len().min(len - 1);
-                req[at..at + n].copy_from_slice(&b[..n]);
-            };
-            put(&mut req, 8, 32, &shared.busid);
-            put(&mut req, 40, 32, &addr.port().to_string());
-            put(&mut req, 72, 1025, "127.0.0.1");
+        // The driver rejects a size it does not expect before it connects,
+        // so a layout for another release fails immediately and the next
+        // one is tried. The returned port stays at offset 4 in all of them.
+        let service = addr.port().to_string();
+        for layout in layouts {
+            let req = plugin_request(layout, &shared.busid, &service, "127.0.0.1");
             match ov.call(
                 h.raw(),
                 IOCTL_PLUGIN_HARDWARE_ONCE,
                 &req,
-                &mut out[..size],
+                &mut out[..layout.size],
                 15_000,
             ) {
                 Ok(_) => {
@@ -993,7 +1077,10 @@ fn control(s: &Shared, u: &Submit) -> Option<Vec<u8>> {
                     Model::Xbox360 => d::x360::configuration(),
                     Model::DualShock4 => d::ds4::configuration(),
                 }),
-                3 if idx == 3 => Some(d::utf16_string(&format!("{SERIAL_PREFIX}{}", s.devnum))),
+                3 if idx == 3 => Some(d::utf16_string(&match model {
+                    Model::DualShock4 => ds4_serial(s.devnum),
+                    _ => format!("{SERIAL_PREFIX}{}", s.devnum),
+                })),
                 3 => match model {
                     Model::DualSense => d::string(idx),
                     Model::Xbox360 => d::x360::string(idx),
@@ -1101,7 +1188,7 @@ fn hid_request(s: &Shared, req: u8, value: u16, data: &[u8]) -> Option<Vec<u8>> 
                 Some(rep[..n].to_vec())
             }
             3 => {
-                let a = s.sink.feature(s.model, id);
+                let a = s.sink.feature(s.model, id, s.devnum);
                 if a.is_none() {
                     log::debug!(
                         "virtual {}: unanswered feature report 0x{id:02X}",
@@ -1202,6 +1289,30 @@ mod tests {
     }
 
     #[test]
+    fn ds4_serial_is_twelve_hex_digits_and_matches_the_feature_report() {
+        let serial = ds4_serial(1);
+        assert_eq!(serial.len(), 12);
+        assert!(serial.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(serial.starts_with(DS4_SERIAL_PREFIX));
+        assert_ne!(ds4_serial(1), ds4_serial(2));
+        // Physical-controller scans skip it by that prefix.
+        assert!(has_our_serial(&format!(r"USB\VID_054C&PID_05C4\{serial}")));
+        assert!(has_our_serial(r"USB\VID_054C&PID_0CE6\DSZV3"));
+        assert!(!has_our_serial(r"USB\VID_054C&PID_05C4\5&1A2B3C&0&2"));
+        assert!(!has_our_serial(r"USB\VID_054C&PID_09CC\0123456789AB"));
+        let mac = ds4_mac(1);
+        let report = d::ds4::feature(0x12, None, &mac).unwrap();
+        // SDL prints the MAC from the report as data[6], data[5], … data[1].
+        let printed = format!(
+            "{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+            report[6], report[5], report[4], report[3], report[2], report[1]
+        );
+        assert_eq!(printed, serial);
+        let mac_report = d::ds4::feature(0x81, None, &mac).unwrap();
+        assert_eq!(&mac_report[1..7], &report[1..7]);
+    }
+
+    #[test]
     fn ring_applies_speaker_gain_only() {
         let r = AudioRing::new();
         let frame: Vec<u8> = [1000i16, 1000, 1000, 1000]
@@ -1212,5 +1323,65 @@ mod tests {
         let mut out = [0i16; 4];
         assert_eq!(r.read(&mut out), 1);
         assert_eq!(out, [500, 500, 1000, 1000]);
+    }
+
+    #[test]
+    fn plugin_request_matches_each_release_layout() {
+        let v77 = plugin_request(
+            PluginLayout { size: 1100, busid: 8 },
+            "1-3",
+            "3240",
+            "127.0.0.1",
+        );
+        assert_eq!(v77.len(), 1100);
+        assert_eq!(&v77[..4], &1100u32.to_le_bytes());
+        assert_eq!(&v77[4..8], &[0; 4]);
+        assert_eq!(&v77[8..12], b"1-3\0");
+        assert_eq!(&v77[40..45], b"3240\0");
+        assert_eq!(&v77[72..82], b"127.0.0.1\0");
+        assert!(v77[1097..].iter().all(|&b| b == 0));
+
+        let v81 = plugin_request(
+            PluginLayout { size: 1124, busid: 12 },
+            "1-3",
+            "3240",
+            "127.0.0.1",
+        );
+        assert_eq!(v81.len(), 1124);
+        assert_eq!(&v81[..4], &1124u32.to_le_bytes());
+        assert_eq!(&v81[4..12], &[0; 8]);
+        assert_eq!(&v81[12..16], b"1-3\0");
+        assert_eq!(&v81[44..49], b"3240\0");
+        assert_eq!(&v81[76..86], b"127.0.0.1\0");
+        assert!(v81[1101..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn plugin_layouts_lead_with_the_installed_release() {
+        assert_eq!(plugin_layouts(Some([0, 9, 8, 1]))[0].size, 1124);
+        assert_eq!(plugin_layouts(Some([0, 9, 8, 0]))[0].size, 1120);
+        assert_eq!(plugin_layouts(Some([0, 9, 7, 7]))[0].size, 1100);
+        assert_eq!(plugin_layouts(Some([0, 9, 7, 5]))[0].size, 1100);
+        assert_eq!(plugin_layouts(None)[0].size, 1124);
+        let sizes: Vec<usize> = plugin_layouts(Some([0, 9, 7, 7]))
+            .iter()
+            .map(|l| l.size)
+            .collect();
+        assert_eq!(sizes, vec![1100, 1120, 1116, 1124]);
+    }
+
+    #[test]
+    fn only_0978_is_refused_even_beside_an_old_exe() {
+        assert!(refuse_release(Some([0, 9, 7, 8]), None));
+        assert!(refuse_release(Some([0, 9, 7, 8]), Some("09/27/2026")));
+        assert!(refuse_release(None, Some("07/04/2026")));
+        assert!(refuse_release(None, Some("07/09/2026")));
+        assert!(!refuse_release(Some([0, 9, 8, 1]), Some("07/04/2026")));
+        assert!(!refuse_release(Some([0, 9, 8, 0]), None));
+        // An old exe next to 0.9.7.8's driver is still refused.
+        assert!(refuse_release(Some([0, 9, 7, 7]), Some("07/04/2026")));
+        assert!(!refuse_release(Some([0, 9, 7, 7]), Some("04/21/2026")));
+        assert!(!refuse_release(None, Some("09/27/2026")));
+        assert!(!refuse_release(None, None));
     }
 }

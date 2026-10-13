@@ -53,10 +53,18 @@ pub enum Button {
     PaddleLeft,
     /// Edge only, back paddle.
     PaddleRight,
+    /// Touchpad click with the finger in the left third of the pad.
+    /// Derived from the touch point; the wire still has one touchpad bit.
+    /// Appended so the earlier variants keep their bit positions.
+    TouchpadLeft,
+    /// Touchpad click with the finger in the center third.
+    TouchpadCenter,
+    /// Touchpad click with the finger in the right third.
+    TouchpadRight,
 }
 
 impl Button {
-    pub const ALL: [Button; 23] = [
+    pub const ALL: [Button; 26] = [
         Button::Cross,
         Button::Circle,
         Button::Square,
@@ -80,6 +88,9 @@ impl Button {
         Button::FnRight,
         Button::PaddleLeft,
         Button::PaddleRight,
+        Button::TouchpadLeft,
+        Button::TouchpadCenter,
+        Button::TouchpadRight,
     ];
 
     #[inline]
@@ -103,6 +114,9 @@ impl Button {
             Button::R3 => "R3",
             Button::Ps => "PS",
             Button::Touchpad => "Touchpad",
+            Button::TouchpadLeft => "Touchpad Left",
+            Button::TouchpadCenter => "Touchpad Center",
+            Button::TouchpadRight => "Touchpad Right",
             Button::Mute => "Mute",
             Button::DpadUp => "D-pad Up",
             Button::DpadDown => "D-pad Down",
@@ -120,6 +134,29 @@ impl Button {
             self,
             Button::FnLeft | Button::FnRight | Button::PaddleLeft | Button::PaddleRight
         )
+    }
+
+    /// Left / center / right touchpad click. These are not separate wire
+    /// buttons; see [`touchpad_click_zone`].
+    pub fn is_touchpad_zone(self) -> bool {
+        matches!(
+            self,
+            Button::TouchpadLeft | Button::TouchpadCenter | Button::TouchpadRight
+        )
+    }
+
+    /// Bits of the three zone buttons.
+    pub const TOUCHPAD_ZONE_BITS: u32 = (1 << Button::TouchpadLeft as u8)
+        | (1 << Button::TouchpadCenter as u8)
+        | (1 << Button::TouchpadRight as u8);
+
+    /// The button on the wire: Touchpad for a zone, itself otherwise.
+    pub fn physical(self) -> Button {
+        if self.is_touchpad_zone() {
+            Button::Touchpad
+        } else {
+            self
+        }
     }
 }
 
@@ -165,6 +202,52 @@ pub struct TouchPoint {
 
 pub const TOUCH_W: u16 = 1920;
 pub const TOUCH_H: u16 = 1080;
+
+/// First x of the center third. The pad is [`TOUCH_W`] wide and the three
+/// click zones are equal bands of 640: left is `x < 640`, center is
+/// `640 <= x < 1280`, right is `x >= 1280`.
+pub const TOUCH_ZONE_CENTER: u16 = TOUCH_W / 3;
+/// First x of the right third.
+pub const TOUCH_ZONE_RIGHT: u16 = 2 * TOUCH_W / 3;
+
+/// Which third of the pad `x` is in.
+pub fn touchpad_zone(x: u16) -> Button {
+    if x < TOUCH_ZONE_CENTER {
+        Button::TouchpadLeft
+    } else if x < TOUCH_ZONE_RIGHT {
+        Button::TouchpadCenter
+    } else {
+        Button::TouchpadRight
+    }
+}
+
+fn mean_touch_x(points: &[TouchPoint; 2]) -> Option<u16> {
+    let mut n = 0u32;
+    let mut sum = 0u32;
+    for p in points {
+        if p.active {
+            sum += p.x as u32;
+            n += 1;
+        }
+    }
+    (n > 0).then(|| (sum / n) as u16)
+}
+
+/// Zone button for a physical touchpad click.
+///
+/// The controller reports one touchpad button. The zone follows the fingers
+/// on the pad: the average x of the contacts in `current`, or in `previous`
+/// when the click frame itself has no finger (the finger often lifts as the
+/// pad goes down). `None` when neither report has a finger, so a click with
+/// nowhere to place it stays the plain Touchpad button.
+pub fn touchpad_click_zone(
+    current: &[TouchPoint; 2],
+    previous: &[TouchPoint; 2],
+) -> Option<Button> {
+    mean_touch_x(current)
+        .or_else(|| mean_touch_x(previous))
+        .map(touchpad_zone)
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatteryStatus {
@@ -214,6 +297,9 @@ pub enum ParseError {
     NotState(u8),
     /// A touch point off the pad: not a real state report.
     Implausible,
+    /// Sony's USB adapter reporting that no controller is on the radio.
+    /// The rest of the report is zeros and must not be used as input.
+    NotConnected,
 }
 
 /// Type nibble (low four bits of byte 1) of a Bluetooth `0x31` report that
@@ -291,6 +377,9 @@ pub fn parse(
     model: Model,
     check_crc: bool,
 ) -> Result<InputState, ParseError> {
+    if model.is_dualshock4() {
+        return crate::ds4::parse_input(report, conn, model, check_crc);
+    }
     if report.is_empty() {
         return Err(ParseError::TooShort);
     }
@@ -540,5 +629,75 @@ mod tests {
         r[8] = 0x03;
         let s = parse(&r, Connection::Usb, Model::DualSense, false).unwrap();
         assert!(s.buttons.has(Button::DpadRight) && s.buttons.has(Button::DpadDown));
+    }
+
+    #[test]
+    fn touchpad_zones_are_equal_thirds() {
+        // Existing buttons keep their bits; the zones are appended.
+        assert_eq!(Button::Touchpad as u8, 13);
+        assert_eq!(Button::PaddleRight as u8, 22);
+        assert_eq!(Button::TouchpadLeft as u8, 23);
+        assert_eq!(TOUCH_ZONE_CENTER, 640);
+        assert_eq!(TOUCH_ZONE_RIGHT, 1280);
+        assert_eq!(touchpad_zone(0), Button::TouchpadLeft);
+        assert_eq!(touchpad_zone(639), Button::TouchpadLeft);
+        assert_eq!(touchpad_zone(640), Button::TouchpadCenter);
+        assert_eq!(touchpad_zone(1279), Button::TouchpadCenter);
+        assert_eq!(touchpad_zone(1280), Button::TouchpadRight);
+        assert_eq!(touchpad_zone(1919), Button::TouchpadRight);
+        for b in Button::ALL {
+            assert_eq!(Button::TOUCHPAD_ZONE_BITS & b.bit() != 0, b.is_touchpad_zone());
+        }
+        assert_eq!(Button::TouchpadCenter.physical(), Button::Touchpad);
+        assert_eq!(Button::Cross.physical(), Button::Cross);
+    }
+
+    fn finger(x: u16) -> TouchPoint {
+        TouchPoint {
+            active: true,
+            id: 1,
+            x,
+            y: 540,
+        }
+    }
+
+    #[test]
+    fn touchpad_click_zone_uses_fingers() {
+        let none = [TouchPoint::default(); 2];
+        let left = [finger(100), TouchPoint::default()];
+        assert_eq!(
+            touchpad_click_zone(&left, &none),
+            Some(Button::TouchpadLeft)
+        );
+        // No finger on the click frame: the previous contact places it.
+        assert_eq!(
+            touchpad_click_zone(&none, &left),
+            Some(Button::TouchpadLeft)
+        );
+        // A click with no finger at all is not a zone.
+        assert_eq!(touchpad_click_zone(&none, &none), None);
+        // Two fingers, one in each outer third, meet in the center.
+        let span = [finger(0), finger(1919)];
+        assert_eq!(
+            touchpad_click_zone(&span, &none),
+            Some(Button::TouchpadCenter)
+        );
+        // The current contact wins over the previous one.
+        let right = [finger(1500), TouchPoint::default()];
+        assert_eq!(
+            touchpad_click_zone(&right, &left),
+            Some(Button::TouchpadRight)
+        );
+    }
+
+    #[test]
+    fn parse_does_not_invent_zone_buttons() {
+        let mut r = usb_report();
+        r[10] |= 0x02;
+        let s = parse(&r, Connection::Usb, Model::DualSense, false).unwrap();
+        assert!(s.buttons.has(Button::Touchpad));
+        assert!(!s.buttons.has(Button::TouchpadLeft));
+        assert!(!s.buttons.has(Button::TouchpadCenter));
+        assert!(!s.buttons.has(Button::TouchpadRight));
     }
 }

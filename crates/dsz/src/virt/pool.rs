@@ -288,7 +288,12 @@ impl Pool {
             return;
         }
         let profile = engine.profile_for_mac(&last);
-        let kind = profile.virtual_out.kind;
+        let kind = crate::settings::effective_virtual_kind(
+            profile.virtual_out.kind,
+            engine.game_override.read().is_some(),
+            engine.fallback_exe.read().is_some(),
+            engine.settings.read().fallback_pad,
+        );
         if kind == VirtualKind::Off {
             return;
         }
@@ -321,14 +326,17 @@ impl Pool {
     /// them when persistence is off or their profile no longer wants that
     /// kind (a game rule, an edit), replug when it wants the other kind.
     pub fn maintain(&self, engine: &Engine) {
-        let (on, hide_ok, last) = {
+        let (on, hide_ok, last, fallback_pad) = {
             let s = engine.settings.read();
             (
                 s.persistent_virtual,
                 s.hidhide_control,
                 s.last_controller.clone(),
+                s.fallback_pad,
             )
         };
+        let forced = engine.game_override.read().is_some();
+        let falling_back = engine.fallback_exe.read().is_some();
         let idle: Vec<Arc<Pad>> = self
             .list()
             .into_iter()
@@ -337,7 +345,12 @@ impl Pool {
         for p in idle {
             let mac = p.mac.lock().clone();
             let profile = engine.profile_for_mac(if mac.is_empty() { &last } else { &mac });
-            let want = profile.virtual_out.kind;
+            let want = crate::settings::effective_virtual_kind(
+                profile.virtual_out.kind,
+                forced,
+                falling_back,
+                fallback_pad,
+            );
             if !on || !p.alive() || want == VirtualKind::Off {
                 log::info!("virtual {} controller unplugged", p.kind().label());
                 self.destroy(engine, &p);

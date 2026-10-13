@@ -352,7 +352,13 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     while !device.stop.load(Ordering::Acquire) {
         let profile = cache.get(engine, device);
         let vo = &profile.virtual_out;
-        let want = vo.kind;
+        let fallback_pad = engine.settings.read().fallback_pad;
+        let want = crate::settings::effective_virtual_kind(
+            vo.kind,
+            engine.game_override.read().is_some(),
+            engine.fallback_exe.read().is_some(),
+            fallback_pad,
+        );
         let lost = pad.as_ref().filter(|p| !p.target.alive()).cloned();
         if let Some(p) = lost {
             let e = format!(

@@ -32,14 +32,23 @@ impl App {
         dev: Option<&Arc<Device>>,
     ) {
         page_header(ui, "Lighting", "Lightbar, player indicator, and mute light. Changes show on the controller as you make them.");
+        if dev.map(|d| d.model.is_dualshock4()).unwrap_or(false) {
+            note(
+                ui,
+                "The lightbar follows this page. Player indicators and the mute light are DualSense only, so those controls do nothing on a DualShock 4.",
+                WARN,
+            );
+            ui.add_space(10.0);
+        }
         let input = dev.map(|d| d.live.lock().input).unwrap_or_default();
         let now = Instant::now();
+        let loud = self.engine.audio.loudness();
 
         two_columns(ui, |ui, col| {
             if col == 0 {
                 card(ui, "Lightbar", "", |ui| {
                     // Live preview strip.
-                    let color = self.preview.lightbar(p, &input, now);
+                    let color = self.preview.lightbar(p, &input, loud, now);
                     let (r, _) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 46.0),
                         Sense::hover(),
@@ -57,20 +66,43 @@ impl App {
                     pt.rect_filled(bar, CornerRadius::same(6), rgb(color));
                     ui.add_space(10.0);
 
+                    let prev_id = ui.id().with(("audio_light_prev", p.name.clone()));
                     let l = &mut p.lighting;
-                    segmented(
+                    let mut follow = l.mode == LightMode::Audio;
+                    if toggle_row(
                         ui,
-                        &mut l.mode,
-                        &[
-                            (LightMode::Static, "Static"),
-                            (LightMode::Rainbow, "Rainbow"),
-                            (LightMode::Breathing, "Breathing"),
-                            (LightMode::Strobe, "Strobe"),
-                            (LightMode::Battery, "Battery"),
-                            (LightMode::Off, "Off"),
-                        ],
-                    );
+                        "Follow system audio",
+                        "Green when quiet, yellow in the middle, red when loud",
+                        &mut follow,
+                    ) {
+                        if follow {
+                            if l.mode != LightMode::Audio {
+                                ui.data_mut(|d| d.insert_temp(prev_id, l.mode));
+                                l.mode = LightMode::Audio;
+                            }
+                        } else {
+                            l.mode = ui
+                                .data(|d| d.get_temp::<LightMode>(prev_id))
+                                .filter(|m| *m != LightMode::Audio)
+                                .unwrap_or(LightMode::Static);
+                        }
+                    }
                     ui.add_space(8.0);
+                    if l.mode != LightMode::Audio {
+                        segmented(
+                            ui,
+                            &mut l.mode,
+                            &[
+                                (LightMode::Static, "Static"),
+                                (LightMode::Rainbow, "Rainbow"),
+                                (LightMode::Breathing, "Breathing"),
+                                (LightMode::Strobe, "Strobe"),
+                                (LightMode::Battery, "Battery"),
+                                (LightMode::Off, "Off"),
+                            ],
+                        );
+                        ui.add_space(8.0);
+                    }
                     match l.mode {
                         LightMode::Static | LightMode::Breathing | LightMode::Strobe => {
                             row(ui, if l.mode == LightMode::Static { "Color" } else { "Color A" }, "", |ui| {
@@ -88,6 +120,43 @@ impl App {
                         LightMode::Rainbow => muted(ui, "Cycles the full hue wheel."),
                         LightMode::Battery => muted(ui, "Red when low, amber in the middle, green when full. Pulses while charging."),
                         LightMode::Off => muted(ui, "Lightbar off."),
+                        LightMode::Audio => {
+                            row(ui, "Quiet", "", |ui| {
+                                color_picker::color_edit_button_srgb(ui, &mut l.audio_quiet);
+                            });
+                            row(ui, "Medium", "", |ui| {
+                                color_picker::color_edit_button_srgb(ui, &mut l.audio_medium);
+                            });
+                            row(ui, "Loud", "", |ui| {
+                                color_picker::color_edit_button_srgb(ui, &mut l.audio_loud);
+                            });
+                            if slider_row(
+                                ui,
+                                "Yellow from",
+                                "Percent of full scale",
+                                &mut l.audio_medium_at,
+                                0..=100,
+                                "%",
+                            ) && l.audio_loud_at < l.audio_medium_at
+                            {
+                                l.audio_loud_at = l.audio_medium_at;
+                            }
+                            if slider_row(
+                                ui,
+                                "Red from",
+                                "Loud color at this level and above",
+                                &mut l.audio_loud_at,
+                                0..=100,
+                                "%",
+                            ) && l.audio_loud_at < l.audio_medium_at
+                            {
+                                l.audio_medium_at = l.audio_loud_at;
+                            }
+                            muted(
+                                ui,
+                                "Uses the output chosen on Haptics & audio, or the Windows default. A game's light still wins.",
+                            );
+                        }
                     }
                     if l.mode != LightMode::Off {
                         slider_row(ui, "Brightness", "", &mut l.brightness, 0..=100, "%");

@@ -108,7 +108,7 @@ fn query(path: &str) -> Option<DeviceInfo> {
             serial: String::new(),
             product: String::new(),
         };
-        if info.vid != ds_proto::SONY_VID || ds_proto::Model::from_pid(info.pid).is_none() {
+        if ds_proto::ds4::identify(info.vid, info.pid).is_none() {
             return Some(info);
         }
         let mut pp: PHIDP_PREPARSED_DATA = std::mem::zeroed();
@@ -194,19 +194,22 @@ pub fn enumerate_with(virtual_only: bool) -> Vec<DeviceInfo> {
             let path = from_wide(path_slice);
             let lower = path.to_ascii_lowercase();
             // Cheap pre-filter on the path before opening anything.
-            if !lower.contains("vid_054c")
-                && !lower.contains("vid&0002054c")
-                && !lower.contains("054c")
-            {
+            if !ds_proto::ds4::hid_path_matches(&lower) {
                 continue;
             }
             if let Some(info) = query(&path) {
-                if info.vid == ds_proto::SONY_VID
-                    && ds_proto::Model::from_pid(info.pid).is_some()
-                    && info.usage_page == 0x01
+                let Some(kind) = ds_proto::ds4::identify(info.vid, info.pid) else {
+                    continue;
+                };
+                if info.usage_page == 0x01
                     && info.usage == 0x05
                     && info.input_len > 0
                     && crate::virt::usbip::is_virtual_path(&path) == virtual_only
+                    // Another app's virtual DualShock 4 (DS4Windows and the
+                    // like, through ViGEm) is not a controller to drive.
+                    && !(kind.model.is_dualshock4()
+                        && !virtual_only
+                        && crate::virt::win::interface_on_software_bus(&path))
                 {
                     out.push(info);
                 }

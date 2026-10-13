@@ -16,14 +16,33 @@ use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------- lighting
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LightMode {
+    #[default]
     Static,
     Rainbow,
     Breathing,
     Strobe,
     Battery,
     Off,
+    /// Green, yellow, and red from system-audio loudness.
+    Audio,
+}
+
+fn default_audio_quiet() -> [u8; 3] {
+    [40, 200, 80]
+}
+fn default_audio_medium() -> [u8; 3] {
+    [255, 196, 0]
+}
+fn default_audio_loud() -> [u8; 3] {
+    [255, 32, 32]
+}
+fn default_audio_medium_at() -> u8 {
+    12
+}
+fn default_audio_loud_at() -> u8 {
+    35
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +86,19 @@ pub struct Lighting {
     pub low_battery_flash: bool,
     pub low_battery_threshold: u8,
     pub low_battery_color: [u8; 3],
+    /// Quiet / medium / loud colours for [`LightMode::Audio`].
+    #[serde(default = "default_audio_quiet")]
+    pub audio_quiet: [u8; 3],
+    #[serde(default = "default_audio_medium")]
+    pub audio_medium: [u8; 3],
+    #[serde(default = "default_audio_loud")]
+    pub audio_loud: [u8; 3],
+    /// Percent of full scale where the bar leaves the quiet colour.
+    #[serde(default = "default_audio_medium_at")]
+    pub audio_medium_at: u8,
+    /// Percent of full scale where the bar becomes the loud colour.
+    #[serde(default = "default_audio_loud_at")]
+    pub audio_loud_at: u8,
 }
 
 impl Default for Lighting {
@@ -83,6 +115,11 @@ impl Default for Lighting {
             low_battery_flash: true,
             low_battery_threshold: 15,
             low_battery_color: [0xFF, 0x30, 0x20],
+            audio_quiet: default_audio_quiet(),
+            audio_medium: default_audio_medium(),
+            audio_loud: default_audio_loud(),
+            audio_medium_at: default_audio_medium_at(),
+            audio_loud_at: default_audio_loud_at(),
         }
     }
 }
@@ -494,6 +531,9 @@ pub enum Action {
     Xbox {
         button: XboxPadButton,
     },
+    /// Drop the Bluetooth link, which powers the controller off. A controller
+    /// plugged in over USB stays on.
+    TurnOffController,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1149,6 +1189,7 @@ mod tests {
         let d = crate::settings::Settings::default();
         assert_eq!(d.default_profile, "Xbox");
         assert_eq!(d.dualsense_profile, "DualSense");
+        assert_eq!(d.fallback_pad, crate::settings::FallbackPad::Off);
     }
 
     #[test]
@@ -1158,11 +1199,72 @@ mod tests {
         assert_eq!(p.name, "x");
         assert_eq!(p.lighting.brightness, 5);
         assert_eq!(p.lighting.mode, LightMode::Static);
+        assert_eq!(p.lighting.audio_quiet, default_audio_quiet());
+        assert_eq!(p.lighting.audio_medium, default_audio_medium());
+        assert_eq!(p.lighting.audio_loud, default_audio_loud());
+        assert_eq!(p.lighting.audio_medium_at, default_audio_medium_at());
+        assert_eq!(p.lighting.audio_loud_at, default_audio_loud_at());
     }
 
     #[test]
     fn file_names() {
         assert_eq!(sanitize_file_name("a/b:c. "), "a_b_c");
         assert_eq!(sanitize_file_name("..."), "profile");
+    }
+
+    #[test]
+    fn turn_off_action_round_trips() {
+        let m = Mapping {
+            button: Button::Ps,
+            with: vec![Button::L1, Button::R1],
+            gesture: Gesture::LongPress,
+            action: Action::TurnOffController,
+            ..Mapping::default()
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"kind\":\"turn_off_controller\""));
+        let back: Mapping = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, m);
+        assert!(back.is_combo());
+        // A profile file that only sets the action still loads it.
+        let p: Profile = serde_json::from_str(
+            r#"{"name":"off","mappings":[{"action":{"kind":"turn_off_controller"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.mappings[0].action, Action::TurnOffController);
+        assert_eq!(p.mappings[0].button, Button::Cross);
+    }
+
+    #[test]
+    fn touchpad_mapping_still_loads() {
+        // A profile saved before zone clicks existed.
+        let p: Profile = serde_json::from_str(
+            r#"{"name":"old","mappings":[{"button":"Touchpad","mute":true,"action":{"kind":"mouse","button":"Right"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.mappings.len(), 1);
+        assert_eq!(p.mappings[0].button, Button::Touchpad);
+        assert!(p.mappings[0].mute);
+        assert_eq!(
+            p.mappings[0].action,
+            Action::Mouse {
+                button: MouseButton::Right
+            }
+        );
+        assert_eq!(p.touchpad, Touchpad::default());
+
+        let mut q = Profile::named("zones");
+        for b in [
+            Button::TouchpadLeft,
+            Button::TouchpadCenter,
+            Button::TouchpadRight,
+        ] {
+            q.mappings.push(Mapping {
+                button: b,
+                ..Default::default()
+            });
+        }
+        let again: Profile = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        assert_eq!(again, q);
     }
 }

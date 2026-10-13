@@ -239,7 +239,8 @@ impl App {
 
     fn preview_color(&mut self, p: &Profile, input: &ds_proto::InputState, d: &Device) -> [u8; 3] {
         let o = d.overrides.lock().rgb;
-        o.unwrap_or_else(|| self.preview.lightbar(p, input, Instant::now()))
+        let loud = self.engine.audio.loudness();
+        o.unwrap_or_else(|| self.preview.lightbar(p, input, loud, Instant::now()))
     }
 
     fn tips(&mut self, ui: &mut egui::Ui) {
@@ -290,7 +291,8 @@ impl App {
             let lb = if demo {
                 [0x00, 0x78, 0xD7]
             } else {
-                self.preview.lightbar(p, &input, Instant::now())
+                self.preview
+                    .lightbar(p, &input, self.engine.audio.loudness(), Instant::now())
             };
             controller_view::draw(
                 ui,

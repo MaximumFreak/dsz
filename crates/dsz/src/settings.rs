@@ -5,6 +5,54 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::profile::VirtualKind;
+
+/// Virtual controller to present while a game without native DualSense
+/// support is running. [`FallbackPad::Off`] keeps the profile's own choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FallbackPad {
+    Off,
+    Xbox360,
+    DualShock4,
+}
+
+impl Default for FallbackPad {
+    fn default() -> Self {
+        FallbackPad::Off
+    }
+}
+
+impl FallbackPad {
+    pub fn label(self) -> &'static str {
+        match self {
+            FallbackPad::Off => "Same as the profile",
+            FallbackPad::Xbox360 => "Xbox 360",
+            FallbackPad::DualShock4 => "DualShock 4",
+        }
+    }
+}
+
+/// Which virtual controller games should see.
+///
+/// A running game with a profile rule, or native DualSense support, already
+/// picked `profile_kind` (`profile_forced`). Otherwise a game with no
+/// DualSense support can ask for `fallback` instead of the profile's pad.
+pub fn effective_virtual_kind(
+    profile_kind: VirtualKind,
+    profile_forced: bool,
+    fallback_active: bool,
+    fallback: FallbackPad,
+) -> VirtualKind {
+    if profile_forced || !fallback_active {
+        return profile_kind;
+    }
+    match fallback {
+        FallbackPad::Off => profile_kind,
+        FallbackPad::Xbox360 => VirtualKind::Xbox360,
+        FallbackPad::DualShock4 => VirtualKind::DualShock4,
+    }
+}
+
 /// UTF-8 byte-order mark that Notepad and PowerShell put at the start of
 /// JSON files; skipped when reading settings and profiles.
 pub const BOM: char = '\u{feff}';
@@ -63,6 +111,9 @@ pub struct Settings {
     /// support runs (found by scanning its exe), unless a game rule applies.
     pub auto_dualsense: bool,
     pub dualsense_profile: String,
+    /// Virtual controller for a Steam, GOG, or Xbox app game that has no
+    /// native DualSense support and no rule of its own.
+    pub fallback_pad: FallbackPad,
     /// Keep a virtual controller plugged in while its physical controller is
     /// off, and plug one in when the app starts, so games keep the same pad
     /// (and XInput slot) throughout.
@@ -100,6 +151,7 @@ impl Default for Settings {
             default_on_start: false,
             auto_dualsense: true,
             dualsense_profile: "DualSense".into(),
+            fallback_pad: FallbackPad::Off,
             persistent_virtual: true,
             last_controller: String::new(),
             hide_nodes: BTreeMap::new(),
@@ -136,5 +188,41 @@ impl Settings {
                 let _ = std::fs::rename(&tmp, &p);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_pad_defaults_off_and_round_trips() {
+        assert_eq!(Settings::default().fallback_pad, FallbackPad::Off);
+        let parsed: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.fallback_pad, FallbackPad::Off);
+        let parsed: Settings = serde_json::from_str(r#"{"fallback_pad":"DualShock4"}"#).unwrap();
+        assert_eq!(parsed.fallback_pad, FallbackPad::DualShock4);
+    }
+
+    #[test]
+    fn fallback_replaces_only_an_unforced_profile() {
+        use crate::profile::VirtualKind;
+        assert_eq!(
+            effective_virtual_kind(VirtualKind::DualSense, false, true, FallbackPad::DualShock4),
+            VirtualKind::DualShock4
+        );
+        assert_eq!(
+            effective_virtual_kind(VirtualKind::DualSense, true, true, FallbackPad::DualShock4),
+            VirtualKind::DualSense,
+            "a DualSense game's profile keeps its own pad"
+        );
+        assert_eq!(
+            effective_virtual_kind(VirtualKind::DualShock4, false, false, FallbackPad::Xbox360),
+            VirtualKind::DualShock4
+        );
+        assert_eq!(
+            effective_virtual_kind(VirtualKind::Xbox360, false, true, FallbackPad::Off),
+            VirtualKind::Xbox360
+        );
     }
 }

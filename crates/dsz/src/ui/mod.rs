@@ -96,6 +96,8 @@ pub struct App {
     selected: Option<u64>,
     edit_pin: Option<String>,
     preview: Composer,
+    /// Keeps system-audio capture alive while the profile on screen follows loudness.
+    audio_meter: Option<Arc<crate::haptics::audio::Sub>>,
     frames: u64,
     hwnd_found: bool,
     // Page state
@@ -188,6 +190,7 @@ impl App {
             selected: None,
             edit_pin,
             preview: Composer::new(),
+            audio_meter: None,
             frames: 0,
             hwnd_found: false,
             capture_key: None,
@@ -675,6 +678,8 @@ impl eframe::App for App {
             });
 
         // Publish edits (renames go through the store, not this path).
+        self.sync_audio_meter(&profile);
+        let audio_bar = profile.lighting.mode == crate::profile::LightMode::Audio;
         if profile.name == base.name && profile != *base {
             self.engine.profiles.update(profile);
         }
@@ -705,11 +710,29 @@ impl eframe::App for App {
             return;
         }
         self.toasts(ctx);
-        let fast = self.page.live() && dev.is_some();
+        let fast = (self.page.live() && dev.is_some())
+            || (audio_bar && matches!(self.page, Page::Lighting | Page::Overview));
         repaint_in(ctx, if fast { 16 } else { 250 });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.engine.flush();
+    }
+}
+
+impl App {
+    fn sync_audio_meter(&mut self, profile: &Profile) {
+        if profile.lighting.mode != crate::profile::LightMode::Audio {
+            self.audio_meter = None;
+            return;
+        }
+        let device = profile.haptics.device.as_str();
+        let same = self
+            .audio_meter
+            .as_ref()
+            .is_some_and(|s| s.device == device);
+        if !same {
+            self.audio_meter = Some(self.engine.audio.subscribe_meter(device));
+        }
     }
 }

@@ -181,6 +181,12 @@ pub struct Device {
     pub id: u64,
     pub info: DeviceInfo,
     pub model: Model,
+    /// Gyro and accelerometer are present. A clone without them leaves
+    /// `InputState::motion_valid` clear so the gyro mouse stays put.
+    pub has_motion: bool,
+    /// Lightbar and rumble can be written. A pad without them never opens
+    /// the write handle, so a refused write cannot drop the device.
+    pub has_output: bool,
     pub conn: Connection,
     pub mac: Mutex<String>,
     pub firmware: Mutex<String>,
@@ -317,7 +323,7 @@ impl Device {
     /// or as a short rumble while nothing streams); over USB it is a rumble.
     pub fn pulse(&self, p: HapticPulse) {
         let mut f = self.feedback.lock();
-        if self.is_bluetooth() {
+        if self.is_bluetooth() && !self.model.is_dualshock4() {
             // The haptics thread drains these every 10 ms; cap a backlog.
             if f.pulses.len() < 32 {
                 f.pulses.push(p);
@@ -405,7 +411,10 @@ fn normalize_mac(raw: &str) -> String {
         .join(":")
 }
 
-fn read_identity(dev: &HidDevice, conn: Connection) -> (String, String, Mirror) {
+fn read_identity(dev: &HidDevice, conn: Connection, model: Model) -> (String, String, Mirror) {
+    if model.is_dualshock4() {
+        return read_ds4_identity(dev, conn);
+    }
     // The calibration read inside also switches a Bluetooth controller from
     // the short 0x01 report to the full 0x31 report.
     let mirror = Mirror::read(|id, len| match dev.get_feature(id, len) {
@@ -440,6 +449,46 @@ fn read_identity(dev: &HidDevice, conn: Connection) -> (String, String, Mirror) 
     (mac, firmware, mirror)
 }
 
+/// MAC from feature `0x12`, firmware from `0xA3`, and one calibration read
+/// so a Bluetooth pad switches from the 10-byte report to `0x11`. The
+/// DualSense mirror stays empty: a DualShock 4 calibration block is not a
+/// DualSense one, and the virtual pad answers with its neutral calibration.
+fn read_ds4_identity(dev: &HidDevice, conn: Connection) -> (String, String, Mirror) {
+    let mut mac = normalize_mac(&dev.info.serial);
+    if mac.is_empty() || conn == Connection::Usb {
+        if let Ok(b) = dev.get_feature(0x12, 16) {
+            if b.len() >= 7 && b[0] == 0x12 && b[1..7].iter().any(|x| *x != 0) {
+                mac = (1..7)
+                    .rev()
+                    .map(|i| format!("{:02X}", b[i]))
+                    .collect::<Vec<_>>()
+                    .join(":");
+            }
+        }
+    }
+    let mut firmware = String::new();
+    if let Ok(b) = dev.get_feature(0xA3, 49) {
+        if b.len() >= 43 && b[0] == 0xA3 {
+            let hw = u16::from_le_bytes([b[35], b[36]]);
+            let fw = u16::from_le_bytes([b[41], b[42]]);
+            firmware = format!("hw {hw:04X} · fw {fw:04X}");
+        }
+    }
+    let (id, len, bluetooth) = if conn == Connection::Bluetooth {
+        (0x05, 41, true)
+    } else {
+        (0x02, 37, false)
+    };
+    match dev.get_feature(id, len) {
+        Ok(b) if !ds_proto::ds4::calibration_plausible(&b, bluetooth) => {
+            log::info!("DualShock 4 calibration is missing or unusable; gyro uses a software bias");
+        }
+        Err(e) => log::debug!("DualShock 4 calibration read failed: {e}"),
+        _ => {}
+    }
+    (mac, firmware, Mirror::default())
+}
+
 /// Stops every worker of a device when one of them panics.
 struct StopOnPanic<'a>(&'a Device);
 
@@ -457,10 +506,15 @@ impl Drop for StopOnPanic<'_> {
 /// Open a controller and run it until it disappears or `stop` is set.
 /// Blocks; call from a dedicated thread.
 pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
-    let Some(model) = Model::from_pid(info.pid) else {
+    let Some(kind) = ds_proto::ds4::identify(info.vid, info.pid) else {
         return;
     };
-    let conn = ds_proto::connection_from_input_len(info.input_len);
+    let model = kind.model;
+    let conn = if model.is_dualshock4() {
+        ds_proto::ds4::connection(model, info.input_len)
+    } else {
+        ds_proto::connection_from_input_len(info.input_len)
+    };
     let dev = match HidDevice::open(&info) {
         Ok(d) => d,
         Err(e) => {
@@ -469,7 +523,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
             return;
         }
     };
-    let (mac, firmware, mirror) = read_identity(&dev, conn);
+    let (mac, firmware, mirror) = read_identity(&dev, conn, model);
     let (tx, rx) = bounded::<StreamPacket>(4);
     let (kick_tx, kick_rx) = bounded::<()>(1);
     let (haptics_wake_tx, haptics_wake) = bounded::<()>(1);
@@ -477,6 +531,8 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         id,
         info: info.clone(),
         model,
+        has_motion: kind.has_motion,
+        has_output: kind.has_output,
         conn,
         mac: Mutex::new(mac.clone()),
         firmware: Mutex::new(firmware.clone()),
@@ -544,7 +600,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
                     crate::virt::run(e, d)
                 })
                 .expect("spawn virtual");
-            if conn == Connection::Bluetooth {
+            if conn == Connection::Bluetooth && !model.is_dualshock4() {
                 std::thread::Builder::new()
                     .name(format!("ds-haptics-{id}"))
                     .spawn_scoped(s, move || {
@@ -586,13 +642,46 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     let mut last_activity = Instant::now();
     let mut errors = 0u32;
     let mut check_crc = engine.settings.read().check_input_crc;
+    // A DualShock 4 clone often copies the report and not the CRC. Trust the
+    // CRC once a packet matches; if the first packets never match, stop
+    // checking so the pad still works.
+    let mut crc_trusted = false;
+    let mut crc_ignoring = false;
+    let mut crc_misses = 0u8;
+    let mut sensor_ts: Option<u32> = None;
 
     while !device.stop.load(Ordering::Acquire) {
         match reader.read(100) {
             Ok(Some(buf)) => {
                 errors = 0;
-                match ds_proto::input::parse(buf, device.conn, device.model, check_crc) {
-                    Ok(state) => {
+                let parsed = if device.model.is_dualshock4() {
+                    let bt_full = matches!(buf.first(), Some(0x11..=0x19));
+                    if bt_full && check_crc && !crc_ignoring {
+                        match ds_proto::input::parse(buf, device.conn, device.model, true) {
+                            Err(ParseError::BadCrc) if !crc_trusted => {
+                                crc_misses = crc_misses.saturating_add(1);
+                                if crc_misses >= 8 {
+                                    crc_ignoring = true;
+                                    log::info!(
+                                        "DualShock 4 reports don't carry a matching Bluetooth CRC; reading this controller without the check"
+                                    );
+                                }
+                                ds_proto::input::parse(buf, device.conn, device.model, false)
+                            }
+                            Ok(state) => {
+                                crc_trusted = true;
+                                Ok(state)
+                            }
+                            other => other,
+                        }
+                    } else {
+                        ds_proto::input::parse(buf, device.conn, device.model, false)
+                    }
+                } else {
+                    ds_proto::input::parse(buf, device.conn, device.model, check_crc)
+                };
+                match parsed {
+                    Ok(mut state) => {
                         let now = Instant::now();
                         device.stats.reports.fetch_add(1, Ordering::Relaxed);
                         count_since += 1;
@@ -601,6 +690,9 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                             && now.duration_since(last_short_retry) > Duration::from_secs(1)
                         {
                             // Still on the short Bluetooth report: ask again.
+                            // Feature 0x05 is the calibration report on both
+                            // a DualSense and a Bluetooth DualShock 4, and
+                            // reading it is what switches on the full report.
                             last_short_retry = now;
                             let _ = dev.get_feature(0x05, 41);
                         }
@@ -613,7 +705,23 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                                 *link = Link::Live;
                             }
                         }
-                        let raw = ds_proto::virtual_pad::usb_layout(buf);
+                        let raw = if device.model.is_dualshock4() {
+                            if state.full {
+                                state.sensor_ts =
+                                    ds_proto::ds4::unwrap_timestamp(sensor_ts, state.sensor_ts);
+                                sensor_ts = Some(state.sensor_ts);
+                                if !device.has_motion {
+                                    state.motion_valid = false;
+                                    state.gyro = [0; 3];
+                                    state.accel = [0; 3];
+                                }
+                                Some(ds_proto::ds4::as_dualsense_usb(&state))
+                            } else {
+                                None
+                            }
+                        } else {
+                            ds_proto::virtual_pad::usb_layout(buf)
+                        };
                         pipeline.process(engine, device, &state, &prev, raw.as_ref(), now);
                         prev = state;
                     }
@@ -722,8 +830,27 @@ fn min_gap(conn: Connection, pcm: bool) -> Duration {
     }
 }
 
+fn control_report<'a>(
+    device: &Device,
+    state: &ds_proto::OutputState,
+    buf: &'a mut [u8],
+) -> &'a [u8] {
+    if device.model.is_dualshock4() {
+        ds_proto::ds4::output_report(state, device.conn, buf)
+    } else {
+        state.build(device.conn, buf)
+    }
+}
+
 fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     crate::platform::raise_thread_priority(true);
+    if !device.has_output {
+        log::info!("{} has no lightbar or rumble output", device.model.name());
+        while !device.stop.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        return;
+    }
     let mut writer = match dev.writer() {
         Ok(w) => w,
         Err(e) => {
@@ -744,6 +871,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     let mut stream_since = 0u32;
     let mut last_rate = Instant::now();
     let mut profile_cache = crate::engine::ProfileCache::default();
+    let mut meter: Option<Arc<crate::haptics::audio::Sub>> = None;
 
     let do_write =
         |w: &mut hid::Writer, data: &[u8], fails: &mut u32, backoff_until: &mut Instant| -> bool {
@@ -822,6 +950,15 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         next_tick = now + if pcm { TICK_STREAMING } else { TICK };
 
         let profile = profile_cache.get(engine, device);
+        if profile.lighting.mode == crate::profile::LightMode::Audio {
+            let source = profile.haptics.device.as_str();
+            if meter.as_ref().map(|s| s.device.as_str()) != Some(source) {
+                meter = Some(engine.audio.subscribe_meter(source));
+            }
+        } else {
+            meter = None;
+        }
+        let loudness = engine.audio.loudness();
         let input = device.live.lock().input;
         let overrides = device.overrides.lock().clone();
         let toggles = *device.toggles.lock();
@@ -835,10 +972,11 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 &fb,
                 &toggles,
                 pcm,
+                loudness,
                 now,
             )
         };
-        if device.is_bluetooth() {
+        if device.is_bluetooth() && !device.model.is_dualshock4() {
             state.audio = audio_route(device.speaker_route.load(Ordering::Acquire));
         }
         let keepalive =
@@ -854,7 +992,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             keepalive || (changed && !throttled) || device.force_output.load(Ordering::Acquire);
         if due && now >= backoff_until {
             device.force_output.store(false, Ordering::Release);
-            let report = state.build(device.conn, &mut buf);
+            let report = control_report(device, &state, &mut buf);
             if do_write(&mut writer, report, &mut fails, &mut backoff_until) {
                 last_sent = Some(state);
                 last_write = now;
@@ -886,6 +1024,67 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         lightbar: last_sent.map(|s| s.lightbar).unwrap_or([0, 0, 64]),
         ..Default::default()
     };
-    let report = calm.build(device.conn, &mut buf).to_vec();
+    let report = control_report(device, &calm, &mut buf).to_vec();
     let _ = writer.write(&report, 100);
+}
+
+#[cfg(test)]
+impl Device {
+    /// A controller with no HID handle, for mapping tests.
+    pub(crate) fn for_test(conn: Connection, mac: &str) -> Arc<Self> {
+        let (stream_tx, stream_rx) = bounded::<StreamPacket>(1);
+        let (kick_tx, kick_rx) = bounded::<()>(1);
+        let (haptics_wake_tx, haptics_wake) = bounded::<()>(1);
+        Arc::new(Device {
+            id: 1,
+            info: DeviceInfo {
+                path: String::new(),
+                vid: ds_proto::SONY_VID,
+                pid: ds_proto::DUALSENSE_PID,
+                input_len: if conn == Connection::Bluetooth {
+                    ds_proto::BT_INPUT_LEN
+                } else {
+                    64
+                },
+                output_len: ds_proto::USB_OUTPUT_LEN,
+                feature_len: 64,
+                usage_page: 0x01,
+                usage: 0x05,
+                serial: mac.to_string(),
+                product: "DualSense".into(),
+            },
+            model: Model::DualSense,
+            has_motion: true,
+            has_output: true,
+            conn,
+            mac: Mutex::new(mac.to_string()),
+            firmware: Mutex::new(String::new()),
+            live: Mutex::new(Live::default()),
+            stats: Stats::default(),
+            link: Mutex::new(Link::Live),
+            overrides: Mutex::new(Overrides::default()),
+            feedback: Mutex::new(Feedback::default()),
+            toggles: Mutex::new(Toggles::default()),
+            stream_tx,
+            stream_rx,
+            kick_tx,
+            kick_rx,
+            haptics_wake_tx,
+            haptics_wake,
+            pcm_mode: AtomicBool::new(false),
+            haptic_level: [AtomicU8::new(0), AtomicU8::new(0)],
+            speaker_level: AtomicU8::new(0),
+            speaker_route: AtomicU8::new(SPEAKER_UNTOUCHED),
+            mic_tap: Mutex::new(None),
+            speaker_lead: AtomicU8::new(0),
+            speaker_test_result: Mutex::new(None),
+            calibrate_request: AtomicBool::new(false),
+            mirror: Mutex::new(Mirror::default()),
+            virt: Default::default(),
+            game_audio: Mutex::new(None),
+            force_output: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            dead: AtomicBool::new(false),
+        })
+    }
 }

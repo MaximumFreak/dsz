@@ -249,9 +249,9 @@ pub mod ds4 {
 
     /// Feature report answers (report id first). Calibration is the
     /// physical DualSense's, whose IMU and calibration layout match.
-    pub fn feature(id: u8, dualsense_calibration: Option<&[u8]>) -> Option<Vec<u8>> {
-        // Locally administered, "DSZ" in the low bytes (stored reversed).
-        const MAC: [u8; 6] = [b'Z', b'S', b'D', 0x00, 0x00, 0x02];
+    /// `mac` is the pad's USB serial, and reports `0x12` and `0x81` carry
+    /// it in the order SDL reads back (last byte first).
+    pub fn feature(id: u8, dualsense_calibration: Option<&[u8]>, mac: &[u8; 6]) -> Option<Vec<u8>> {
         match id {
             0x02 => {
                 let mut v = crate::virt::mirror::neutral_calibration(0x02, 37);
@@ -262,14 +262,14 @@ pub mod ds4 {
             }
             0x12 => {
                 let mut v = vec![0x12];
-                v.extend(MAC.iter().rev());
+                v.extend(mac.iter().rev());
                 v.extend_from_slice(&[0x08, 0x25, 0x00]);
                 v.extend_from_slice(&[0; 6]);
                 Some(v)
             }
             0x81 => {
                 let mut v = vec![0x81];
-                v.extend(MAC.iter().rev());
+                v.extend(mac.iter().rev());
                 Some(v)
             }
             0xA3 => {
@@ -316,8 +316,9 @@ mod tests {
             assert_eq!(i, c.len());
         }
         assert_eq!(x360::configuration().len(), 49);
-        assert_eq!(ds4::feature(0x02, None).unwrap().len(), 37);
-        assert_eq!(ds4::feature(0x12, None).unwrap().len(), 16);
+        let mac = [0u8; 6];
+        assert_eq!(ds4::feature(0x02, None, &mac).unwrap().len(), 37);
+        assert_eq!(ds4::feature(0x12, None, &mac).unwrap().len(), 16);
     }
 
     #[test]

@@ -271,6 +271,32 @@ fn device_id(devinst: u32) -> Option<String> {
     (r == CR_SUCCESS).then(|| from_wide(&buf))
 }
 
+/// Whether the device behind a HID interface path was made by software: its
+/// USB node hangs straight off a root-enumerated bus (`ROOT\...`, as
+/// ViGEmBus is) instead of a hub or the Bluetooth stack. A real pad is
+/// several levels below the root: hub, PCI, ACPI.
+pub fn interface_on_software_bus(path: &str) -> bool {
+    let Some(mut id) = instance_id_for_interface(path) else {
+        return false;
+    };
+    // HID node, then its device node, then that node's bus.
+    for _ in 0..2 {
+        match parent_instance_id(&id) {
+            Some(p) => id = p,
+            None => return false,
+        }
+        if is_software_bus(&id) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_software_bus(instance_id: &str) -> bool {
+    let id = instance_id.to_ascii_uppercase();
+    id.starts_with("ROOT\\") || id.starts_with("SWD\\")
+}
+
 /// Instance id of the parent node (the Bluetooth HID service for a BT pad).
 pub fn parent_instance_id(instance_id: &str) -> Option<String> {
     unsafe {
@@ -368,4 +394,17 @@ pub fn dos_device_path(path: &str) -> Option<String> {
         return None;
     }
     Some(format!("{}{}", from_wide(&buf), &path[2..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_software_bus;
+
+    #[test]
+    fn software_buses_are_root_or_swd() {
+        assert!(is_software_bus(r"ROOT\SYSTEM\0001"));
+        assert!(is_software_bus(r"swd\something\1"));
+        assert!(!is_software_bus(r"USB\ROOT_HUB30\4&2A1B&0&0"));
+        assert!(!is_software_bus(r"BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&0002054c_PID&05c4\8&1"));
+    }
 }
