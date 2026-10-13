@@ -2,7 +2,9 @@
 //! GitHub page, verify it, and run its installer (Windows asks for admin).
 //!
 //! - usbip-win2 0.9.7.7: checked against its published SHA-256. Not 0.9.7.8,
-//!   which can crash Windows (see `virt::usbip::blocked`).
+//!   which can crash Windows (see `virt::usbip::blocked`). 0.9.8.0 and
+//!   0.9.8.1 attach when they are already installed; this pin stays on
+//!   0.9.7.7, the release exercised on the reference PC.
 //! - HidHide 1.5.230: its release publishes no hash, so the installer must
 //!   carry a valid Authenticode signature from its author.
 

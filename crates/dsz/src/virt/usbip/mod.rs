@@ -144,11 +144,60 @@ impl DsSink {
 const GUID_VHCI: GUID = GUID::from_u128(0xB4030C06_DC5F_4FCC_87EB_E5515A0935C0);
 const IOCTL_PLUGOUT_HARDWARE: u32 = win::ctl_code(0x22, 0x801, 0, 3);
 const IOCTL_PLUGIN_HARDWARE_ONCE: u32 = win::ctl_code(0x22, 0x806, 0, 3);
-/// `vhci::ioctl::plugin_hardware` in 0.9.7.7: size, port, busid[32],
-/// service[32], host[1025], padding. 0.9.7.8 appends serial[16]; we serve
-/// our serial in the device descriptor instead, so it is never needed.
-const PLUGIN_SIZE: usize = 1100;
-const PLUGIN_SIZE_WITH_SERIAL: usize = 1116;
+/// One `vhci::ioctl::plugin_hardware` layout. `size` is what that release's
+/// driver compares against `sizeof` before it does anything. `busid` is
+/// where `busid[32]` starts; `service[32]` and `host[1025]` follow it.
+/// The serial and `wsk_events` fields, when the layout has them, stay
+/// zero: an empty serial leaves the device descriptor's own serial.
+#[derive(Clone, Copy)]
+struct PluginLayout {
+    size: usize,
+    busid: usize,
+}
+
+/// Newest first. 0.9.7.x through 0.9.7.7 is 1100 bytes (size, port,
+/// busid, service, host). 0.9.7.8 appends serial[16] (1116). 0.9.8.0
+/// appends `wsk_events` (1120) at the same string offsets. 0.9.8.1
+/// inserts `location_hash` after `port`, so the strings move four bytes
+/// later (1124). Plugout stays 8 bytes in all of these.
+const PLUGIN_LAYOUTS: [PluginLayout; 4] = [
+    PluginLayout { size: 1124, busid: 12 },
+    PluginLayout { size: 1120, busid: 8 },
+    PluginLayout { size: 1116, busid: 8 },
+    PluginLayout { size: 1100, busid: 8 },
+];
+
+/// Try the layout that matches `usbip.exe`'s version first. Anything else,
+/// including a version we do not know, starts at the newest: a mismatch is
+/// rejected before the driver connects.
+fn plugin_layouts(version: Option<[u16; 4]>) -> [PluginLayout; 4] {
+    let preferred = match version {
+        Some([0, 9, 8, 1]) => 1124,
+        Some([0, 9, 8, 0]) => 1120,
+        Some([0, 9, 7, 8]) => 1116,
+        Some([0, 9, 7, _]) => 1100,
+        _ => 1124,
+    };
+    let mut layouts = PLUGIN_LAYOUTS;
+    if let Some(i) = layouts.iter().position(|l| l.size == preferred) {
+        layouts.swap(0, i);
+    }
+    layouts
+}
+
+fn plugin_request(layout: PluginLayout, busid: &str, service: &str, host: &str) -> Vec<u8> {
+    let mut req = vec![0u8; layout.size];
+    req[..4].copy_from_slice(&(layout.size as u32).to_le_bytes());
+    let put = |req: &mut [u8], at: usize, len: usize, s: &str| {
+        let b = s.as_bytes();
+        let n = b.len().min(len - 1);
+        req[at..at + n].copy_from_slice(&b[..n]);
+    };
+    put(&mut req, layout.busid, 32, busid);
+    put(&mut req, layout.busid + 32, 32, service);
+    put(&mut req, layout.busid + 64, 1025, host);
+    req
+}
 
 const MS: Duration = Duration::from_millis(1);
 /// Resend the last input report when nothing new arrived for this long.
@@ -221,16 +270,23 @@ fn driver_date() -> Option<String> {
 /// Why the installed usbip-win2 must not be used, if it mustn't. 0.9.7.8
 /// corrupts kernel memory (its author's release note; it crashed the
 /// reference PC twice, once with a game opening the virtual DualSense).
+///
+/// The exe version is authoritative. The July 2026 driver date only
+/// stands in when `usbip.exe` is missing, which is how 0.9.7.8 was
+/// caught without a version resource. A present 0.9.8.x version is not
+/// refused because of that date.
+fn refuse_release(version: Option<[u16; 4]>, date: Option<&str>) -> bool {
+    if version == Some([0, 9, 7, 8]) {
+        return true;
+    }
+    version.is_none()
+        && date
+            .map(|d| d.starts_with("07/0") && d.ends_with("/2026"))
+            .unwrap_or(false)
+}
+
 pub fn blocked() -> Option<String> {
-    let bad_version = driver_version()
-        .map(|v| v[..] == [0, 9, 7, 8])
-        .unwrap_or(false);
-    // 0.9.7.8's driver was built in early July 2026; catch it even when
-    // usbip.exe is missing.
-    let bad_date = driver_date()
-        .map(|d| d.starts_with("07/0") && d.ends_with("/2026"))
-        .unwrap_or(false);
-    (bad_version || bad_date).then(|| {
+    refuse_release(driver_version(), driver_date().as_deref()).then(|| {
         "usbip-win2 0.9.7.8 is installed. That release can corrupt memory and crash Windows (its author's warning), \
 so DualSense mode stays off. Uninstall it, restart, and install 0.9.7.7."
             .to_string()
@@ -557,26 +613,20 @@ impl UsbPad {
         before_attach(&format!("{SERIAL_PREFIX}{slot}"));
         let h = win::open_overlapped(vhci_path)?;
         let mut ov = win::Overlapped::new()?;
-        let mut out = vec![0u8; PLUGIN_SIZE_WITH_SERIAL];
+        let layouts = plugin_layouts(driver_version());
+        let mut out = vec![0u8; layouts.iter().map(|l| l.size).max().unwrap_or(0)];
         let mut last = None;
-        // Later releases may grow the struct; the driver rejects a size it
-        // doesn't expect before doing anything, so try the known ones.
-        for size in [PLUGIN_SIZE, PLUGIN_SIZE_WITH_SERIAL] {
-            let mut req = vec![0u8; size];
-            req[..4].copy_from_slice(&(size as u32).to_le_bytes());
-            let put = |req: &mut [u8], at: usize, len: usize, s: &str| {
-                let b = s.as_bytes();
-                let n = b.len().min(len - 1);
-                req[at..at + n].copy_from_slice(&b[..n]);
-            };
-            put(&mut req, 8, 32, &shared.busid);
-            put(&mut req, 40, 32, &addr.port().to_string());
-            put(&mut req, 72, 1025, "127.0.0.1");
+        // The driver rejects a size it does not expect before it connects,
+        // so a layout for another release fails immediately and the next
+        // one is tried. The returned port stays at offset 4 in all of them.
+        let service = addr.port().to_string();
+        for layout in layouts {
+            let req = plugin_request(layout, &shared.busid, &service, "127.0.0.1");
             match ov.call(
                 h.raw(),
                 IOCTL_PLUGIN_HARDWARE_ONCE,
                 &req,
-                &mut out[..size],
+                &mut out[..layout.size],
                 15_000,
             ) {
                 Ok(_) => {
@@ -1212,5 +1262,63 @@ mod tests {
         let mut out = [0i16; 4];
         assert_eq!(r.read(&mut out), 1);
         assert_eq!(out, [500, 500, 1000, 1000]);
+    }
+
+    #[test]
+    fn plugin_request_matches_each_release_layout() {
+        let v77 = plugin_request(
+            PluginLayout { size: 1100, busid: 8 },
+            "1-3",
+            "3240",
+            "127.0.0.1",
+        );
+        assert_eq!(v77.len(), 1100);
+        assert_eq!(&v77[..4], &1100u32.to_le_bytes());
+        assert_eq!(&v77[4..8], &[0; 4]);
+        assert_eq!(&v77[8..12], b"1-3\0");
+        assert_eq!(&v77[40..45], b"3240\0");
+        assert_eq!(&v77[72..82], b"127.0.0.1\0");
+        assert!(v77[1097..].iter().all(|&b| b == 0));
+
+        let v81 = plugin_request(
+            PluginLayout { size: 1124, busid: 12 },
+            "1-3",
+            "3240",
+            "127.0.0.1",
+        );
+        assert_eq!(v81.len(), 1124);
+        assert_eq!(&v81[..4], &1124u32.to_le_bytes());
+        assert_eq!(&v81[4..12], &[0; 8]);
+        assert_eq!(&v81[12..16], b"1-3\0");
+        assert_eq!(&v81[44..49], b"3240\0");
+        assert_eq!(&v81[76..86], b"127.0.0.1\0");
+        assert!(v81[1101..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn plugin_layouts_lead_with_the_installed_release() {
+        assert_eq!(plugin_layouts(Some([0, 9, 8, 1]))[0].size, 1124);
+        assert_eq!(plugin_layouts(Some([0, 9, 8, 0]))[0].size, 1120);
+        assert_eq!(plugin_layouts(Some([0, 9, 7, 7]))[0].size, 1100);
+        assert_eq!(plugin_layouts(Some([0, 9, 7, 5]))[0].size, 1100);
+        assert_eq!(plugin_layouts(None)[0].size, 1124);
+        let sizes: Vec<usize> = plugin_layouts(Some([0, 9, 7, 7]))
+            .iter()
+            .map(|l| l.size)
+            .collect();
+        assert_eq!(sizes, vec![1100, 1120, 1116, 1124]);
+    }
+
+    #[test]
+    fn only_0978_is_refused() {
+        assert!(refuse_release(Some([0, 9, 7, 8]), None));
+        assert!(refuse_release(Some([0, 9, 7, 8]), Some("09/27/2026")));
+        assert!(refuse_release(None, Some("07/04/2026")));
+        assert!(refuse_release(None, Some("07/09/2026")));
+        assert!(!refuse_release(Some([0, 9, 8, 1]), Some("07/04/2026")));
+        assert!(!refuse_release(Some([0, 9, 8, 0]), None));
+        assert!(!refuse_release(Some([0, 9, 7, 7]), Some("07/04/2026")));
+        assert!(!refuse_release(None, Some("09/27/2026")));
+        assert!(!refuse_release(None, None));
     }
 }
