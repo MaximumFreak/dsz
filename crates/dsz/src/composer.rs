@@ -105,7 +105,14 @@ impl Composer {
     }
 
     /// Lightbar color for the profile at `now`, without overrides.
-    pub fn lightbar(&mut self, p: &Profile, input: &InputState, now: Instant) -> [u8; 3] {
+    /// `loudness` is the system-audio level, 0 at silence and about 1 at full scale.
+    pub fn lightbar(
+        &mut self,
+        p: &Profile,
+        input: &InputState,
+        loudness: f32,
+        now: Instant,
+    ) -> [u8; 3] {
         let l = &p.lighting;
         let dt = now
             .saturating_duration_since(self.last)
@@ -164,6 +171,15 @@ impl Composer {
                     scale(c, bright)
                 }
             }
+            LightMode::Audio => crate::audio_led::paint(
+                loudness,
+                l.audio_quiet,
+                l.audio_medium,
+                l.audio_loud,
+                l.audio_medium_at,
+                l.audio_loud_at,
+                l.brightness,
+            ),
         }
     }
 
@@ -176,6 +192,7 @@ impl Composer {
         feedback: &Feedback,
         toggles: &Toggles,
         pcm_haptics: bool,
+        loudness: f32,
         now: Instant,
     ) -> OutputState {
         let l = &p.lighting;
@@ -184,7 +201,7 @@ impl Composer {
         // Lightbar
         let vo = &p.virtual_out;
         let game = &feedback.game;
-        let mut color = self.lightbar(p, input, now);
+        let mut color = self.lightbar(p, input, loudness, now);
         if let (true, Some(rgb)) = (vo.game_leds, game.rgb) {
             color = rgb;
         }
@@ -322,5 +339,51 @@ mod tests {
         assert!(on(0) && on(149) && !on(150) && !on(299));
         assert!(on(300) && on(449) && !on(450) && !on(2499));
         assert!(on(2500) && on(2800));
+    }
+
+    #[test]
+    fn audio_bands_follow_level_until_a_game_color_wins() {
+        let mut c = Composer::new();
+        let mut p = Profile::default();
+        p.lighting.mode = LightMode::Audio;
+        p.lighting.brightness = 50;
+        let now = Instant::now();
+        let input = InputState::default();
+        let half = |ch: u8| (f32::from(ch) * 0.5).round() as u8;
+        let quiet = c.lightbar(&p, &input, 0.0, now);
+        assert_eq!(
+            quiet,
+            [
+                half(p.lighting.audio_quiet[0]),
+                half(p.lighting.audio_quiet[1]),
+                half(p.lighting.audio_quiet[2]),
+            ]
+        );
+        p.lighting.brightness = 100;
+        let loud = c.compose(
+            &p,
+            &input,
+            &crate::device::Overrides::default(),
+            &crate::device::Feedback::default(),
+            &crate::device::Toggles::default(),
+            false,
+            0.9,
+            now,
+        );
+        assert_eq!(loud.lightbar, p.lighting.audio_loud);
+        p.virtual_out.game_leds = true;
+        let mut fb = crate::device::Feedback::default();
+        fb.game.rgb = Some([1, 2, 3]);
+        let game = c.compose(
+            &p,
+            &input,
+            &crate::device::Overrides::default(),
+            &fb,
+            &crate::device::Toggles::default(),
+            false,
+            0.9,
+            now,
+        );
+        assert_eq!(game.lightbar, [1, 2, 3]);
     }
 }

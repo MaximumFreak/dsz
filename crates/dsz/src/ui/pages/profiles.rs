@@ -29,6 +29,17 @@ fn profile_swatch(ui: &mut egui::Ui, p: &Profile) {
         LightMode::Battery => {
             pt.circle_filled(c, 15.0, rgb(crate::composer::battery_color(70)));
         }
+        LightMode::Audio => {
+            let colors = [
+                p.lighting.audio_quiet,
+                p.lighting.audio_medium,
+                p.lighting.audio_loud,
+            ];
+            for (i, col) in colors.iter().enumerate() {
+                let x = (i as f32 - 1.0) * 8.0;
+                pt.circle_filled(c + egui::vec2(x, 0.0), 5.0, rgb(*col));
+            }
+        }
         _ => {
             pt.circle_filled(c, 17.0, with_alpha(rgb(p.lighting.color), 50));
             pt.circle_filled(c, 13.0, rgb(p.lighting.color));

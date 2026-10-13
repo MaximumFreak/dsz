@@ -16,14 +16,33 @@ use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------- lighting
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LightMode {
+    #[default]
     Static,
     Rainbow,
     Breathing,
     Strobe,
     Battery,
     Off,
+    /// Green, yellow, and red from system-audio loudness.
+    Audio,
+}
+
+fn default_audio_quiet() -> [u8; 3] {
+    [40, 200, 80]
+}
+fn default_audio_medium() -> [u8; 3] {
+    [255, 196, 0]
+}
+fn default_audio_loud() -> [u8; 3] {
+    [255, 32, 32]
+}
+fn default_audio_medium_at() -> u8 {
+    12
+}
+fn default_audio_loud_at() -> u8 {
+    35
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +86,19 @@ pub struct Lighting {
     pub low_battery_flash: bool,
     pub low_battery_threshold: u8,
     pub low_battery_color: [u8; 3],
+    /// Quiet / medium / loud colours for [`LightMode::Audio`].
+    #[serde(default = "default_audio_quiet")]
+    pub audio_quiet: [u8; 3],
+    #[serde(default = "default_audio_medium")]
+    pub audio_medium: [u8; 3],
+    #[serde(default = "default_audio_loud")]
+    pub audio_loud: [u8; 3],
+    /// Percent of full scale where the bar leaves the quiet colour.
+    #[serde(default = "default_audio_medium_at")]
+    pub audio_medium_at: u8,
+    /// Percent of full scale where the bar becomes the loud colour.
+    #[serde(default = "default_audio_loud_at")]
+    pub audio_loud_at: u8,
 }
 
 impl Default for Lighting {
@@ -83,6 +115,11 @@ impl Default for Lighting {
             low_battery_flash: true,
             low_battery_threshold: 15,
             low_battery_color: [0xFF, 0x30, 0x20],
+            audio_quiet: default_audio_quiet(),
+            audio_medium: default_audio_medium(),
+            audio_loud: default_audio_loud(),
+            audio_medium_at: default_audio_medium_at(),
+            audio_loud_at: default_audio_loud_at(),
         }
     }
 }
@@ -1135,7 +1172,10 @@ mod tests {
         assert_eq!(set[0].touchpad.mode, TouchMode::Mouse);
         assert_eq!(set[1].virtual_out.kind, VirtualKind::DualSense);
         assert!(set[1].mappings.iter().any(|m| m.button == Button::Ps
-            && m.action == Action::Xbox { button: XboxPadButton::Guide }));
+            && m.action
+                == Action::Xbox {
+                    button: XboxPadButton::Guide
+                }));
         // The files hold only what differs from the defaults; the rest is
         // filled in from them.
         for p in &set {
@@ -1158,6 +1198,11 @@ mod tests {
         assert_eq!(p.name, "x");
         assert_eq!(p.lighting.brightness, 5);
         assert_eq!(p.lighting.mode, LightMode::Static);
+        assert_eq!(p.lighting.audio_quiet, default_audio_quiet());
+        assert_eq!(p.lighting.audio_medium, default_audio_medium());
+        assert_eq!(p.lighting.audio_loud, default_audio_loud());
+        assert_eq!(p.lighting.audio_medium_at, default_audio_medium_at());
+        assert_eq!(p.lighting.audio_loud_at, default_audio_loud_at());
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub struct Sub {
     pub fifo: Mutex<VecDeque<[f32; 2]>>,
     pub rate: AtomicU32,
     pub device: String,
+    /// False for the lightbar meter: the level is updated, samples are not queued.
+    queue: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -30,8 +32,10 @@ pub struct CaptureStatus {
 pub struct AudioHub {
     subs: Mutex<Vec<Weak<Sub>>>,
     pub status: Mutex<CaptureStatus>,
-    /// Peak of the last callback, f32 bits.
+    /// Peak of the last callback, f32 bits. The haptics page meter reads this.
     pub peak: AtomicU32,
+    /// Smoothed full-band level for the audio lightbar, f32 bits.
+    loudness: AtomicU32,
     started: AtomicBool,
 }
 
@@ -41,6 +45,7 @@ impl AudioHub {
             subs: Mutex::new(Vec::new()),
             status: Mutex::new(CaptureStatus::default()),
             peak: AtomicU32::new(0),
+            loudness: AtomicU32::new(0),
             started: AtomicBool::new(false),
         })
     }
@@ -48,10 +53,20 @@ impl AudioHub {
     /// Subscribe to system audio from `device` (empty = Windows default).
     /// Dropping the returned `Arc` unsubscribes.
     pub fn subscribe(self: &Arc<Self>, device: &str) -> Arc<Sub> {
+        self.subscribe_with(device, true)
+    }
+
+    /// Same capture as [`subscribe`](Self::subscribe), without queueing samples.
+    pub fn subscribe_meter(self: &Arc<Self>, device: &str) -> Arc<Sub> {
+        self.subscribe_with(device, false)
+    }
+
+    fn subscribe_with(self: &Arc<Self>, device: &str, queue: bool) -> Arc<Sub> {
         let sub = Arc::new(Sub {
-            fifo: Mutex::new(VecDeque::with_capacity(FIFO_MAX)),
+            fifo: Mutex::new(VecDeque::with_capacity(if queue { FIFO_MAX } else { 0 })),
             rate: AtomicU32::new(0),
             device: device.to_string(),
+            queue,
         });
         self.subs.lock().push(Arc::downgrade(&sub));
         if !self.started.swap(true, Ordering::AcqRel) {
@@ -66,6 +81,16 @@ impl AudioHub {
 
     pub fn peak(&self) -> f32 {
         f32::from_bits(self.peak.load(Ordering::Relaxed))
+    }
+
+    /// Smoothed system-audio level, 0 at silence.
+    pub fn loudness(&self) -> f32 {
+        let v = f32::from_bits(self.loudness.load(Ordering::Relaxed));
+        if v.is_finite() {
+            v.max(0.0)
+        } else {
+            0.0
+        }
     }
 
     fn wanted(&self) -> Option<String> {
@@ -86,6 +111,9 @@ impl AudioHub {
             .collect();
         for s in subs {
             s.rate.store(rate, Ordering::Relaxed);
+            if !s.queue {
+                continue;
+            }
             let mut f = s.fifo.lock();
             f.extend(frames.iter().copied());
             let over = f.len().saturating_sub(FIFO_MAX);
@@ -130,6 +158,7 @@ impl AudioHub {
             match (&want, &current) {
                 (None, Some(_)) => {
                     current = None;
+                    self.loudness.store(0.0f32.to_bits(), Ordering::Relaxed);
                     let mut st = self.status.lock();
                     st.running = false;
                     log::info!("system audio capture stopped");
@@ -155,6 +184,7 @@ impl AudioHub {
                         match self.open(w, failed.clone()) {
                             Ok((name, stream)) => current = Some((w.clone(), name, stream)),
                             Err(e) => {
+                                self.loudness.store(0.0f32.to_bits(), Ordering::Relaxed);
                                 let mut st = self.status.lock();
                                 st.running = false;
                                 if st.error.as_deref() != Some(e.as_str()) {
@@ -205,6 +235,9 @@ impl AudioHub {
             let old = f32::from_bits(hub.peak.load(Ordering::Relaxed));
             hub.peak
                 .store((peak.max(old * 0.85)).to_bits(), Ordering::Relaxed);
+            let prev = f32::from_bits(hub.loudness.load(Ordering::Relaxed));
+            let level = crate::audio_led::next_level(prev, &scratch, rate);
+            hub.loudness.store(level.to_bits(), Ordering::Relaxed);
             hub.push(&scratch, rate);
         };
         let stream = match cfg.sample_format() {

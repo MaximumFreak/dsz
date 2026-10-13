@@ -744,6 +744,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     let mut stream_since = 0u32;
     let mut last_rate = Instant::now();
     let mut profile_cache = crate::engine::ProfileCache::default();
+    let mut meter: Option<Arc<crate::haptics::audio::Sub>> = None;
 
     let do_write =
         |w: &mut hid::Writer, data: &[u8], fails: &mut u32, backoff_until: &mut Instant| -> bool {
@@ -822,6 +823,15 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         next_tick = now + if pcm { TICK_STREAMING } else { TICK };
 
         let profile = profile_cache.get(engine, device);
+        if profile.lighting.mode == crate::profile::LightMode::Audio {
+            let source = profile.haptics.device.as_str();
+            if meter.as_ref().map(|s| s.device.as_str()) != Some(source) {
+                meter = Some(engine.audio.subscribe_meter(source));
+            }
+        } else {
+            meter = None;
+        }
+        let loudness = engine.audio.loudness();
         let input = device.live.lock().input;
         let overrides = device.overrides.lock().clone();
         let toggles = *device.toggles.lock();
@@ -835,6 +845,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 &fb,
                 &toggles,
                 pcm,
+                loudness,
                 now,
             )
         };
