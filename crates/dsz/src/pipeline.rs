@@ -645,11 +645,13 @@ fn turn_off_controller(engine: &Engine, device: &Device) {
         return;
     }
     log::info!("turning the controller off");
+    device.flight.expect_off.store(true, Ordering::Release);
     engine.toast("Turning the controller off");
     // On the input thread, like idle shutoff: the radio call is short, and
     // the controller is going away anyway.
     if !disconnect_bluetooth(mac) {
         log::warn!("Bluetooth disconnect failed");
+        device.flight.expect_off.store(false, Ordering::Release);
         engine.warn_toast("Couldn't turn the controller off");
     }
 }

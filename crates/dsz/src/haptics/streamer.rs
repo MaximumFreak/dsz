@@ -266,6 +266,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             }
             // Start the new cadence from now.
             deadline = now;
+            device.flight.note(format!("speaker stream {}", if media { "on" } else { "off" }));
             log::info!(
                 "controller speaker stream {}",
                 if media { "on" } else { "off" }

@@ -159,10 +159,10 @@ impl Pool {
             *route.owner.lock() = Arc::downgrade(d);
             *route.mirror.lock() = d.mirror.lock().clone();
         }
-        if kind == VirtualKind::DualSense && device.is_none() && usbip::available() {
-            // The controller's own service keeps Windows from making the new
-            // audio device the default; a pad plugged in for nobody needs
-            // its own watch.
+        if kind == VirtualKind::DualSense && usbip::available() {
+            // Keep Windows from making the new audio device the default. The
+            // watch has its own thread: the controller can drop before
+            // Windows switches, and the pad stays plugged in without it.
             if let Some(mut g) = audio_default::Guard::take() {
                 std::thread::Builder::new()
                     .name("audio-default-guard".into())

@@ -10,6 +10,7 @@ mod composer;
 mod device;
 mod dsdetect;
 mod engine;
+mod flight;
 mod games;
 mod haptics;
 mod hid;

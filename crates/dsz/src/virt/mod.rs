@@ -334,8 +334,6 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     let mut cache = ProfileCache::default();
     let mut failed: Option<(VirtualKind, Instant, String)> = None;
     let ids = hide_ids(device);
-    let mut audio_guard: Option<audio_default::Guard> = None;
-    let mut audio_checked = Instant::now();
 
     // Take over the pad this controller had before it went away, or the
     // one plugged in at startup.
@@ -387,9 +385,6 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                     None => true,
                 };
                 if retry {
-                    if want == VirtualKind::DualSense && usbip::available() {
-                        audio_guard = audio_default::Guard::take();
-                    }
                     let mac = device.mac.lock().clone();
                     match engine.pads.create(want, &mac, Some(device)) {
                         Ok(p) => {
@@ -435,17 +430,6 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 }
             } else {
                 engine.pads.unhide(engine, p);
-            }
-        }
-
-        // Windows makes a new USB audio device the default; undo that.
-        if let Some(g) = audio_guard.as_mut() {
-            if audio_checked.elapsed() >= Duration::from_millis(250) {
-                audio_checked = Instant::now();
-                g.check();
-            }
-            if g.expired() || pad.is_none() {
-                audio_guard = None;
             }
         }
 

@@ -233,6 +233,8 @@ pub struct Device {
     pub force_output: AtomicBool,
     pub stop: AtomicBool,
     pub dead: AtomicBool,
+    /// Recent radio traffic, logged if the controller drops by itself.
+    pub flight: crate::flight::Recorder,
 }
 
 impl Device {
@@ -562,6 +564,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         force_output: AtomicBool::new(true),
         stop: AtomicBool::new(false),
         dead: AtomicBool::new(false),
+        flight: Default::default(),
     });
     log::info!(
         "connected {} over {:?}, MAC {}, firmware {}",
@@ -618,6 +621,8 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         );
     }
 
+    let battery = device.live.lock().input.battery_percent;
+    device.flight.dump_if_lost(model.name(), battery);
     engine.remove_device(id);
     log::info!("{} disconnected", model.name());
 }
@@ -649,11 +654,18 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     let mut crc_ignoring = false;
     let mut crc_misses = 0u8;
     let mut sensor_ts: Option<u32> = None;
+    let mut last_packet = Instant::now();
+    let mut last_kind = 0u8;
 
     while !device.stop.load(Ordering::Acquire) {
         match reader.read(100) {
             Ok(Some(buf)) => {
                 errors = 0;
+                let gap = last_packet.elapsed();
+                last_packet = Instant::now();
+                if gap > crate::flight::INPUT_GAP {
+                    device.flight.input_gap(gap);
+                }
                 let parsed = if device.model.is_dualshock4() {
                     let bt_full = matches!(buf.first(), Some(0x11..=0x19));
                     if bt_full && check_crc && !crc_ignoring {
@@ -680,6 +692,14 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 } else {
                     ds_proto::input::parse(buf, device.conn, device.model, check_crc)
                 };
+                let kind = match &parsed {
+                    Err(ParseError::NotState(k)) => *k,
+                    _ => 0,
+                };
+                if kind != last_kind {
+                    last_kind = kind;
+                    device.flight.input_kind(kind);
+                }
                 match parsed {
                     Ok(mut state) => {
                         let now = Instant::now();
@@ -746,6 +766,8 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             Err(e) => {
                 if hid::is_fatal(&e) {
                     log::info!("input stream closed: {e}");
+                    device.flight.lost.store(true, Ordering::Release);
+                    device.flight.note(format!("input closed: {e}"));
                     break;
                 }
                 errors += 1;
@@ -778,6 +800,7 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 && now.duration_since(last_activity) > Duration::from_secs(idle_min as u64 * 60)
             {
                 log::info!("idle for {idle_min} min, turning the controller off");
+                device.flight.expect_off.store(true, Ordering::Release);
                 last_activity = now;
                 let mac = device.mac.lock().clone();
                 crate::platform::bt_disconnect(&mac);
@@ -874,9 +897,11 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     let mut meter: Option<Arc<crate::haptics::audio::Sub>> = None;
 
     let do_write =
-        |w: &mut hid::Writer, data: &[u8], fails: &mut u32, backoff_until: &mut Instant| -> bool {
+        |w: &mut hid::Writer, data: &[u8], stream: bool, fails: &mut u32, backoff_until: &mut Instant| -> bool {
             let t0 = Instant::now();
-            match w.write(data, 250) {
+            let res = w.write(data, 250);
+            device.flight.write(data, stream, res.is_ok(), t0.elapsed());
+            match res {
                 Ok(()) => {
                     let us = t0.elapsed().as_micros().min(u32::MAX as u128) as u32;
                     let old = device.stats.write_us.load(Ordering::Relaxed);
@@ -900,6 +925,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                         log::warn!("write failed ({}x), retrying in {wait} ms: {e}", fails);
                     }
                     if hid::is_fatal(&e) {
+                        device.flight.lost.store(true, Ordering::Release);
                         device.stop.store(true, Ordering::Release);
                     }
                     false
@@ -920,6 +946,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                         && do_write(
                             &mut writer,
                             &pkt.data[..pkt.len],
+                            true,
                             &mut fails,
                             &mut backoff_until,
                         )
@@ -993,7 +1020,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         if due && now >= backoff_until {
             device.force_output.store(false, Ordering::Release);
             let report = control_report(device, &state, &mut buf);
-            if do_write(&mut writer, report, &mut fails, &mut backoff_until) {
+            if do_write(&mut writer, report, false, &mut fails, &mut backoff_until) {
                 last_sent = Some(state);
                 last_write = now;
                 writes_since += 1;
@@ -1085,6 +1112,7 @@ impl Device {
             force_output: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             dead: AtomicBool::new(false),
+            flight: Default::default(),
         })
     }
 }
