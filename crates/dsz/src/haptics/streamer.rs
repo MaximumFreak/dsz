@@ -331,7 +331,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         if h.buttons.enabled {
             let pressed = input.buttons.pressed_since(prev_buttons);
             for b in pressed.iter() {
-                if b != Button::L2 && b != Button::R2 {
+                // Zone clicks are the same physical press as Touchpad.
+                if b != Button::L2 && b != Button::R2 && !b.is_touchpad_zone() {
                     synth.button_click(
                         b,
                         h.buttons.intensity,

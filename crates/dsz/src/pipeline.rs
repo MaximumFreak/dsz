@@ -649,6 +649,8 @@ pub struct Pipeline {
     gyro_was_active: bool,
     /// Buttons last pressed on the helper Xbox pad.
     helper_sent: u32,
+    /// Touchpad zone held on the previous report, if the click was placed.
+    touch_zone: Option<Button>,
 }
 
 impl Pipeline {
@@ -666,7 +668,35 @@ impl Pipeline {
             last_at: None,
             gyro_was_active: false,
             helper_sent: 0,
+            touch_zone: None,
         }
+    }
+
+    /// Set Touchpad Left / Center / Right from the finger on the pad.
+    ///
+    /// The plain Touchpad button is left set, so a mapping on it still sees
+    /// every click. The zone is remembered so the next report can tell a
+    /// hold from a new press. A click that never had a finger is not given a
+    /// zone; once it has one, that zone stays until the pad comes up or a
+    /// finger reports a different third.
+    fn apply_touchpad_zones(&mut self, s: &mut InputState, prev: &mut InputState) {
+        let fresh = if s.buttons.has(Button::Touchpad) {
+            ds_proto::input::touchpad_click_zone(&s.touch, &prev.touch)
+        } else {
+            None
+        };
+        let zone = if s.buttons.has(Button::Touchpad) {
+            fresh.or(self.touch_zone)
+        } else {
+            None
+        };
+        if let Some(z) = zone {
+            s.buttons.set(z, true);
+        }
+        if let Some(z) = self.touch_zone {
+            prev.buttons.set(z, true);
+        }
+        self.touch_zone = zone;
     }
 
     pub fn release_all(&mut self) {
@@ -710,6 +740,9 @@ impl Pipeline {
             let solos = (0..profile.mappings.len()).filter(|&i| !profile.mappings[i].is_combo());
             self.map_order = combos.chain(solos).collect();
         }
+        let (mut s, mut prev) = (*s, *prev);
+        self.apply_touchpad_zones(&mut s, &mut prev);
+
         let dt = self
             .last_at
             .map(|t| now.duration_since(t).as_secs_f32())
@@ -727,8 +760,8 @@ impl Pipeline {
         let mut dps = [0.0; 3];
         let mut gyro_active = false;
         if s.full && s.motion_valid {
-            let gdt = self.gyro.dt(s, now);
-            dps = self.gyro.update_bias(s, now);
+            let gdt = self.gyro.dt(&s, now);
+            dps = self.gyro.update_bias(&s, now);
             let mode = toggles
                 .gyro
                 .map(|on| if on { GyroMode::Mouse } else { GyroMode::Off })
@@ -776,7 +809,7 @@ impl Pipeline {
             .unwrap_or(profile.touchpad.mode);
         let touch_active = touch_mode == TouchMode::Mouse && s.full;
         if touch_active {
-            self.touch.process(&profile.touchpad, s, prev, now);
+            self.touch.process(&profile.touchpad, &s, &prev, now);
         } else {
             self.touch.release();
             self.touch.prev = s.touch;
@@ -810,18 +843,18 @@ impl Pipeline {
         }
 
         // Mappings
-        let (suppress, inject) = self.mappings(engine, device, &profile, s, prev, now);
+        let (suppress, inject) = self.mappings(engine, device, &profile, &s, &prev, now);
 
         // Virtual controller
         if device.virt.active().is_some() {
-            let pad = virtual_pad(&profile, s, suppress, inject, lm, rm, touch_mode);
+            let pad = virtual_pad(&profile, &s, suppress, inject, lm, rm, touch_mode);
             let touch = touch_mode != TouchMode::Mouse || profile.virtual_out.touch_passthrough;
             device.virt.submit(&pad, raw, touch);
         }
 
         // Publish for the UI and the haptics thread.
         let mut live = device.live.lock();
-        live.input = *s;
+        live.input = s;
         live.gyro_dps = dps;
         live.gyro_bias = [
             self.gyro.bias[0] / COUNTS_PER_DPS,
@@ -878,10 +911,21 @@ impl Pipeline {
 
             if m.mute {
                 if !combo {
-                    suppress |= m.button.bit();
+                    if m.button.is_touchpad_zone() {
+                        // The game has one touchpad button. Hiding a zone
+                        // hides that click while the finger is in the zone.
+                        if down {
+                            suppress |= Button::Touchpad.bit();
+                        }
+                    } else {
+                        suppress |= m.button.bit();
+                    }
                 } else if down {
                     for b in m.buttons() {
                         rt.mute_latch |= b.bit();
+                        if b.is_touchpad_zone() {
+                            rt.mute_latch |= Button::Touchpad.bit();
+                        }
                     }
                 }
             }
@@ -1048,6 +1092,10 @@ fn virtual_pad(
     if touch_mode == TouchMode::Mouse && profile.touchpad.click_to_click && !vo.touch_passthrough {
         b.set(Button::Touchpad, false);
     }
+    // Zone clicks are mapping inputs. The virtual pad still has one touchpad button.
+    b.set(Button::TouchpadLeft, false);
+    b.set(Button::TouchpadCenter, false);
+    b.set(Button::TouchpadRight, false);
     let inv = |v: u8, on: bool| if on { 255 - v } else { v };
     let (lx, ly) = if left_mode == StickMode::Passthrough {
         shape::stick(
@@ -1088,5 +1136,134 @@ fn virtual_pad(
         ry,
         l2,
         r2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ds_proto::input::TouchPoint;
+
+    fn finger(x: u16) -> TouchPoint {
+        TouchPoint {
+            active: true,
+            id: 1,
+            x,
+            y: 400,
+        }
+    }
+
+    fn click_at(x: Option<u16>) -> InputState {
+        let mut s = InputState::default();
+        s.buttons.set(Button::Touchpad, true);
+        if let Some(x) = x {
+            s.touch[0] = finger(x);
+        }
+        s
+    }
+
+    #[test]
+    fn zone_follows_the_finger_across_reports() {
+        let mut p = Pipeline::new();
+        let mut prev = InputState::default();
+        let mut cur = click_at(Some(100));
+        p.apply_touchpad_zones(&mut cur, &mut prev);
+        assert!(cur.buttons.has(Button::Touchpad));
+        assert!(cur.buttons.has(Button::TouchpadLeft));
+        assert!(!prev.buttons.has(Button::TouchpadLeft));
+
+        // Held, still on the left: not a new press.
+        let mut prev = click_at(Some(100));
+        let mut cur = click_at(Some(200));
+        p.apply_touchpad_zones(&mut cur, &mut prev);
+        assert!(prev.buttons.has(Button::TouchpadLeft));
+        assert!(cur.buttons.has(Button::TouchpadLeft));
+        assert!(!cur
+            .buttons
+            .pressed_since(prev.buttons)
+            .has(Button::TouchpadLeft));
+
+        // Sliding into the right third releases left and presses right.
+        let mut prev = click_at(Some(200));
+        let mut cur = click_at(Some(1500));
+        p.apply_touchpad_zones(&mut cur, &mut prev);
+        assert!(prev.buttons.has(Button::TouchpadLeft));
+        assert!(cur.buttons.has(Button::TouchpadRight));
+        assert!(cur
+            .buttons
+            .pressed_since(prev.buttons)
+            .has(Button::TouchpadRight));
+        assert!(cur
+            .buttons
+            .released_since(prev.buttons)
+            .has(Button::TouchpadLeft));
+        // The whole-pad button never edges.
+        assert!(!cur
+            .buttons
+            .pressed_since(prev.buttons)
+            .has(Button::Touchpad));
+    }
+
+    #[test]
+    fn click_with_no_finger_stays_plain_touchpad() {
+        let mut p = Pipeline::new();
+        let mut prev = InputState::default();
+        let mut cur = click_at(None);
+        p.apply_touchpad_zones(&mut cur, &mut prev);
+        assert!(cur.buttons.has(Button::Touchpad));
+        assert!(!cur.buttons.iter().any(|b| b.is_touchpad_zone()));
+
+        // The finger from the report before the click still places it.
+        let mut prev = InputState::default();
+        prev.touch[0] = finger(1280);
+        let mut cur = click_at(None);
+        p.apply_touchpad_zones(&mut cur, &mut prev);
+        assert!(cur.buttons.has(Button::TouchpadRight));
+
+        // It keeps that zone while the pad stays down, even with no finger.
+        let mut prev = click_at(None);
+        let mut cur = click_at(None);
+        p.apply_touchpad_zones(&mut cur, &mut prev);
+        assert!(cur.buttons.has(Button::TouchpadRight));
+        assert!(prev.buttons.has(Button::TouchpadRight));
+
+        // Releasing the pad clears it, and the previous report still shows it.
+        let mut prev = click_at(None);
+        let mut cur = InputState::default();
+        p.apply_touchpad_zones(&mut cur, &mut prev);
+        assert!(!cur.buttons.has(Button::TouchpadRight));
+        assert!(prev.buttons.has(Button::TouchpadRight));
+    }
+
+    #[test]
+    fn virtual_pad_still_has_one_touchpad_button() {
+        let profile = Profile::default();
+        let s = click_at(Some(10));
+        let mut s = s;
+        s.buttons.set(Button::TouchpadLeft, true);
+        let modes = (StickMode::Passthrough, StickMode::Passthrough);
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough);
+        assert!(pad.buttons.has(Button::Touchpad));
+        assert!(!pad.buttons.has(Button::TouchpadLeft));
+
+        // A muted zone suppresses the one touchpad button.
+        let pad = virtual_pad(
+            &profile,
+            &s,
+            Button::Touchpad.bit(),
+            0,
+            modes.0,
+            modes.1,
+            TouchMode::Passthrough,
+        );
+        assert!(!pad.buttons.has(Button::Touchpad));
+        assert!(!pad.buttons.has(Button::TouchpadLeft));
+
+        // Touchpad-as-mouse still drops the click when passthrough is off.
+        let mut profile = profile;
+        profile.touchpad.click_to_click = true;
+        profile.virtual_out.touch_passthrough = false;
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Mouse);
+        assert!(!pad.buttons.has(Button::Touchpad));
     }
 }

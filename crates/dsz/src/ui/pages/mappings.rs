@@ -83,7 +83,7 @@ impl App {
         page_header(
             ui,
             "Button mapping",
-            "Send keys, mouse buttons, media keys, or app actions from any button or combo. With a virtual controller on, a mapping can also hide its button from the game or press a different controller button. Xbox buttons work on any profile, so the Xbox button can open Game Bar (tap) or Task View (hold).",
+            "Send keys, mouse buttons, media keys, or app actions from any button or combo. Touchpad Left, Center, and Right are the click in each third of the pad. Touchpad is still the whole click. With a virtual controller on, a mapping can also hide its button from the game or press a different controller button. Xbox buttons work on any profile, so the Xbox button can open Game Bar (tap) or Task View (hold).",
         );
         let edge = self
             .engine
@@ -295,6 +295,9 @@ impl App {
                                     .selected_text(button.short_name())
                                     .show_ui(ui, |ui| {
                                         for b in button_choices(false) {
+                                            if b.is_touchpad_zone() {
+                                                continue;
+                                            }
                                             ui.selectable_value(button, b, b.short_name());
                                         }
                                     });
@@ -425,7 +428,7 @@ impl App {
         ui.add_space(12.0);
         note(
             ui,
-            "Hold sends the output while held, Tap sends one click, Turbo repeats, Toggle latches on and off. Long press and double tap fire only when the gesture completes.",
+            "Hold sends the output while held, Tap sends one click, Turbo repeats, Toggle latches on and off. Long press and double tap fire only when the gesture completes. Touchpad Left, Center, and Right follow the finger when the pad clicks: left of 640, the middle, and 1280 or further, on the 1920-wide pad. A click with no finger is Touchpad only. Hiding a zone from the game hides that click.",
             ACCENT,
         );
     }

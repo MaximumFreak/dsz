@@ -1165,4 +1165,37 @@ mod tests {
         assert_eq!(sanitize_file_name("a/b:c. "), "a_b_c");
         assert_eq!(sanitize_file_name("..."), "profile");
     }
+
+    #[test]
+    fn touchpad_mapping_still_loads() {
+        // A profile saved before zone clicks existed.
+        let p: Profile = serde_json::from_str(
+            r#"{"name":"old","mappings":[{"button":"Touchpad","mute":true,"action":{"kind":"mouse","button":"Right"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.mappings.len(), 1);
+        assert_eq!(p.mappings[0].button, Button::Touchpad);
+        assert!(p.mappings[0].mute);
+        assert_eq!(
+            p.mappings[0].action,
+            Action::Mouse {
+                button: MouseButton::Right
+            }
+        );
+        assert_eq!(p.touchpad, Touchpad::default());
+
+        let mut q = Profile::named("zones");
+        for b in [
+            Button::TouchpadLeft,
+            Button::TouchpadCenter,
+            Button::TouchpadRight,
+        ] {
+            q.mappings.push(Mapping {
+                button: b,
+                ..Default::default()
+            });
+        }
+        let again: Profile = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        assert_eq!(again, q);
+    }
 }
