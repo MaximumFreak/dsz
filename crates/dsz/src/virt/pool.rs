@@ -14,6 +14,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use ds_proto::virtual_pad as vp;
 use parking_lot::Mutex;
@@ -26,6 +27,14 @@ use crate::profile::VirtualKind;
 /// Hider key that keeps an absent controller hidden while its idle pad is
 /// replaced. The companion pad uses `u64::MAX`; pad ids start at 1 << 40.
 const SWAP_HIDE_IDLE: u64 = u64::MAX - 1;
+/// Added to a pad's id for the Hider key that hides the pad itself while it
+/// is parked (its own id hides the physical controller).
+const PARK_HIDE: u64 = 1 << 62;
+/// How often a parked pad's hiding is refreshed: closely while Windows may
+/// still be adding nodes below a pad plugged in parked, then for Game Bar.
+const PARK_WATCH: Duration = Duration::from_secs(15);
+const PARK_EVERY_EARLY: Duration = Duration::from_millis(20);
+const PARK_EVERY_LATE: Duration = Duration::from_secs(5);
 
 /// Where a pad's game feedback goes: the controller driving it, if any.
 #[derive(Default)]
@@ -51,6 +60,30 @@ pub struct Pad {
     owner: Mutex<Option<u64>>,
     /// HidHide hides these nodes on this pad's behalf.
     hidden: Mutex<Vec<String>>,
+    /// A parked Xbox pad: plugged in and idle, holding its XInput slot,
+    /// while its controller's profile uses another kind or none. It only
+    /// presses Xbox buttons.
+    parked: Mutex<Option<Parked>>,
+}
+
+/// How a parked pad is hidden.
+struct Parked {
+    /// Its own nodes, hidden from all but explorer.exe and Game Bar.
+    ids: Vec<String>,
+    apps: Vec<std::path::PathBuf>,
+    since: Instant,
+    checked: Instant,
+}
+
+impl Parked {
+    fn visible() -> Parked {
+        Parked {
+            ids: Vec::new(),
+            apps: Vec::new(),
+            since: Instant::now(),
+            checked: Instant::now(),
+        }
+    }
 }
 
 impl Pad {
@@ -64,6 +97,15 @@ impl Pad {
 
     pub fn hidden_ids(&self) -> Vec<String> {
         self.hidden.lock().clone()
+    }
+
+    pub fn is_parked(&self) -> bool {
+        self.parked.lock().is_some()
+    }
+
+    /// Whether games can't see the parked pad.
+    pub fn park_hidden(&self) -> bool {
+        self.parked.lock().as_ref().is_some_and(|p| !p.ids.is_empty())
     }
 
     fn alive(&self) -> bool {
@@ -96,6 +138,16 @@ impl Default for Pool {
 
 /// Plug in a pad of `kind`. Game feedback follows `route`.
 fn plug(kind: VirtualKind, route: &Arc<Route>) -> Result<Target, String> {
+    plug_with(kind, route, &|_| {})
+}
+
+/// [`plug`], calling `before_attach` with the pad's serial before Windows
+/// sees it.
+fn plug_with(
+    kind: VirtualKind,
+    route: &Arc<Route>,
+    before_attach: &dyn Fn(&str),
+) -> Result<Target, String> {
     use usbip::Model;
     let model = match kind {
         VirtualKind::Off => return Err("off".into()),
@@ -141,7 +193,7 @@ fn plug(kind: VirtualKind, route: &Arc<Route>) -> Result<Target, String> {
         on_output,
         mirror: route.mirror.clone(),
     };
-    usbip::UsbPad::create(model, sink).map_err(|e| {
+    usbip::UsbPad::create_with(model, sink, before_attach).map_err(|e| {
         log::warn!("usbip-win2: {e}");
         format!(
             "usbip-win2 couldn't attach the virtual {} controller ({e}). Games see the real controller instead.",
@@ -191,6 +243,7 @@ impl Pool {
             mac: Mutex::new(mac.to_string()),
             owner: Mutex::new(device.map(|d| d.id)),
             hidden: Mutex::new(Vec::new()),
+            parked: Mutex::new(None),
         });
         self.pads.lock().push(pad.clone());
         Ok(pad)
@@ -201,7 +254,7 @@ impl Pool {
     pub fn claim(&self, device: &Arc<Device>) -> Option<Arc<Pad>> {
         let mac = device.mac.lock().clone();
         let pads = self.pads.lock();
-        let free = |p: &&Arc<Pad>| p.owner.lock().is_none() && p.alive();
+        let free = |p: &&Arc<Pad>| p.owner.lock().is_none() && p.alive() && !p.is_parked();
         let pick = pads
             .iter()
             .filter(free)
@@ -225,18 +278,201 @@ impl Pool {
         *pad.route.owner.lock() = Weak::new();
         if keep && pad.alive() {
             pad.submit_idle();
-            log::info!(
-                "keeping the virtual {} controller connected while its controller is away",
-                pad.kind().label()
-            );
+            if !pad.is_parked() {
+                log::info!(
+                    "keeping the virtual {} controller connected while its controller is away",
+                    pad.kind().label()
+                );
+            }
         } else {
             self.destroy(engine, pad);
+        }
+    }
+
+    /// The parked Xbox pad a newly connected controller takes back: the
+    /// one it had, else one that belongs to nobody yet.
+    pub fn claim_parked(&self, device: &Arc<Device>) -> Option<Arc<Pad>> {
+        let mac = device.mac.lock().clone();
+        let pads = self.pads.lock();
+        let free = |p: &&Arc<Pad>| p.owner.lock().is_none() && p.alive() && p.is_parked();
+        let pick = pads
+            .iter()
+            .filter(free)
+            .find(|p| !mac.is_empty() && *p.mac.lock() == mac)
+            .or_else(|| pads.iter().filter(free).find(|p| p.mac.lock().is_empty()))
+            .cloned()?;
+        *pick.owner.lock() = Some(device.id);
+        if !mac.is_empty() {
+            *pick.mac.lock() = mac;
+        }
+        Some(pick)
+    }
+
+    /// The parked Xbox pad left by the controller with `mac` while it is
+    /// away, if any.
+    fn parked_for(&self, mac: &str) -> Option<Arc<Pad>> {
+        self.pads
+            .lock()
+            .iter()
+            .find(|p| p.owner.lock().is_none() && p.is_parked() && *p.mac.lock() == mac)
+            .cloned()
+    }
+
+    /// Whether an idle, unparked pad other than `except` belongs to `mac`.
+    fn has_idle_pad(&self, mac: &str, except: &Arc<Pad>) -> bool {
+        self.pads.lock().iter().any(|p| {
+            !Arc::ptr_eq(p, except)
+                && p.owner.lock().is_none()
+                && !p.is_parked()
+                && *p.mac.lock() == mac
+        })
+    }
+
+    /// Park an Xbox pad: idle, its game feedback cut off, and hidden from
+    /// all but explorer.exe and Game Bar when `hide`. Call again to follow
+    /// a change of `hide` and to hide nodes Windows adds below it or let a
+    /// newly started Game Bar through; cheap when nothing is due.
+    pub fn park(&self, engine: &Engine, pad: &Pad, hide: bool) {
+        let mut parked = pad.parked.lock();
+        let fresh = parked.is_none();
+        if fresh {
+            *pad.route.owner.lock() = Weak::new();
+            pad.submit_idle();
+        }
+        let hidden_now = parked.as_ref().is_some_and(|p| !p.ids.is_empty());
+        let due = parked.as_ref().is_none_or(|p| {
+            let every = if p.since.elapsed() < PARK_WATCH {
+                PARK_EVERY_EARLY
+            } else {
+                PARK_EVERY_LATE
+            };
+            p.checked.elapsed() >= every
+        });
+        if !fresh && hidden_now == hide && !(hide && due) {
+            return;
+        }
+        let key = pad.id + PARK_HIDE;
+        let since = parked.as_ref().map(|p| p.since).unwrap_or_else(Instant::now);
+        if !hide {
+            if hidden_now {
+                if let Err(e) = engine.hider.set(key, Vec::new()) {
+                    log::warn!("HidHide: {e}");
+                }
+            }
+            *parked = Some(Parked::visible());
+            return;
+        }
+        let serial = pad.target.serial();
+        let usb = super::companion::usb_id(&serial);
+        let kids = super::win::descendant_ids(&usb);
+        let mut ids = parked.as_ref().map(|p| p.ids.clone()).unwrap_or_default();
+        for id in std::iter::once(usb).chain(kids.iter().cloned()) {
+            if !ids.iter().any(|i| i.eq_ignore_ascii_case(&id)) {
+                ids.push(id);
+            }
+        }
+        let apps = super::companion::readers();
+        let same = parked.as_ref().is_some_and(|p| p.ids == ids && p.apps == apps);
+        if !same {
+            if let Err(e) = engine.hider.set_with_apps(key, ids.clone(), apps.clone()) {
+                log::warn!("HidHide, parked Xbox controller: {e}");
+                *parked = Some(Parked::visible());
+                return;
+            }
+            // Remembered per serial, so the next pad plugged in parked is
+            // hidden whole before Windows sees it.
+            if !kids.is_empty()
+                && engine.settings.read().helper_nodes.get(&serial) != Some(&kids)
+            {
+                engine.settings.write().helper_nodes.insert(serial, kids);
+                engine.settings_save_later();
+            }
+        }
+        *parked = Some(Parked {
+            ids,
+            apps,
+            since,
+            checked: Instant::now(),
+        });
+    }
+
+    /// Plug in an Xbox pad parked for `device`, hidden from games before
+    /// Windows sees it (with the nodes it had last time under that serial).
+    pub fn create_parked(
+        &self,
+        engine: &Engine,
+        mac: &str,
+        device: &Arc<Device>,
+    ) -> Result<Arc<Pad>, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let route = Arc::new(Route::default());
+        let apps = super::companion::readers();
+        let hidden: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let r = plug_with(VirtualKind::Xbox360, &route, &|serial| {
+            let mut ids = vec![super::companion::usb_id(serial)];
+            ids.extend(engine.settings.read().helper_nodes.get(serial).cloned().unwrap_or_default());
+            match engine.hider.set_with_apps(id + PARK_HIDE, ids.clone(), apps.clone()) {
+                Ok(true) => *hidden.lock() = ids,
+                Ok(false) => {}
+                Err(e) => log::warn!("HidHide, parked Xbox controller: {e}"),
+            }
+        });
+        let hidden = hidden.into_inner();
+        let target = match r {
+            Ok(t) => Arc::new(t),
+            Err(e) => {
+                if !hidden.is_empty() {
+                    let _ = engine.hider.set(id + PARK_HIDE, Vec::new());
+                }
+                return Err(e);
+            }
+        };
+        let _ = target.submit_idle();
+        let pad = Arc::new(Pad {
+            id,
+            target,
+            route,
+            mac: Mutex::new(mac.to_string()),
+            owner: Mutex::new(Some(device.id)),
+            hidden: Mutex::new(Vec::new()),
+            parked: Mutex::new(Some(Parked {
+                apps: if hidden.is_empty() { Vec::new() } else { apps },
+                ids: hidden,
+                since: Instant::now(),
+                checked: Instant::now() - PARK_EVERY_LATE,
+            })),
+        });
+        self.pads.lock().push(pad.clone());
+        // Picks up the nodes Windows adds below it.
+        self.park(engine, &pad, true);
+        Ok(pad)
+    }
+
+    /// Put a parked pad back in service for `device` (or for nobody yet).
+    pub fn unpark(&self, engine: &Engine, pad: &Pad, device: Option<&Arc<Device>>) {
+        let was = pad.parked.lock().take();
+        if was.is_some_and(|p| !p.ids.is_empty()) {
+            if let Err(e) = engine.hider.set(pad.id + PARK_HIDE, Vec::new()) {
+                log::warn!("HidHide: {e}");
+            }
+        }
+        if let Some(d) = device {
+            *pad.route.owner.lock() = Arc::downgrade(d);
+            *pad.route.mirror.lock() = d.mirror.lock().clone();
         }
     }
 
     /// Unplug a pad and undo its hiding.
     pub fn destroy(&self, engine: &Engine, pad: &Arc<Pad>) {
         self.pads.lock().retain(|p| !Arc::ptr_eq(p, pad));
+        // Unplugged first, so a parked pad is never visible.
+        let parked = pad.parked.lock().take();
+        if parked.is_some_and(|p| !p.ids.is_empty()) {
+            pad.target.detach_now();
+            if let Err(e) = engine.hider.set(pad.id + PARK_HIDE, Vec::new()) {
+                log::warn!("HidHide: {e}");
+            }
+        }
         self.unhide(engine, pad);
     }
 
@@ -334,15 +570,17 @@ impl Pool {
     /// them when persistence is off or their profile no longer wants that
     /// kind (a game rule, an edit), replug when it wants the other kind.
     pub fn maintain(&self, engine: &Engine) {
-        let (on, hide_ok, last, fallback_pad) = {
+        let (on, hide_ok, last, fallback_pad, keep_xbox) = {
             let s = engine.settings.read();
             (
                 s.persistent_virtual,
                 s.hidhide_control,
                 s.last_controller.clone(),
                 s.fallback_pad,
+                s.keep_xbox_pad,
             )
         };
+        let park_hide = hide_ok && hidhide::available();
         let forced = engine.game_override.read().is_some();
         let falling_back = engine.fallback_exe.read().is_some();
         let idle: Vec<Arc<Pad>> = self
@@ -359,6 +597,40 @@ impl Pool {
                 falling_back,
                 fallback_pad,
             );
+            if p.is_parked() {
+                if !on || !p.alive() {
+                    self.destroy(engine, &p);
+                } else if want == VirtualKind::Xbox360 {
+                    // Its profile wants the Xbox pad again. With another
+                    // idle pad standing in, that pad's swap brings it back.
+                    if !self.has_idle_pad(&mac, &p) {
+                        self.unpark(engine, &p, None);
+                        p.submit_idle();
+                        let ids = engine.settings.read().hide_nodes.get(&mac).cloned();
+                        if let (Some(ids), true) = (ids, park_hide && profile.virtual_out.hide_physical) {
+                            let _ = self.hide(engine, &p, &ids);
+                        }
+                        log::info!("virtual Xbox 360 controller back in use while its controller is away");
+                    }
+                } else if super::park_allowed(keep_xbox, want, park_hide) {
+                    self.park(engine, &p, park_hide);
+                } else {
+                    self.destroy(engine, &p);
+                }
+                continue;
+            }
+            if p.kind() == VirtualKind::Xbox360
+                && on
+                && p.alive()
+                && want == VirtualKind::Off
+                && super::park_allowed(keep_xbox, want, park_hide)
+                && self.parked_for(&mac).is_none()
+            {
+                self.park(engine, &p, park_hide);
+                self.unhide(engine, &p);
+                log::info!("virtual Xbox 360 controller parked while its controller is away");
+                continue;
+            }
             if !on || !p.alive() || want == VirtualKind::Off {
                 log::info!("virtual {} controller unplugged", p.kind().label());
                 self.destroy(engine, &p);
@@ -373,7 +645,36 @@ impl Pool {
                 // controller's own service does (`virt::run`).
                 let bridged = !hidden.is_empty()
                     && engine.hider.set(SWAP_HIDE_IDLE, hidden.clone()).unwrap_or(false);
-                self.destroy(engine, &p);
+                let back = (want == VirtualKind::Xbox360)
+                    .then(|| self.parked_for(&mac))
+                    .flatten();
+                if let Some(x) = back {
+                    // The parked Xbox pad takes over again: no new pad.
+                    self.destroy(engine, &p);
+                    self.unpark(engine, &x, None);
+                    x.submit_idle();
+                    if !hidden.is_empty() {
+                        let _ = self.hide(engine, &x, &hidden);
+                    }
+                    log::info!("virtual Xbox 360 controller back in use while its controller is away");
+                    if bridged {
+                        let _ = engine.hider.set(SWAP_HIDE_IDLE, Vec::new());
+                    }
+                    continue;
+                }
+                if p.kind() == VirtualKind::Xbox360
+                    && super::park_allowed(keep_xbox, want, park_hide)
+                    && self.parked_for(&mac).is_none()
+                {
+                    self.park(engine, &p, park_hide);
+                    self.unhide(engine, &p);
+                    log::info!("virtual Xbox 360 controller parked while its controller is away");
+                } else {
+                    self.destroy(engine, &p);
+                }
+                if want == VirtualKind::Xbox360 {
+                    engine.companion.make_way();
+                }
                 match self.create(want, &mac, None) {
                     Ok(n) => {
                         n.submit_idle();

@@ -37,7 +37,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::device::Device;
 use crate::engine::{Engine, ProfileCache};
 use crate::haptics::game::PcmSource;
-use crate::profile::VirtualKind;
+use crate::profile::{Action, VirtualKind};
 
 pub use pool::{Pad, Pool};
 pub use probe::probe;
@@ -72,6 +72,8 @@ pub struct Status {
     pub backend: &'static str,
     /// XInput slot of the virtual Xbox pad.
     pub xinput_slot: Option<u32>,
+    /// XInput slot of the parked Xbox pad, and whether games can't see it.
+    pub parked: Option<(Option<u32>, bool)>,
     pub error: Option<String>,
     pub hidden: bool,
     pub hide_note: Option<String>,
@@ -83,6 +85,9 @@ pub struct Status {
 #[derive(Default)]
 pub struct Slot {
     target: RwLock<Option<Arc<Target>>>,
+    /// The parked Xbox pad, which only presses Xbox buttons.
+    parked: RwLock<Option<Arc<Target>>>,
+    parked_sent: Mutex<Option<u32>>,
     last_xusb: Mutex<Option<XusbReport>>,
     seq: AtomicU8,
     pub reports: AtomicU64,
@@ -93,6 +98,30 @@ pub struct Slot {
 impl Slot {
     pub fn active(&self) -> Option<VirtualKind> {
         self.target.read().as_ref().map(|t| t.kind())
+    }
+
+    pub fn has_parked(&self) -> bool {
+        self.parked.read().is_some()
+    }
+
+    fn set_parked(&self, t: Option<Arc<Target>>) {
+        *self.parked_sent.lock() = None;
+        *self.parked.write() = t;
+    }
+
+    /// Press `buttons` (DualSense layout) on the parked Xbox pad. False
+    /// when there is none.
+    pub fn submit_parked(&self, buttons: u32) -> bool {
+        let t = self.parked.read().clone();
+        let Some(t) = t else { return false };
+        let mut sent = self.parked_sent.lock();
+        if *sent != Some(buttons) {
+            match t.submit(&companion::report(buttons)) {
+                Ok(()) => *sent = Some(buttons),
+                Err(e) => log::debug!("parked Xbox controller report: {e}"),
+            }
+        }
+        true
     }
 
     fn xusb_changed(&self, rep: XusbReport) -> bool {
@@ -333,12 +362,18 @@ fn detach(device: &Device) {
 /// Per-controller service: keeps the virtual pad the profile asks for,
 /// hides the physical one, and relays game feedback. Blocks until the
 /// controller goes away; the pad itself may stay (see [`pool`]).
+///
+/// With "keep the Xbox pad" on (the default), a virtual Xbox pad is parked
+/// rather than unplugged when the profile switches to another kind: it
+/// stays plugged in, idle and hidden from games, so it keeps its XInput
+/// slot and presses Xbox buttons in place of the helper pad.
 pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     let mut cache = ProfileCache::default();
     let mut failed: Option<(VirtualKind, Instant, String)> = None;
+    let mut park_failed: Option<Instant> = None;
     let ids = hide_ids(device);
 
-    // Take over the pad this controller had before it went away, or the
+    // Take over the pads this controller had before it went away, or the
     // one plugged in at startup.
     let mut pad = engine.pads.claim(device);
     if let Some(p) = &pad {
@@ -349,17 +384,25 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             p.kind().label()
         );
     }
+    let mut parked = engine.pads.claim_parked(device);
+    if let Some(p) = &parked {
+        device.virt.set_parked(Some(p.target.clone()));
+    }
 
     while !device.stop.load(Ordering::Acquire) {
         let profile = cache.get(engine, device);
         let vo = &profile.virtual_out;
-        let fallback_pad = engine.settings.read().fallback_pad;
+        let (fallback_pad, keep_xbox, hide_ok) = {
+            let s = engine.settings.read();
+            (s.fallback_pad, s.keep_xbox_pad, s.hidhide_control && hidhide::available())
+        };
         let want = crate::settings::effective_virtual_kind(
             vo.kind,
             engine.game_override.read().is_some(),
             engine.fallback_exe.read().is_some(),
             fallback_pad,
         );
+        let park_ok = park_allowed(keep_xbox, want, hide_ok);
         let lost = pad.as_ref().filter(|p| !p.target.alive()).cloned();
         if let Some(p) = lost {
             let e = format!(
@@ -387,40 +430,106 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 if want_some.is_some() && !ids.is_empty() {
                     swap_hidden = engine.hider.set(SWAP_HIDE + device.id, ids).unwrap_or(false);
                 }
-                detach(device);
-                engine.pads.destroy(engine, &p);
-                engine.toast("Virtual controller disconnected");
+                if p.kind() == VirtualKind::Xbox360 && park_ok && parked.is_none() {
+                    // Parked before the controller lets go of it, so the
+                    // helper pad never sees a moment without an Xbox pad.
+                    device.virt.set_parked(Some(p.target.clone()));
+                    detach(device);
+                    engine.pads.park(engine, &p, hide_ok);
+                    engine.pads.unhide(engine, &p);
+                    log::info!(
+                        "virtual Xbox 360 controller parked: plugged in and idle{}",
+                        if p.park_hidden() { ", hidden from games" } else { "" }
+                    );
+                    parked = Some(p);
+                } else {
+                    detach(device);
+                    engine.pads.destroy(engine, &p);
+                    engine.toast("Virtual controller disconnected");
+                }
             }
             if let Some(want) = want_some {
-                let retry = match &failed {
-                    Some((k, at, _)) => *k != want || at.elapsed() >= RETRY_AFTER,
-                    None => true,
-                };
-                if retry {
-                    let mac = device.mac.lock().clone();
-                    match engine.pads.create(want, &mac, Some(device)) {
-                        Ok(p) => {
-                            attach(device, &p);
-                            engine.toast(format!(
-                                "Virtual {} controller connected ({})",
-                                p.kind().label(),
-                                p.target.backend()
-                            ));
-                            pad = Some(p);
-                            failed = None;
+                if want == VirtualKind::Xbox360 && parked.is_some() {
+                    let p = parked.take().expect("checked");
+                    device.virt.set_parked(None);
+                    engine.pads.unpark(engine, &p, Some(device));
+                    attach(device, &p);
+                    log::info!("virtual Xbox 360 controller back in use");
+                    pad = Some(p);
+                    failed = None;
+                } else {
+                    let retry = match &failed {
+                        Some((k, at, _)) => *k != want || at.elapsed() >= RETRY_AFTER,
+                        None => true,
+                    };
+                    if retry {
+                        if want == VirtualKind::Xbox360 {
+                            // Player 1 goes to the controller, not the helper.
+                            engine.companion.make_way();
                         }
-                        Err(e) => {
-                            if failed
-                                .as_ref()
-                                .map(|f| f.0 != want || f.2 != e)
-                                .unwrap_or(true)
-                            {
-                                log::warn!("virtual {}: {e}", want.label());
-                                engine.warn_toast(e.clone());
+                        let mac = device.mac.lock().clone();
+                        match engine.pads.create(want, &mac, Some(device)) {
+                            Ok(p) => {
+                                attach(device, &p);
+                                engine.toast(format!(
+                                    "Virtual {} controller connected ({})",
+                                    p.kind().label(),
+                                    p.target.backend()
+                                ));
+                                pad = Some(p);
+                                failed = None;
                             }
-                            failed = Some((want, Instant::now(), e));
+                            Err(e) => {
+                                if failed
+                                    .as_ref()
+                                    .map(|f| f.0 != want || f.2 != e)
+                                    .unwrap_or(true)
+                                {
+                                    log::warn!("virtual {}: {e}", want.label());
+                                    engine.warn_toast(e.clone());
+                                }
+                                failed = Some((want, Instant::now(), e));
+                            }
                         }
                     }
+                }
+            }
+        }
+
+        // The parked pad: kept while allowed, its hiding kept current, and
+        // plugged in parked when Xbox buttons need one and none is there.
+        if let Some(p) = parked.clone() {
+            if !park_ok || !p.target.alive() {
+                device.virt.set_parked(None);
+                engine.pads.destroy(engine, &p);
+                parked = None;
+            } else {
+                engine.pads.park(engine, &p, hide_ok);
+            }
+        } else if park_ok
+            && hide_ok
+            && want != VirtualKind::Xbox360
+            && usbip::available()
+            && park_failed.is_none_or(|t| t.elapsed() >= RETRY_AFTER)
+            && profile
+                .mappings
+                .iter()
+                .any(|m| m.enabled && matches!(m.action, Action::Xbox { .. }))
+        {
+            engine.companion.make_way();
+            let mac = device.mac.lock().clone();
+            match engine.pads.create_parked(engine, &mac, device) {
+                Ok(p) => {
+                    device.virt.set_parked(Some(p.target.clone()));
+                    log::info!("virtual Xbox 360 controller plugged in parked, for Xbox buttons");
+                    parked = Some(p);
+                    park_failed = None;
+                }
+                Err(e) => {
+                    if park_failed.is_none() {
+                        log::warn!("parked Xbox controller: {e}");
+                    }
+                    park_failed = Some(Instant::now());
                 }
             }
         }
@@ -471,6 +580,9 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 .as_ref()
                 .filter(|t| t.kind() == VirtualKind::Xbox360)
                 .and_then(|t| t.xinput_slot());
+            st.parked = parked
+                .as_ref()
+                .map(|p| (p.target.xinput_slot(), p.park_hidden()));
         }
 
         // Game feedback arrives on the pad's own threads (callbacks).
@@ -478,9 +590,41 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     }
 
     detach(device);
+    device.virt.set_parked(None);
+    let keep =
+        engine.settings.read().persistent_virtual && !engine.shutdown.load(Ordering::Acquire);
     if let Some(p) = pad {
-        let keep =
-            engine.settings.read().persistent_virtual && !engine.shutdown.load(Ordering::Acquire);
         engine.pads.release(engine, &p, keep);
+    }
+    if let Some(p) = parked {
+        engine.pads.release(engine, &p, keep);
+    }
+}
+
+/// Whether a parked Xbox pad may stay while the profile wants `want`:
+/// beside a DualSense or DualShock 4 pad, and with no virtual pad only
+/// while games can't see it.
+pub(crate) fn park_allowed(keep_xbox: bool, want: VirtualKind, hide_ok: bool) -> bool {
+    keep_xbox
+        && match want {
+            VirtualKind::Xbox360 => false,
+            VirtualKind::DualSense | VirtualKind::DualShock4 => true,
+            VirtualKind::Off => hide_ok,
+        }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parking_rules() {
+        use VirtualKind::*;
+        assert!(!park_allowed(false, DualSense, true));
+        assert!(!park_allowed(true, Xbox360, true));
+        assert!(park_allowed(true, DualSense, false));
+        assert!(park_allowed(true, DualShock4, true));
+        assert!(park_allowed(true, Off, true));
+        assert!(!park_allowed(true, Off, false));
     }
 }

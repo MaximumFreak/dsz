@@ -690,6 +690,14 @@ impl UsbPad {
         self.shared.model
     }
 
+    /// The USB serial number Windows sees (part of its instance id).
+    pub fn serial(&self) -> String {
+        match self.shared.model {
+            Model::DualShock4 => ds4_serial(self.slot),
+            _ => format!("{SERIAL_PREFIX}{}", self.slot),
+        }
+    }
+
     /// XInput user index of a virtual Xbox 360 pad, from the ring LED the
     /// driver lit.
     pub fn xinput_slot(&self) -> Option<u32> {
@@ -748,10 +756,11 @@ impl UsbPad {
     }
 }
 
-impl Drop for UsbPad {
-    fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Release);
-        let port = self.port.load(Ordering::Acquire);
+impl UsbPad {
+    /// Unplug the device from Windows now, even while other handles to
+    /// this pad remain; dropping the last one stops the server.
+    pub fn detach_now(&self) {
+        let port = self.port.swap(0, Ordering::AcqRel);
         if port > 0 {
             if let Some(path) = win::interface_paths(&GUID_VHCI).first() {
                 if let (Ok(h), Ok(mut ov)) = (win::open_overlapped(path), win::Overlapped::new()) {
@@ -764,6 +773,13 @@ impl Drop for UsbPad {
                 }
             }
         }
+    }
+}
+
+impl Drop for UsbPad {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Release);
+        self.detach_now();
         if let Some(c) = self.shared.conn.lock().as_ref() {
             let _ = c.w.shutdown(Shutdown::Both);
         }

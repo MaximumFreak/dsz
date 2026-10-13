@@ -55,6 +55,9 @@ const WANT_EVERY: Duration = Duration::from_millis(500);
 const CHILD_WATCH: Duration = Duration::from_secs(15);
 const CHILD_EVERY_EARLY: Duration = Duration::from_millis(20);
 const CHILD_EVERY_LATE: Duration = Duration::from_secs(5);
+/// After stepping aside for a controller's own Xbox pad, stay out this
+/// long, until that pad holds its XInput slot.
+const REPLUG_AFTER: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub struct Companion {
@@ -66,6 +69,11 @@ pub struct Companion {
     done: AtomicBool,
     /// HidHide can hide the pad (installed, and the app may use it).
     can_hide: AtomicBool,
+    /// The pad is plugged in.
+    plugged: AtomicBool,
+    /// [`Companion::make_way`] asks the thread to unplug, and it answers.
+    yield_asked: AtomicBool,
+    yielded: AtomicBool,
 }
 
 impl Companion {
@@ -89,6 +97,24 @@ impl Companion {
         let t0 = Instant::now();
         while !self.done.load(Ordering::Acquire) && t0.elapsed() < Duration::from_millis(500) {
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Unplug the pad, if it is in, before an Xbox pad of a controller's
+    /// own is plugged in. Windows gives a new pad the lowest free XInput
+    /// slot, so otherwise the helper keeps player 1 and the controller's
+    /// pad becomes player 2. The helper plugs back in after
+    /// [`REPLUG_AFTER`], behind it, for the rest of its linger.
+    pub fn make_way(&self) {
+        if !self.plugged.load(Ordering::Acquire) {
+            return;
+        }
+        self.yielded.store(false, Ordering::Release);
+        self.yield_asked.store(true, Ordering::Release);
+        self.wake.notify_all();
+        let t0 = Instant::now();
+        while !self.yielded.load(Ordering::Acquire) && t0.elapsed() < Duration::from_millis(500) {
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -132,7 +158,7 @@ struct Live {
     hidden: Option<Hidden>,
 }
 
-fn report(buttons: u32) -> [u8; vp::X360_USB_INPUT_LEN] {
+pub(crate) fn report(buttons: u32) -> [u8; vp::X360_USB_INPUT_LEN] {
     let b = Buttons(buttons);
     let p = vp::PadState {
         buttons: b,
@@ -143,14 +169,14 @@ fn report(buttons: u32) -> [u8; vp::X360_USB_INPUT_LEN] {
     vp::x360_usb_input(&vp::xusb_report(&p))
 }
 
-fn usb_id(serial: &str) -> String {
+pub(crate) fn usb_id(serial: &str) -> String {
     format!(r"USB\VID_045E&PID_028E\{serial}")
 }
 
 /// Apps that may see the hidden pad: explorer.exe, which opens Task View
 /// on a Guide hold, and Game Bar while it runs (its folder changes with
 /// each update).
-fn readers() -> Vec<PathBuf> {
+pub(crate) fn readers() -> Vec<PathBuf> {
     let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let mut v = vec![Path::new(&windir).join("explorer.exe")];
     v.extend(
@@ -167,6 +193,7 @@ fn readers() -> Vec<PathBuf> {
 fn wanted(engine: &Engine) -> bool {
     engine.device_list().iter().any(|d| {
         d.virt.active() != Some(VirtualKind::Xbox360)
+            && !d.virt.has_parked()
             && engine
                 .profiles
                 .get_or_first(&engine.profile_name_for(d))
@@ -283,6 +310,7 @@ fn hide_children(engine: &Engine, l: &mut Live) {
 fn unplug(engine: &Engine, live: &mut Option<Live>) {
     let hidden = live.as_ref().is_some_and(|l| l.hidden.is_some());
     *live = None;
+    engine.companion.plugged.store(false, Ordering::Release);
     if hidden {
         if let Err(e) = engine.hider.set(HIDER_KEY, Vec::new()) {
             log::warn!("HidHide, helper Xbox controller: {e}");
@@ -303,9 +331,29 @@ pub fn run(engine: Arc<Engine>) {
     let mut want = false;
     let mut want_checked: Option<Instant> = None;
     let mut last_want = Instant::now();
+    // When the pad stepped aside for a controller's own Xbox pad.
+    let mut yielded_at: Option<Instant> = None;
 
     while !engine.shutdown.load(Ordering::Acquire) {
         let now = Instant::now();
+        if c.yield_asked.swap(false, Ordering::AcqRel) {
+            if live.is_some() {
+                log::info!("helper Xbox controller unplugged, to leave player 1 to the virtual Xbox controller");
+                unplug(&engine, &mut live);
+                early = None;
+                replay = None;
+                yielded_at = Some(now);
+            }
+            c.yielded.store(true, Ordering::Release);
+        }
+        // Out of the way until the new pad holds its slot; then back in
+        // for the rest of its linger. A press still plugs it in at once.
+        let stepping_aside = yielded_at.is_some_and(|t| t.elapsed() < REPLUG_AFTER);
+        let replug = yielded_at.is_some_and(|t| t.elapsed() >= REPLUG_AFTER)
+            && last_want.elapsed() < LINGER;
+        if !stepping_aside {
+            yielded_at = None;
+        }
         let held = c.current();
         if held != 0 {
             last_use = now;
@@ -321,10 +369,15 @@ pub fn run(engine: Arc<Engine>) {
             }
         }
 
-        if (held != 0 || want) && live.is_none() && failed_at.is_none_or(|t| t.elapsed() >= RETRY_AFTER) {
+        let can = c.can_hide.load(Ordering::Relaxed);
+        if (held != 0 || (want && !stepping_aside) || (replug && can))
+            && live.is_none()
+            && failed_at.is_none_or(|t| t.elapsed() >= RETRY_AFTER)
+        {
             match plug(&engine) {
                 Ok(l) => {
                     live = Some(l);
+                    c.plugged.store(true, Ordering::Release);
                     failed_at = None;
                 }
                 Err(e) => {

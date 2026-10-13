@@ -262,6 +262,21 @@ impl App {
                             (None, None) if vo.kind != VirtualKind::Off => muted(ui, "Starting…"),
                             _ => muted(ui, "Games see the physical controller."),
                         }
+                        if let Some((slot, hidden)) = st.parked {
+                            ui.horizontal(|ui| {
+                                pill(ui, "Xbox 360 kept", FAINT);
+                                let player = slot
+                                    .map(|s| format!("XInput player {}", s + 1))
+                                    .unwrap_or_else(|| "its XInput slot".into());
+                                muted(
+                                    ui,
+                                    &format!(
+                                        "idle, holding {player}{}; presses Xbox buttons",
+                                        if hidden { ", hidden from games" } else { "" }
+                                    ),
+                                );
+                            });
+                        }
                         if st.active.is_some() {
                             if st.hidden {
                                 ui.horizontal(|ui| {
@@ -315,6 +330,16 @@ impl App {
                         &mut keep,
                     ) {
                         self.engine.settings.write().persistent_virtual = keep;
+                        self.engine.settings_changed();
+                    }
+                    let mut keep_xbox = self.engine.settings.read().keep_xbox_pad;
+                    if toggle_row(
+                        ui,
+                        "Keep the Xbox 360 controller as player 1",
+                        "While a DualSense or native profile is active it stays plugged in, idle and hidden from games, and presses Xbox buttons. Off: unplugged, with a helper pad for Xbox buttons",
+                        &mut keep_xbox,
+                    ) {
+                        self.engine.settings.write().keep_xbox_pad = keep_xbox;
                         self.engine.settings_changed();
                     }
                     let mut ctl = self.engine.settings.read().hidhide_control;

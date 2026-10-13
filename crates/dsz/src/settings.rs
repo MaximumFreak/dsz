@@ -118,6 +118,11 @@ pub struct Settings {
     /// off, and plug one in when the app starts, so games keep the same pad
     /// (and XInput slot) throughout.
     pub persistent_virtual: bool,
+    /// Keep the virtual Xbox pad plugged in (idle, hidden from games) while
+    /// a DualSense or native profile is active, so it stays XInput player 1
+    /// and presses Xbox buttons. Off: it is unplugged and a helper pad
+    /// plugged in for Xbox buttons.
+    pub keep_xbox_pad: bool,
     /// MAC of the controller connected most recently; picks the profile for
     /// the virtual pad made at startup.
     pub last_controller: String,
@@ -153,6 +158,7 @@ impl Default for Settings {
             dualsense_profile: "DualSense".into(),
             fallback_pad: FallbackPad::Off,
             persistent_virtual: true,
+            keep_xbox_pad: true,
             last_controller: String::new(),
             hide_nodes: BTreeMap::new(),
             helper_nodes: BTreeMap::new(),

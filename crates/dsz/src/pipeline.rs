@@ -1098,8 +1098,8 @@ impl Pipeline {
         }
         let mut inject = 0u32;
         let mut helper = 0u32;
-        // Xbox buttons go to the virtual Xbox pad, or without one to the
-        // helper pad.
+        // Xbox buttons go to the virtual Xbox pad, else to the parked Xbox
+        // pad, else to the helper pad.
         let own_xbox = device.virt.active() == Some(VirtualKind::Xbox360);
         for (m, rt) in profile.mappings.iter().zip(self.maps.iter()) {
             if !m.enabled || !rt.out_down {
@@ -1113,7 +1113,9 @@ impl Pipeline {
             }
         }
         if helper != 0 || self.helper_sent != 0 {
-            engine.companion.set(device.id, helper);
+            if !device.virt.submit_parked(helper) {
+                engine.companion.set(device.id, helper);
+            }
             self.helper_sent = helper;
         }
         (suppress, inject)
