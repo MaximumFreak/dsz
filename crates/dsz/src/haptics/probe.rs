@@ -183,7 +183,7 @@ pub fn speaker(secs: u64) -> String {
                         }
                         enc.encode(&pcm, slot);
                     }
-                    let r = stream::build_audio(&mut counters, &opus, &haptics, &mut buf);
+                    let r = stream::build_audio(&mut counters, &opus, &haptics, false, &mut buf);
                     if w.write(r, 50).is_err() {
                         errors += 1;
                     }
@@ -446,7 +446,7 @@ pub fn speaker_ab(only: Option<usize>, secs: u64, mic_off_at: Option<Duration>) 
                     }
                     enc.encode(&pcm, slot);
                 }
-                let r = stream::build_audio(&mut counters, &opus, &haptics, &mut buf);
+                let r = stream::build_audio(&mut counters, &opus, &haptics, false, &mut buf);
                 let t0 = Instant::now();
                 if w.write(r, 100).is_err() {
                     errors += 1;

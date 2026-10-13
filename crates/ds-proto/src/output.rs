@@ -35,9 +35,10 @@ pub struct OutputState {
 }
 
 /// Where the controller plays its audio stream. The fields are Linux
-/// `hid-playstation`'s: speaker volume (flag0 bit 5), audio control (flag0
-/// bit 7) with the output path in bits 5:4, and audio control 2 (flag1
-/// bit 7) with the speaker preamp gain in bits 2:0.
+/// `hid-playstation`'s: headphone volume (flag0 bit 4), speaker volume
+/// (flag0 bit 5), audio control (flag0 bit 7) with the output path in bits
+/// 5:4, and audio control 2 (flag1 bit 7) with the speaker preamp gain in
+/// bits 2:0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AudioRoute {
     /// Audio fields not marked valid: the controller keeps what it has.
@@ -46,8 +47,13 @@ pub enum AudioRoute {
     /// Path 3: the right channel to the speaker, the headset muted.
     /// Volume is clamped to 0x3D..=0x64, the range Linux found accepted.
     Speaker { volume: u8 },
-    /// Path 0: left and right to the headset jack, the speaker muted.
-    Headset,
+    /// The headset jack. Tested on an Edge over Bluetooth with a speaker
+    /// stream running: the path is ignored, with or without input path
+    /// `0x40` (the stream's Opus packet type picks the sink, see
+    /// `stream::build_audio`), so the speaker is silenced by volume 0 and
+    /// the headphones get their own volume, which is 0 after power-on. Path
+    /// 0 is still sent, as Linux does over USB.
+    Headset { volume: u8 },
     /// Path 0 with nothing streaming: the speaker is silent.
     Muted,
 }
@@ -55,6 +61,8 @@ pub enum AudioRoute {
 /// Lowest and highest speaker volume (Linux `hid-playstation`).
 pub const SPEAKER_VOLUME_MIN: u8 = 0x3D;
 pub const SPEAKER_VOLUME_MAX: u8 = 0x64;
+/// Highest headphone volume, the value in the PS5's speaker-stream config.
+pub const HEADSET_VOLUME_MAX: u8 = 0x7F;
 
 impl Default for OutputState {
     fn default() -> Self {
@@ -101,7 +109,13 @@ impl OutputState {
                 // Speaker preamp +6 dB, as Linux sets it.
                 b[37] = 0x02;
             }
-            AudioRoute::Headset | AudioRoute::Muted => {
+            AudioRoute::Headset { volume } => {
+                flag0 |= 0x10 | 0x20 | 0x80;
+                b[4] = volume.min(HEADSET_VOLUME_MAX);
+                b[5] = 0;
+                b[7] = 0;
+            }
+            AudioRoute::Muted => {
                 flag0 |= 0x80;
                 b[7] = 0;
             }
@@ -233,11 +247,13 @@ mod tests {
         assert_eq!(r[2 + 37], 0x02);
         assert!(crc::verify(crc::PREFIX_OUTPUT, &r));
         let s = OutputState {
-            audio: AudioRoute::Headset,
+            audio: AudioRoute::Headset { volume: 0xFF },
             ..Default::default()
         };
         let r = s.build(Connection::Bluetooth, &mut a).to_vec();
-        assert_eq!(r[2] & 0xA0, 0x80);
+        assert_eq!(r[2] & 0xB0, 0xB0);
+        assert_eq!(r[2 + 4], HEADSET_VOLUME_MAX);
+        assert_eq!(r[2 + 5], 0, "speaker silenced by volume");
         assert_eq!(r[2 + 7], 0x00);
     }
 

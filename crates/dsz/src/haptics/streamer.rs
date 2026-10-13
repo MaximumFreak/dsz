@@ -87,6 +87,11 @@ fn volume_byte(v: u8) -> u8 {
     SPEAKER_VOLUME_MIN + ((v.clamp(1, 100) as u32 - 1) * span / 99) as u8
 }
 
+/// Headphone volume byte for a 0..=100 profile volume.
+fn headset_volume_byte(v: u8) -> u8 {
+    (v.min(100) as u32 * ds_proto::output::HEADSET_VOLUME_MAX as u32 / 100) as u8
+}
+
 fn to_i16(x: f32) -> i16 {
     (soft_clip(x) * 32767.0).round() as i16
 }
@@ -174,6 +179,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let route_now = device.speaker_route.load(Ordering::Acquire);
         if speaker_allowed || (speaker_possible && route_now > SPEAKER_MUTED) {
             let headset = h.headset_when_plugged && device.live.lock().input.headphones;
+            let hv = headset_volume_byte(h.speaker_volume);
+            if device.headset_volume.swap(hv, Ordering::AcqRel) != hv && headset {
+                device.kick();
+            }
             set_route(if headset {
                 SPEAKER_HEADSET
             } else {
@@ -283,7 +292,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 for slot in opus.iter_mut() {
                     enc.encode(&silent, slot);
                 }
-                let len = stream::build_audio(&mut counters, &opus, &[[0u8; HAPTIC_FRAME]; BLOCKS], &mut buf).len();
+                let headset = device.speaker_route.load(Ordering::Acquire) == SPEAKER_HEADSET;
+                let len =
+                    stream::build_audio(&mut counters, &opus, &[[0u8; HAPTIC_FRAME]; BLOCKS], headset, &mut buf)
+                        .len();
                 let mut pkt = StreamPacket {
                     len,
                     data: [0u8; MAX_REPORT],
@@ -500,7 +512,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                     }
                 }
             }
-            stream::build_audio(&mut counters, &opus, &frames, &mut buf).len()
+            stream::build_audio(&mut counters, &opus, &frames, headset, &mut buf).len()
         } else {
             stream::build(&mut counters, &frames[0], &mut buf).len()
         };

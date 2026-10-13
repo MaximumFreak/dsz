@@ -69,6 +69,13 @@ const AUDIO_CONFIG: [u8; 7] = [0x91, 0x06, 0x7F, 0x51, 0x1F, 0x62, 0x28];
 const AUDIO_COUNTER_AT: usize = 9;
 const OPUS_AT: usize = 10;
 const AUDIO_HAPTICS_AT: usize = OPUS_AT + 2 + BLOCKS * OPUS_FRAME;
+/// Opus packet types: the console's speaker audio, and headphone audio
+/// (godot-dualsense-native uses `0x16` for headphones). Tested on an Edge
+/// over Bluetooth: with `0x15` the jack plays the left channel on both
+/// sides and the speaker the right one, whatever the output report's path;
+/// `0x16` plays stereo on the jack; `0x13` left the jack silent.
+const OPUS_SPEAKER: u8 = 0x15;
+const OPUS_HEADSET: u8 = 0x16;
 
 /// Sequence and packet counters for one controller's haptics stream.
 #[derive(Clone, Copy, Debug, Default)]
@@ -108,11 +115,13 @@ pub fn build<'a>(
 
 /// Build one speaker report (two Opus frames, two haptic blocks) into `out`
 /// (at least `AUDIO_REPORT_LEN` bytes) and return it. Advances the
-/// counters: the sequence by one, the frame counter by two.
+/// counters: the sequence by one, the frame counter by two. `headset`
+/// sends the audio to the headset jack in stereo instead of the speaker.
 pub fn build_audio<'a>(
     counters: &mut StreamCounters,
     opus: &[[u8; OPUS_FRAME]; BLOCKS],
     haptics: &[[u8; HAPTIC_FRAME]; BLOCKS],
+    headset: bool,
     out: &'a mut [u8],
 ) -> &'a [u8] {
     let r = &mut out[..AUDIO_REPORT_LEN];
@@ -121,7 +130,7 @@ pub fn build_audio<'a>(
     r[1] = counters.seq << 4;
     r[2..AUDIO_COUNTER_AT].copy_from_slice(&AUDIO_CONFIG);
     r[AUDIO_COUNTER_AT] = counters.counter;
-    r[OPUS_AT] = 0x80 | 0x40 | 0x15;
+    r[OPUS_AT] = 0x80 | 0x40 | if headset { OPUS_HEADSET } else { OPUS_SPEAKER };
     r[OPUS_AT + 1] = OPUS_FRAME as u8;
     for (k, f) in opus.iter().enumerate() {
         let at = OPUS_AT + 2 + k * OPUS_FRAME;
@@ -225,7 +234,7 @@ mod tests {
         let h = pattern();
         let mut buf = [0u8; MAX_REPORT];
         let mut c = StreamCounters::new();
-        let r = build_audio(&mut c, &opus, &[h, h], &mut buf).to_vec();
+        let r = build_audio(&mut c, &opus, &[h, h], false, &mut buf).to_vec();
         assert_eq!(r.len(), 547);
         assert_eq!(&r[..10], &[0x39, 0x00, 0x91, 0x06, 0x7F, 0x51, 0x1F, 0x62, 0x28, 0x00]);
         assert_eq!(&r[10..12], &[0xD5, 0xC8]);
@@ -240,6 +249,11 @@ mod tests {
         // Same packet shape as the console capture: 540 bytes of packets
         // after the sequence byte, then one zero.
         assert_eq!(2 + 6 + 2 + 400 + 2 + 128, 540);
+
+        let mut c = StreamCounters::new();
+        let r = build_audio(&mut c, &opus, &[h, h], true, &mut buf);
+        assert_eq!(&r[10..12], &[0xD6, 0xC8], "headset audio type");
+        assert!(crc::verify(crc::PREFIX_OUTPUT, r));
     }
 
     #[test]
@@ -249,7 +263,7 @@ mod tests {
         let opus = [[0u8; OPUS_FRAME]; BLOCKS];
         let h = [0u8; HAPTIC_FRAME];
         for k in 0..20u8 {
-            let r = build_audio(&mut c, &opus, &[h, h], &mut buf);
+            let r = build_audio(&mut c, &opus, &[h, h], false, &mut buf);
             assert_eq!(r[1], (k & 0x0F) << 4);
             assert_eq!(r[9], k.wrapping_mul(2));
         }

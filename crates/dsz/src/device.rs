@@ -28,13 +28,14 @@ pub const SPEAKER_UNTOUCHED: u8 = 0;
 pub const SPEAKER_MUTED: u8 = 1;
 pub const SPEAKER_HEADSET: u8 = 2;
 
-/// The output-report audio route for a `speaker_route` value.
-pub fn audio_route(v: u8) -> ds_proto::AudioRoute {
+/// The output-report audio route for a `speaker_route` value and the
+/// headphone volume byte.
+pub fn audio_route(v: u8, headset_volume: u8) -> ds_proto::AudioRoute {
     use ds_proto::AudioRoute;
     match v {
         SPEAKER_UNTOUCHED => AudioRoute::Untouched,
         SPEAKER_MUTED => AudioRoute::Muted,
-        SPEAKER_HEADSET => AudioRoute::Headset,
+        SPEAKER_HEADSET => AudioRoute::Headset { volume: headset_volume },
         volume => AudioRoute::Speaker { volume },
     }
 }
@@ -221,6 +222,8 @@ pub struct Device {
     /// `SPEAKER_UNTOUCHED`, `SPEAKER_MUTED`, `SPEAKER_HEADSET`, or the
     /// speaker volume byte.
     pub speaker_route: AtomicU8,
+    /// Headphone volume byte for `SPEAKER_HEADSET`.
+    pub headset_volume: AtomicU8,
     pub calibrate_request: AtomicBool,
     /// Calibration feature report (`0x05`) read at connect.
     /// Feature reports a virtual DualSense driven by this controller answers with.
@@ -554,6 +557,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         haptic_level: [AtomicU8::new(0), AtomicU8::new(0)],
         speaker_level: AtomicU8::new(0),
         speaker_route: AtomicU8::new(SPEAKER_UNTOUCHED),
+        headset_volume: AtomicU8::new(0),
         mic_tap: Mutex::new(None),
         speaker_lead: AtomicU8::new(crate::haptics::streamer::SPEAKER_LEAD as u8),
         speaker_test_result: Mutex::new(None),
@@ -1004,7 +1008,10 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             )
         };
         if device.is_bluetooth() && !device.model.is_dualshock4() {
-            state.audio = audio_route(device.speaker_route.load(Ordering::Acquire));
+            state.audio = audio_route(
+                device.speaker_route.load(Ordering::Acquire),
+                device.headset_volume.load(Ordering::Acquire),
+            );
         }
         let keepalive =
             now.duration_since(last_write) > Duration::from_millis(if pcm { 1000 } else { 500 });
@@ -1043,6 +1050,18 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             writes_since = 0;
             stream_since = 0;
             last_rate = now;
+        }
+    }
+
+    // Stop the microphone stream a speaker stream started, before anything
+    // unhides the controller: other readers (Steam) take its microphone
+    // packets for input. The haptics thread's own mic-off goes through the
+    // stream channel, which nothing reads once this loop has ended.
+    if device.is_bluetooth() && !device.model.is_dualshock4() {
+        let mut counters = ds_proto::stream::StreamCounters::new();
+        for _ in 0..2 {
+            let report = ds_proto::stream::build_mic_off(&mut counters, &mut buf).to_vec();
+            let _ = writer.write(&report, 100);
         }
     }
 
@@ -1102,6 +1121,7 @@ impl Device {
             haptic_level: [AtomicU8::new(0), AtomicU8::new(0)],
             speaker_level: AtomicU8::new(0),
             speaker_route: AtomicU8::new(SPEAKER_UNTOUCHED),
+            headset_volume: AtomicU8::new(0),
             mic_tap: Mutex::new(None),
             speaker_lead: AtomicU8::new(0),
             speaker_test_result: Mutex::new(None),
