@@ -8,14 +8,20 @@
 //!   and API names in the exe (`libScePad`, `scePadSetTriggerEffect`, ...);
 //! - Wwise's DualSense haptics sink (`AkScePad...`, as in Alan Wake 2);
 //! - the DualSenseWindows library (`ds5w`);
-//! - DualSense controller names that engines use for their haptics path.
+//! - DualSense controller names that engines use for their haptics path;
+//! - a DirectInput mapping for the DualSense or Edge (its product id,
+//!   `0CE6054C-0000-0000-0000...`, as in Final Fantasy XIV);
+//! - a wide-string (UTF-16) "DualSense" together with `hid.dll`: the game
+//!   names the pad in its own UI or device list and talks to it over HID
+//!   (Animal Well, and Unreal's WinDualShock plugin).
 //!
 //! "DualSense Wireless Controller" is not a marker: SDL carries that name
 //! in its controller list, so it is in nearly every SDL game, and those
 //! games only rumble.
 //!
 //! Results are cached by path, size, and modification time in
-//! `dualsense-detect.json`, so each exe is read once.
+//! `dualsense-detect.json`, so each exe is read once. A cached "no" from an
+//! older scan ([`SCAN_VERSION`]) is checked again.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -35,7 +41,17 @@ const MARKERS: &[&str] = &[
     "ds5w_",
     "DualSenseWindows",
     "DualSense Controller",
+    // DirectInput product GUIDs (PID then VID) that a game maps buttons for.
+    "0CE6054C-0000-0000-0000",
+    "0DF2054C-0000-0000-0000",
 ];
+
+/// Bumped when the scan learns new signs, so programs it said no to are
+/// read again.
+const SCAN_VERSION: u32 = 2;
+
+/// Reported for a UTF-16 "DualSense" next to `hid.dll`.
+const WIDE_WITH_HID: &str = "DualSense (UTF-16) with hid.dll";
 
 /// Library files beside the exe (lower case prefixes).
 const LIBRARIES: &[&str] = &["libscepad", "scepad", "ds5w"];
@@ -55,6 +71,9 @@ pub struct Entry {
     pub modified: u64,
     /// What was found, when the program supports DualSense.
     pub found: Option<String>,
+    /// [`SCAN_VERSION`] of the scan that found it (0 before versions).
+    #[serde(default)]
+    pub version: u32,
 }
 
 pub struct Detector {
@@ -92,7 +111,10 @@ impl Detector {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         if let Some(e) = self.cache.lock().get(&key) {
-            if e.size == size && e.modified == modified {
+            if e.size == size
+                && e.modified == modified
+                && (e.found.is_some() || e.version >= SCAN_VERSION)
+            {
                 return e.found.clone();
             }
         }
@@ -111,6 +133,7 @@ impl Detector {
                 size,
                 modified,
                 found: found.clone(),
+                version: SCAN_VERSION,
             },
         );
         if let Ok(t) = serde_json::to_string_pretty(&*c) {
@@ -154,28 +177,43 @@ pub fn scan(exe: &Path) -> Option<String> {
     find_marker(f).map(|m| format!("\"{m}\" in the exe"))
 }
 
-/// Stream `r` once and return the first marker found.
+/// Stream `r` once and return the first marker found, or
+/// [`WIDE_WITH_HID`] when both halves of that pair turned up.
 fn find_marker(mut r: impl Read) -> Option<&'static str> {
-    let longest = MARKERS.iter().map(|m| m.len()).max().unwrap_or(1);
+    const WIDE: &[u8] = b"D\0u\0a\0l\0S\0e\0n\0s\0e\0";
+    const HID: &[u8] = b"hid.dll";
+    let (mut wide, mut hid) = (false, false);
+    let longest = MARKERS
+        .iter()
+        .map(|m| m.len())
+        .chain([WIDE.len(), HID.len()])
+        .max()
+        .unwrap_or(1);
     let mut buf = vec![0u8; (8 << 20) + longest];
     let mut keep = 0usize;
     loop {
         let n = r.read(&mut buf[keep..]).ok()?;
         if n == 0 {
-            return None;
+            return (wide && hid).then_some(WIDE_WITH_HID);
         }
         let data = &buf[..keep + n];
         // Every marker starts with one of a few letters; jump between those.
         let mut i = 0;
         while i < data.len() {
             match data[i] {
-                b'l' | b's' | b'A' | b'd' | b'D' => {
+                b'l' | b's' | b'A' | b'd' | b'D' | b'0' => {
                     for m in MARKERS {
                         let mb = m.as_bytes();
                         if data[i..].starts_with(mb) {
                             return Some(m);
                         }
                     }
+                    wide |= data[i..].starts_with(WIDE);
+                }
+                b'h' | b'H' => {
+                    hid |= data[i..]
+                        .get(..HID.len())
+                        .is_some_and(|w| w.eq_ignore_ascii_case(HID));
                 }
                 _ => {}
             }
@@ -204,6 +242,31 @@ mod tests {
         );
         // SDL's controller name list alone is not DualSense support.
         assert_eq!(find_marker(&b"..DualSense Wireless Controller.."[..]), None);
+        assert_eq!(
+            find_marker(&b"..DualSense Wireless Controller..HID.DLL.."[..]),
+            None
+        );
+    }
+
+    #[test]
+    fn finds_directinput_and_hid_games() {
+        // Final Fantasy XIV's button tables.
+        assert_eq!(
+            find_marker(&b"..{0CE6054C-0000-0000-0000504944564944}.."[..]),
+            Some("0CE6054C-0000-0000-0000")
+        );
+        // Animal Well: the name in UTF-16 and HID imports, far apart.
+        let wide: Vec<u8> = "PS DualSense - Native"
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let mut v = wide.clone();
+        v.extend(vec![0u8; 9 << 20]);
+        v.extend_from_slice(b"HID.DLL\0HidD_GetAttributes");
+        assert_eq!(find_marker(&v[..]), Some(WIDE_WITH_HID));
+        // Either half alone is not enough.
+        assert_eq!(find_marker(&wide[..]), None);
+        assert_eq!(find_marker(&b"..hid.dll..HidD_GetAttributes.."[..]), None);
     }
 
     #[test]
