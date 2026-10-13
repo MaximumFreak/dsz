@@ -494,6 +494,9 @@ pub enum Action {
     Xbox {
         button: XboxPadButton,
     },
+    /// Drop the Bluetooth link, which powers the controller off. A controller
+    /// plugged in over USB stays on.
+    TurnOffController,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1135,7 +1138,10 @@ mod tests {
         assert_eq!(set[0].touchpad.mode, TouchMode::Mouse);
         assert_eq!(set[1].virtual_out.kind, VirtualKind::DualSense);
         assert!(set[1].mappings.iter().any(|m| m.button == Button::Ps
-            && m.action == Action::Xbox { button: XboxPadButton::Guide }));
+            && m.action
+                == Action::Xbox {
+                    button: XboxPadButton::Guide
+                }));
         // The files hold only what differs from the defaults; the rest is
         // filled in from them.
         for p in &set {
@@ -1164,5 +1170,28 @@ mod tests {
     fn file_names() {
         assert_eq!(sanitize_file_name("a/b:c. "), "a_b_c");
         assert_eq!(sanitize_file_name("..."), "profile");
+    }
+
+    #[test]
+    fn turn_off_action_round_trips() {
+        let m = Mapping {
+            button: Button::Ps,
+            with: vec![Button::L1, Button::R1],
+            gesture: Gesture::LongPress,
+            action: Action::TurnOffController,
+            ..Mapping::default()
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"kind\":\"turn_off_controller\""));
+        let back: Mapping = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, m);
+        assert!(back.is_combo());
+        // A profile file that only sets the action still loads it.
+        let p: Profile = serde_json::from_str(
+            r#"{"name":"off","mappings":[{"action":{"kind":"turn_off_controller"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.mappings[0].action, Action::TurnOffController);
+        assert_eq!(p.mappings[0].button, Button::Cross);
     }
 }

@@ -25,6 +25,7 @@ enum AKind {
     Profile,
     Gamepad,
     Xbox,
+    TurnOff,
 }
 
 fn akind(a: &Action) -> AKind {
@@ -43,10 +44,11 @@ fn akind(a: &Action) -> AKind {
         Action::Profile { .. } => AKind::Profile,
         Action::Gamepad { .. } => AKind::Gamepad,
         Action::Xbox { .. } => AKind::Xbox,
+        Action::TurnOffController => AKind::TurnOff,
     }
 }
 
-const KINDS: [(AKind, &str); 14] = [
+const KINDS: [(AKind, &str); 15] = [
     (AKind::None, "Nothing"),
     (AKind::Gamepad, "PlayStation button"),
     (AKind::Xbox, "Xbox button"),
@@ -61,6 +63,7 @@ const KINDS: [(AKind, &str); 14] = [
     (AKind::Touch, "Toggle touchpad mouse"),
     (AKind::Run, "Open a program / file"),
     (AKind::Profile, "Switch to profile"),
+    (AKind::TurnOff, "Turn off controller"),
 ];
 
 fn mouse_label(b: MouseButton) -> &'static str {
@@ -83,7 +86,7 @@ impl App {
         page_header(
             ui,
             "Button mapping",
-            "Send keys, mouse buttons, media keys, or app actions from any button or combo. With a virtual controller on, a mapping can also hide its button from the game or press a different controller button. Xbox buttons work on any profile, so the Xbox button can open Game Bar (tap) or Task View (hold).",
+            "Send keys, mouse buttons, media keys, or app actions from any button or combo, including turning a Bluetooth controller off. With a virtual controller on, a mapping can also hide its button from the game or press a different controller button. Xbox buttons work on any profile, so the Xbox button can open Game Bar (tap) or Task View (hold).",
         );
         let edge = self
             .engine
@@ -219,6 +222,7 @@ impl App {
                                 AKind::Gyro => Action::ToggleGyroMouse,
                                 AKind::Touch => Action::ToggleTouchpadMouse,
                                 AKind::Run => Action::Run { path: String::new() },
+                                AKind::TurnOff => Action::TurnOffController,
                                 AKind::Profile => Action::Profile {
                                     name: profile_names.iter().find(|n| **n != p_name).cloned().unwrap_or_default(),
                                 },
@@ -327,6 +331,10 @@ impl App {
                                         *path = f.display().to_string();
                                     }
                                 }
+                            }
+                            Action::TurnOffController => {
+                                ui.label(RichText::new("powers off over Bluetooth").size(12.0).color(MUTED))
+                                    .on_hover_text("Drops the Bluetooth link, which turns the controller off. Plugged in over USB, it stays on.");
                             }
                             _ => {}
                         }

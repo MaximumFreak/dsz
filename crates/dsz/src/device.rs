@@ -828,15 +828,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         let mut state = {
             let mut fb = device.feedback.lock();
             fb.prune(now);
-            composer.compose(
-                &profile,
-                &input,
-                &overrides,
-                &fb,
-                &toggles,
-                pcm,
-                now,
-            )
+            composer.compose(&profile, &input, &overrides, &fb, &toggles, pcm, now)
         };
         if device.is_bluetooth() {
             state.audio = audio_route(device.speaker_route.load(Ordering::Acquire));
@@ -888,4 +880,63 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     };
     let report = calm.build(device.conn, &mut buf).to_vec();
     let _ = writer.write(&report, 100);
+}
+
+#[cfg(test)]
+impl Device {
+    /// A controller with no HID handle, for mapping tests.
+    pub(crate) fn for_test(conn: Connection, mac: &str) -> Arc<Self> {
+        let (stream_tx, stream_rx) = bounded::<StreamPacket>(1);
+        let (kick_tx, kick_rx) = bounded::<()>(1);
+        let (haptics_wake_tx, haptics_wake) = bounded::<()>(1);
+        Arc::new(Device {
+            id: 1,
+            info: DeviceInfo {
+                path: String::new(),
+                vid: ds_proto::SONY_VID,
+                pid: ds_proto::DUALSENSE_PID,
+                input_len: if conn == Connection::Bluetooth {
+                    ds_proto::BT_INPUT_LEN
+                } else {
+                    64
+                },
+                output_len: ds_proto::USB_OUTPUT_LEN,
+                feature_len: 64,
+                usage_page: 0x01,
+                usage: 0x05,
+                serial: mac.to_string(),
+                product: "DualSense".into(),
+            },
+            model: Model::DualSense,
+            conn,
+            mac: Mutex::new(mac.to_string()),
+            firmware: Mutex::new(String::new()),
+            live: Mutex::new(Live::default()),
+            stats: Stats::default(),
+            link: Mutex::new(Link::Live),
+            overrides: Mutex::new(Overrides::default()),
+            feedback: Mutex::new(Feedback::default()),
+            toggles: Mutex::new(Toggles::default()),
+            stream_tx,
+            stream_rx,
+            kick_tx,
+            kick_rx,
+            haptics_wake_tx,
+            haptics_wake,
+            pcm_mode: AtomicBool::new(false),
+            haptic_level: [AtomicU8::new(0), AtomicU8::new(0)],
+            speaker_level: AtomicU8::new(0),
+            speaker_route: AtomicU8::new(SPEAKER_UNTOUCHED),
+            mic_tap: Mutex::new(None),
+            speaker_lead: AtomicU8::new(0),
+            speaker_test_result: Mutex::new(None),
+            calibrate_request: AtomicBool::new(false),
+            mirror: Mutex::new(Mirror::default()),
+            virt: Default::default(),
+            game_audio: Mutex::new(None),
+            force_output: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            dead: AtomicBool::new(false),
+        })
+    }
 }

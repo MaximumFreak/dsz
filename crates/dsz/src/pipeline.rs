@@ -373,9 +373,8 @@ impl Touch {
                 let d = (dx * dx + dy * dy).sqrt();
                 self.travel += d;
                 if settled {
-                    let gain = t.sensitivity
-                        * TOUCH_GAIN
-                        * (1.0 + t.acceleration * (d / 25.0).min(1.5));
+                    let gain =
+                        t.sensitivity * TOUCH_GAIN * (1.0 + t.acceleration * (d / 25.0).min(1.5));
                     let px = [dx * gain, dy * gain];
                     match self.held.as_mut() {
                         Some(h) => {
@@ -589,6 +588,7 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
         }
         // Read from the mapping state when the pad is built.
         Action::Gamepad { .. } | Action::Xbox { .. } => {}
+        Action::TurnOffController => turn_off_controller(engine, device),
         Action::Run { path } => {
             if !path.trim().is_empty() {
                 let p = path.trim().to_string();
@@ -630,6 +630,41 @@ fn action_up(a: &Action) {
         _ => {}
     }
 }
+
+/// Power the controller off by dropping its Bluetooth link. The mapping
+/// fires this once per gesture, the same way a profile switch fires once.
+fn turn_off_controller(engine: &Engine, device: &Device) {
+    if !device.is_bluetooth() {
+        engine.warn_toast("Turn off works over Bluetooth");
+        return;
+    }
+    let mac = device.mac.lock().clone();
+    if crate::platform::bluetooth_address(&mac).is_none() {
+        engine.warn_toast("No Bluetooth address, so the controller stays on");
+        return;
+    }
+    log::info!("turning the controller off");
+    engine.toast("Turning the controller off");
+    // The radio call can take a moment. The input thread keeps reading.
+    disconnect_bluetooth(mac);
+}
+
+fn disconnect_bluetooth(mac: String) {
+    // Tests record the address. A real one would talk to the Bluetooth radio.
+    #[cfg(test)]
+    {
+        TURN_OFFS.lock().push(mac);
+    }
+    #[cfg(not(test))]
+    {
+        std::thread::spawn(move || {
+            crate::platform::bt_disconnect(&mac);
+        });
+    }
+}
+
+#[cfg(test)]
+static TURN_OFFS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
 
 // ------------------------------------------------------------------ pipeline
 
@@ -1088,5 +1123,236 @@ fn virtual_pad(
         ry,
         l2,
         r2,
+    }
+}
+
+#[cfg(test)]
+mod turn_off_tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use ds_proto::input::Button;
+    use ds_proto::{Connection, InputState};
+
+    use super::{Pipeline, TURN_OFFS};
+    use crate::device::Device;
+    use crate::engine::Engine;
+    use crate::profile::{
+        Action, Gesture, GyroMode, Mapping, Profile, StickMode, TouchMode, VirtualKind,
+    };
+
+    fn gate() -> parking_lot::MutexGuard<'static, ()> {
+        static GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        GATE.lock()
+    }
+
+    fn take_offs() -> Vec<String> {
+        std::mem::take(&mut *TURN_OFFS.lock())
+    }
+
+    struct Rig {
+        dir: PathBuf,
+        engine: Arc<Engine>,
+        device: Arc<Device>,
+        pipe: Pipeline,
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn rig(conn: Connection, mac: &str, mappings: Vec<Mapping>) -> Rig {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("dsz-turn-off-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::new(dir.clone());
+        let device = Device::for_test(conn, mac);
+        let mut profile = Profile::named("Turn off");
+        profile.mappings = mappings;
+        profile.gyro.mode = GyroMode::Off;
+        profile.touchpad.mode = TouchMode::Passthrough;
+        profile.sticks.left.mode = StickMode::Passthrough;
+        profile.sticks.right.mode = StickMode::Passthrough;
+        profile.virtual_out.kind = VirtualKind::Off;
+        profile.haptics.buttons.enabled = false;
+        let name = engine.profiles.add(profile);
+        engine.set_device_profile(&device, &name);
+        Rig {
+            dir,
+            engine,
+            device,
+            pipe: Pipeline::new(),
+        }
+    }
+
+    fn centered(buttons: &[Button]) -> InputState {
+        let mut s = InputState {
+            lx: 128,
+            ly: 128,
+            rx: 128,
+            ry: 128,
+            ..InputState::default()
+        };
+        for b in buttons {
+            s.buttons.set(*b, true);
+        }
+        s
+    }
+
+    fn step(rig: &mut Rig, prev: &InputState, now_s: &InputState, at: Instant) {
+        rig.pipe
+            .process(&rig.engine, &rig.device, now_s, prev, None, at);
+    }
+
+    fn off(button: Button) -> Mapping {
+        Mapping {
+            button,
+            action: Action::TurnOffController,
+            ..Mapping::default()
+        }
+    }
+
+    #[test]
+    fn fires_once_per_press_on_any_button() {
+        let _g = gate();
+        let _ = take_offs();
+        let mut rig = rig(
+            Connection::Bluetooth,
+            "AA:BB:CC:DD:EE:FF",
+            vec![off(Button::Options)],
+        );
+        let up = centered(&[]);
+        let other = centered(&[Button::Cross]);
+        let down = centered(&[Button::Options]);
+        let t = Instant::now();
+        step(&mut rig, &up, &other, t);
+        assert!(take_offs().is_empty());
+        step(&mut rig, &up, &down, t + Duration::from_millis(10));
+        assert_eq!(take_offs(), vec!["AA:BB:CC:DD:EE:FF".to_string()]);
+        // Held: still one request. Release, then a second press, asks again.
+        step(&mut rig, &down, &down, t + Duration::from_millis(40));
+        assert!(take_offs().is_empty());
+        step(&mut rig, &down, &up, t + Duration::from_millis(80));
+        step(&mut rig, &up, &down, t + Duration::from_millis(120));
+        assert_eq!(take_offs(), vec!["AA:BB:CC:DD:EE:FF".to_string()]);
+        let toasts: Vec<_> = rig
+            .engine
+            .toasts
+            .lock()
+            .iter()
+            .map(|toast| (toast.warn, toast.text.clone()))
+            .collect();
+        assert_eq!(
+            toasts
+                .iter()
+                .filter(|(_, text)| text == "Turning the controller off")
+                .count(),
+            2
+        );
+        assert!(toasts.iter().all(|(warn, _)| !*warn));
+    }
+
+    #[test]
+    fn combo_waits_for_every_button() {
+        let _g = gate();
+        let _ = take_offs();
+        let mut rig = rig(
+            Connection::Bluetooth,
+            "11:22:33:44:55:66",
+            vec![Mapping {
+                button: Button::Square,
+                with: vec![Button::Create],
+                action: Action::TurnOffController,
+                ..Mapping::default()
+            }],
+        );
+        let up = centered(&[]);
+        let solo = centered(&[Button::Square]);
+        let combo = centered(&[Button::Create, Button::Square]);
+        let t = Instant::now();
+        step(&mut rig, &up, &solo, t);
+        assert!(take_offs().is_empty());
+        step(&mut rig, &solo, &combo, t + Duration::from_millis(10));
+        assert_eq!(take_offs(), vec!["11:22:33:44:55:66".to_string()]);
+    }
+
+    #[test]
+    fn long_press_waits_out_the_hold() {
+        let _g = gate();
+        let _ = take_offs();
+        let mut rig = rig(
+            Connection::Bluetooth,
+            "AA:BB:CC:DD:EE:01",
+            vec![Mapping {
+                button: Button::Ps,
+                gesture: Gesture::LongPress,
+                long_ms: 400,
+                action: Action::TurnOffController,
+                ..Mapping::default()
+            }],
+        );
+        let up = centered(&[]);
+        let down = centered(&[Button::Ps]);
+        let t = Instant::now();
+        step(&mut rig, &up, &down, t);
+        step(&mut rig, &down, &down, t + Duration::from_millis(399));
+        assert!(take_offs().is_empty());
+        step(&mut rig, &down, &down, t + Duration::from_millis(400));
+        assert_eq!(take_offs(), vec!["AA:BB:CC:DD:EE:01".to_string()]);
+        step(&mut rig, &down, &down, t + Duration::from_millis(800));
+        assert!(take_offs().is_empty());
+    }
+
+    #[test]
+    fn disabled_mapping_does_not_fire() {
+        let _g = gate();
+        let _ = take_offs();
+        let mut rig = rig(
+            Connection::Bluetooth,
+            "AA:BB:CC:DD:EE:02",
+            vec![Mapping {
+                enabled: false,
+                ..off(Button::Cross)
+            }],
+        );
+        let up = centered(&[]);
+        let down = centered(&[Button::Cross]);
+        step(&mut rig, &up, &down, Instant::now());
+        assert!(take_offs().is_empty());
+        assert!(rig.engine.toasts.lock().is_empty());
+    }
+
+    #[test]
+    fn usb_and_a_missing_address_do_not_disconnect() {
+        let _g = gate();
+        let _ = take_offs();
+        let mut usb = rig(
+            Connection::Usb,
+            "AA:BB:CC:DD:EE:FF",
+            vec![off(Button::Mute)],
+        );
+        let up = centered(&[]);
+        let down = centered(&[Button::Mute]);
+        let t = Instant::now();
+        step(&mut usb, &up, &down, t);
+        assert!(take_offs().is_empty());
+        assert!(usb
+            .engine
+            .toasts
+            .lock()
+            .iter()
+            .any(|toast| { toast.warn && toast.text == "Turn off works over Bluetooth" }));
+
+        let mut missing = rig(Connection::Bluetooth, "not-a-mac", vec![off(Button::Mute)]);
+        step(&mut missing, &up, &down, t);
+        assert!(take_offs().is_empty());
+        assert!(missing.engine.toasts.lock().iter().any(|toast| {
+            toast.warn && toast.text == "No Bluetooth address, so the controller stays on"
+        }));
     }
 }

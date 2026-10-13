@@ -106,17 +106,22 @@ impl Drop for PreciseTimer {
     }
 }
 
+/// Twelve hex digits, separators ignored. `None` when `mac` is not an address.
+pub fn bluetooth_address(mac: &str) -> Option<u64> {
+    let hex: String = mac.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if hex.len() != 12 {
+        return None;
+    }
+    u64::from_str_radix(&hex, 16).ok()
+}
+
 /// Drop a Bluetooth controller's link (it powers off). `mac` like `AA:BB:..`.
 pub fn bt_disconnect(mac: &str) -> bool {
     use windows_sys::Win32::Devices::Bluetooth::*;
     use windows_sys::Win32::System::IO::DeviceIoControl;
-    let hex: String = mac.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    let Ok(addr) = u64::from_str_radix(&hex, 16) else {
+    let Some(addr) = bluetooth_address(mac) else {
         return false;
     };
-    if hex.len() != 12 {
-        return false;
-    }
     const IOCTL_BTH_DISCONNECT_DEVICE: u32 = 0x0041_000C;
     let mut ok = false;
     unsafe {
@@ -464,7 +469,10 @@ fn place_window(
 pub fn initial_window_size(want: [f32; 2], min: [f32; 2]) -> ([f32; 2], [f32; 2]) {
     if let Some((w, h)) = std::env::var("DSZ_SNAPSHOT_SIZE")
         .ok()
-        .and_then(|v| v.split_once('x').map(|(w, h)| (w.parse().ok(), h.parse().ok())))
+        .and_then(|v| {
+            v.split_once('x')
+                .map(|(w, h)| (w.parse().ok(), h.parse().ok()))
+        })
         .and_then(|(w, h)| Some((w?, h?)))
     {
         return ([w, h], [w.min(min[0]), h.min(min[1])]);
@@ -473,7 +481,9 @@ pub fn initial_window_size(want: [f32; 2], min: [f32; 2]) -> ([f32; 2], [f32; 2]
     use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
     use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
     let mut work: RECT = unsafe { std::mem::zeroed() };
-    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut RECT as *mut _, 0) } != 0;
+    let ok =
+        unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut RECT as *mut _, 0) }
+            != 0;
     let dpi = unsafe { GetDpiForSystem() }.max(96) as f32;
     if !ok {
         return (want, min);
@@ -549,6 +559,39 @@ pub fn attach_console() {
         windows_sys::Win32::System::Console::AttachConsole(
             windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
         );
+    }
+}
+
+#[cfg(test)]
+mod bluetooth_address_tests {
+    use super::{bluetooth_address, bt_disconnect};
+
+    #[test]
+    fn parses_a_colon_separated_address() {
+        assert_eq!(
+            bluetooth_address("AA:BB:CC:DD:EE:FF"),
+            Some(0xAABB_CCDD_EEFF)
+        );
+        assert_eq!(
+            bluetooth_address("aa-bb-cc-dd-ee-ff"),
+            Some(0xAABB_CCDD_EEFF)
+        );
+    }
+
+    #[test]
+    fn rejects_anything_that_is_not_six_bytes() {
+        assert_eq!(bluetooth_address(""), None);
+        assert_eq!(bluetooth_address("AA:BB"), None);
+        assert_eq!(bluetooth_address("not-a-mac"), None);
+        assert_eq!(bluetooth_address("AA:BB:CC:DD:EE:FF:00"), None);
+    }
+
+    #[test]
+    fn disconnect_returns_before_the_radio_for_a_bad_address() {
+        // A real address would call the Bluetooth stack. These cannot.
+        assert!(!bt_disconnect(""));
+        assert!(!bt_disconnect("nope"));
+        assert!(!bt_disconnect("AA:BB"));
     }
 }
 
