@@ -34,6 +34,7 @@ pub fn tick(ctx: &egui::Context, frames: u64) {
         if let Err(e) = std::fs::write(&out, bmp(&img)) {
             eprintln!("snapshot: {e}");
         }
+        log::logger().flush();
         std::process::exit(0);
     }
 }

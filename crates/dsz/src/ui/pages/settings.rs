@@ -55,7 +55,7 @@ impl App {
                     changed |=
                         toggle_row(ui, "Show tips", "On the Overview page", &mut s.show_tips);
                     let mut scale = s.ui_scale;
-                    let moved = row(ui, "Interface size", "Applies on restart", |ui| {
+                    let moved = row(ui, "Interface size", "On top of the Windows display scale", |ui| {
                         ui.add(
                             egui::Slider::new(&mut scale, 0.8..=1.6)
                                 .step_by(0.05)
@@ -67,6 +67,14 @@ impl App {
                     if moved {
                         s.ui_scale = scale;
                         changed = true;
+                    }
+                    // Applied once the slider is let go: zooming under a
+                    // dragged slider moves it away from the pointer.
+                    let want = s.ui_scale.clamp(0.75, 2.0);
+                    if (ui.ctx().zoom_factor() - want).abs() > 0.001
+                        && !ui.input(|i| i.pointer.any_down())
+                    {
+                        ui.ctx().set_zoom_factor(want);
                     }
                     drop(s);
                     if changed {
@@ -276,6 +284,13 @@ impl App {
                         .font(heading(14.0)),
                     );
                     muted(ui, "A fast native companion for DualSense and DualSense Edge. Virtual controllers need two free, open-source drivers, usbip-win2 and HidHide, which the Virtual controller page can install in one click. There is no license service.");
+                    muted(
+                        ui,
+                        &format!(
+                            "Controller speaker: libopus {}, built in. Controller drawings and icon: OpenController (MIT).",
+                            crate::haptics::opus::version()
+                        ),
+                    );
                 });
             }
         });

@@ -214,6 +214,13 @@ pub struct Haptics {
     /// Off, rumble goes to the controller's own rumble emulation unless
     /// something else is streaming.
     pub rumble_as_haptics: bool,
+    /// Controller speaker volume over Bluetooth, 0..=100; 0 keeps it off.
+    pub speaker_volume: u8,
+    /// Also play the captured PC audio on the controller speaker.
+    pub pc_audio_on_speaker: bool,
+    /// Send speaker audio to a headset in the controller's jack instead,
+    /// while one is plugged in.
+    pub headset_when_plugged: bool,
 }
 
 impl Default for Haptics {
@@ -231,6 +238,9 @@ impl Default for Haptics {
             triggers: TriggerHaptics::default(),
             rumble_intensity: 1.0,
             rumble_as_haptics: false,
+            speaker_volume: 80,
+            pc_audio_on_speaker: false,
+            headset_when_plugged: true,
         }
     }
 }
@@ -478,6 +488,99 @@ pub enum Action {
     Gamepad {
         button: Button,
     },
+    /// Press an Xbox controller button: on the virtual Xbox 360 pad, or,
+    /// when the profile has none, on a helper pad plugged in for the press
+    /// (see `virt::companion`), so the Xbox button reaches Windows.
+    Xbox {
+        button: XboxPadButton,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum XboxPadButton {
+    Guide,
+    A,
+    B,
+    X,
+    Y,
+    LB,
+    RB,
+    LT,
+    RT,
+    View,
+    Menu,
+    LS,
+    RS,
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl XboxPadButton {
+    pub const ALL: [XboxPadButton; 17] = [
+        XboxPadButton::Guide,
+        XboxPadButton::A,
+        XboxPadButton::B,
+        XboxPadButton::X,
+        XboxPadButton::Y,
+        XboxPadButton::LB,
+        XboxPadButton::RB,
+        XboxPadButton::LT,
+        XboxPadButton::RT,
+        XboxPadButton::View,
+        XboxPadButton::Menu,
+        XboxPadButton::LS,
+        XboxPadButton::RS,
+        XboxPadButton::Up,
+        XboxPadButton::Down,
+        XboxPadButton::Left,
+        XboxPadButton::Right,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            XboxPadButton::Guide => "Xbox",
+            XboxPadButton::A => "A",
+            XboxPadButton::B => "B",
+            XboxPadButton::X => "X",
+            XboxPadButton::Y => "Y",
+            XboxPadButton::LB => "LB",
+            XboxPadButton::RB => "RB",
+            XboxPadButton::LT => "LT",
+            XboxPadButton::RT => "RT",
+            XboxPadButton::View => "View",
+            XboxPadButton::Menu => "Menu",
+            XboxPadButton::LS => "Left stick",
+            XboxPadButton::RS => "Right stick",
+            XboxPadButton::Up => "D-pad up",
+            XboxPadButton::Down => "D-pad down",
+            XboxPadButton::Left => "D-pad left",
+            XboxPadButton::Right => "D-pad right",
+        }
+    }
+    /// The DualSense button in the same place; the Xbox 360 report is
+    /// built from the DualSense layout.
+    pub fn pad_button(self) -> Button {
+        match self {
+            XboxPadButton::Guide => Button::Ps,
+            XboxPadButton::A => Button::Cross,
+            XboxPadButton::B => Button::Circle,
+            XboxPadButton::X => Button::Square,
+            XboxPadButton::Y => Button::Triangle,
+            XboxPadButton::LB => Button::L1,
+            XboxPadButton::RB => Button::R1,
+            XboxPadButton::LT => Button::L2,
+            XboxPadButton::RT => Button::R2,
+            XboxPadButton::View => Button::Create,
+            XboxPadButton::Menu => Button::Options,
+            XboxPadButton::LS => Button::L3,
+            XboxPadButton::RS => Button::R3,
+            XboxPadButton::Up => Button::DpadUp,
+            XboxPadButton::Down => Button::DpadDown,
+            XboxPadButton::Left => Button::DpadLeft,
+            XboxPadButton::Right => Button::DpadRight,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,6 +760,11 @@ pub struct VirtualOutput {
     pub game_haptics: bool,
     /// 0..=100
     pub game_haptics_level: u8,
+    /// Game speaker: the virtual DualSense's speaker channels, to the
+    /// controller speaker over Bluetooth.
+    pub game_speaker: bool,
+    /// 0..=100
+    pub game_speaker_level: u8,
     pub left_deadzone: StickDeadzone,
     pub right_deadzone: StickDeadzone,
     /// Invert left X, left Y, right X, right Y.
@@ -678,6 +786,8 @@ impl Default for VirtualOutput {
             game_leds: false,
             game_haptics: true,
             game_haptics_level: 100,
+            game_speaker: true,
+            game_speaker_level: 100,
             left_deadzone: StickDeadzone::default(),
             right_deadzone: StickDeadzone::default(),
             invert: [false; 4],
@@ -1024,7 +1134,8 @@ mod tests {
         assert_eq!(set[0].virtual_out.kind, VirtualKind::Xbox360);
         assert_eq!(set[0].touchpad.mode, TouchMode::Mouse);
         assert_eq!(set[1].virtual_out.kind, VirtualKind::DualSense);
-        assert!(set[1].mappings.iter().any(|m| m.button == Button::Ps));
+        assert!(set[1].mappings.iter().any(|m| m.button == Button::Ps
+            && m.action == Action::Xbox { button: XboxPadButton::Guide }));
         // The files hold only what differs from the defaults; the rest is
         // filled in from them.
         for p in &set {

@@ -1,4 +1,5 @@
-// Embed the Windows version resource and icon, so Windows shows
+// Build the vendored libopus (controller-speaker audio) into the exe, and
+// embed the Windows version resource and icon, so Windows shows
 // "DSZ - DualSense Zen" (Task Manager, startup apps, tray settings,
 // Explorer) instead of the exe name.
 use std::path::{Path, PathBuf};
@@ -8,11 +9,75 @@ use std::path::{Path, PathBuf};
 mod icon_art;
 
 fn main() {
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    build_opus(&manifest.join("..").join("..").join("vendor").join("opus"));
     println!("cargo:rerun-if-changed=src/icon_art.rs");
+    println!("cargo:rerun-if-changed=assets/pads.json");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         embed_resources(&out);
     }
+}
+
+/// Source files listed under `var` in one of libopus's `*_sources.mk`.
+fn mk_list(dir: &Path, mk: &str, var: &str) -> Vec<PathBuf> {
+    let text = std::fs::read_to_string(dir.join(mk)).expect("libopus source list");
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if !inside {
+            if line.split('=').next().map(str::trim) == Some(var) && line.contains('=') {
+                inside = true;
+            }
+            continue;
+        }
+        let file = line.trim_end_matches('\\').trim();
+        if !file.is_empty() {
+            out.push(dir.join(file));
+        }
+        if !line.ends_with('\\') {
+            break;
+        }
+    }
+    out
+}
+
+/// libopus, float build, portable C (no CPU dispatch): two 10 ms frames
+/// per speaker report are cheap enough without SIMD.
+fn build_opus(dir: &Path) {
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let mut files = Vec::new();
+    for (mk, var) in [
+        ("celt_sources.mk", "CELT_SOURCES"),
+        ("silk_sources.mk", "SILK_SOURCES"),
+        ("silk_sources.mk", "SILK_SOURCES_FLOAT"),
+        ("opus_sources.mk", "OPUS_SOURCES"),
+        ("opus_sources.mk", "OPUS_SOURCES_FLOAT"),
+    ] {
+        files.extend(mk_list(dir, mk, var));
+    }
+    let version = std::fs::read_to_string(dir.join("package_version"))
+        .ok()
+        .and_then(|t| t.split('"').nth(1).map(str::to_string))
+        .unwrap_or_else(|| "unknown".into());
+    cc::Build::new()
+        .files(files)
+        .include(dir.join("include"))
+        .include(dir.join("celt"))
+        .include(dir.join("silk"))
+        .include(dir.join("silk").join("float"))
+        .include(dir.join("src"))
+        .include(dir)
+        .define("OPUS_BUILD", None)
+        .define("USE_ALLOCA", None)
+        .define("HAVE_LRINT", None)
+        .define("HAVE_LRINTF", None)
+        .define("PACKAGE_VERSION", format!("\"{version}\"").as_str())
+        .opt_level(2)
+        .warnings(false)
+        .compile("opus");
+    println!("cargo:rustc-env=OPUS_VERSION={version}");
 }
 
 fn embed_resources(out: &Path) {

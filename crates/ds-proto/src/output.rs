@@ -30,7 +30,31 @@ pub struct OutputState {
     pub rumble_reduction: u8,
     /// Improved rumble emulation (firmware 2.24+).
     pub enhanced_rumble: bool,
+    /// Where the controller plays the audio stream.
+    pub audio: AudioRoute,
 }
+
+/// Where the controller plays its audio stream. The fields are Linux
+/// `hid-playstation`'s: speaker volume (flag0 bit 5), audio control (flag0
+/// bit 7) with the output path in bits 5:4, and audio control 2 (flag1
+/// bit 7) with the speaker preamp gain in bits 2:0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AudioRoute {
+    /// Audio fields not marked valid: the controller keeps what it has.
+    #[default]
+    Untouched,
+    /// Path 3: the right channel to the speaker, the headset muted.
+    /// Volume is clamped to 0x3D..=0x64, the range Linux found accepted.
+    Speaker { volume: u8 },
+    /// Path 0: left and right to the headset jack, the speaker muted.
+    Headset,
+    /// Path 0 with nothing streaming: the speaker is silent.
+    Muted,
+}
+
+/// Lowest and highest speaker volume (Linux `hid-playstation`).
+pub const SPEAKER_VOLUME_MIN: u8 = 0x3D;
+pub const SPEAKER_VOLUME_MAX: u8 = 0x64;
 
 impl Default for OutputState {
     fn default() -> Self {
@@ -46,6 +70,7 @@ impl Default for OutputState {
             mute_led: 0,
             rumble_reduction: 0,
             enhanced_rumble: true,
+            audio: AudioRoute::Untouched,
         }
     }
 }
@@ -65,7 +90,22 @@ impl OutputState {
         }
         // valid_flag1: bit0 mute LED, bit2 lightbar, bit4 player LEDs,
         // bit6 motor power.
-        let flag1 = 0x01 | 0x04 | 0x10 | 0x40;
+        let mut flag1 = 0x01 | 0x04 | 0x10 | 0x40;
+        match self.audio {
+            AudioRoute::Untouched => {}
+            AudioRoute::Speaker { volume } => {
+                flag0 |= 0x20 | 0x80;
+                flag1 |= 0x80;
+                b[5] = volume.clamp(SPEAKER_VOLUME_MIN, SPEAKER_VOLUME_MAX);
+                b[7] = 3 << 4;
+                // Speaker preamp +6 dB, as Linux sets it.
+                b[37] = 0x02;
+            }
+            AudioRoute::Headset | AudioRoute::Muted => {
+                flag0 |= 0x80;
+                b[7] = 0;
+            }
+        }
         b[0] = flag0;
         b[1] = flag1;
         b[2] = self.rumble_right;
@@ -174,6 +214,31 @@ mod tests {
         let usb = s.build(Connection::Usb, &mut b).to_vec();
         assert_eq!(usb[0], 0x02);
         assert_eq!(&usb[1..48], &bt[2..49]);
+    }
+
+    #[test]
+    fn audio_routes() {
+        let mut a = [0u8; 100];
+        let r = OutputState::default().build(Connection::Bluetooth, &mut a).to_vec();
+        assert_eq!(r[2] & 0xE0, 0, "untouched: no audio flags");
+        let s = OutputState {
+            audio: AudioRoute::Speaker { volume: 0x10 },
+            ..Default::default()
+        };
+        let r = s.build(Connection::Bluetooth, &mut a).to_vec();
+        assert_eq!(r[2] & 0xA0, 0xA0);
+        assert_eq!(r[3] & 0x80, 0x80);
+        assert_eq!(r[2 + 5], SPEAKER_VOLUME_MIN);
+        assert_eq!(r[2 + 7], 0x30);
+        assert_eq!(r[2 + 37], 0x02);
+        assert!(crc::verify(crc::PREFIX_OUTPUT, &r));
+        let s = OutputState {
+            audio: AudioRoute::Headset,
+            ..Default::default()
+        };
+        let r = s.build(Connection::Bluetooth, &mut a).to_vec();
+        assert_eq!(r[2] & 0xA0, 0x80);
+        assert_eq!(r[2 + 7], 0x00);
     }
 
     #[test]

@@ -100,6 +100,165 @@ pub fn probe(what: &str) {
                 Err(e) => println!("virtual Xbox 360 failed: {e}"),
             }
         }
+        "helper" => {
+            // `helper <hold ms> [<hold ms> ...]`: press Guide on the helper
+            // Xbox pad the way a mapping does, one press per argument, 3 s
+            // apart, through the real companion thread.
+            let holds: Vec<u64> = std::env::args()
+                .skip_while(|a| a != "helper")
+                .skip(1)
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            // Pads numbered from 10, so none shares a serial (and so a
+            // HidHide entry) with the running app's.
+            usbip::reserve_slots_below(10);
+            let dir = std::env::temp_dir().join("dsz-helper-probe");
+            let engine = crate::engine::Engine::new(dir);
+            {
+                let e = engine.clone();
+                std::thread::spawn(move || super::companion::run(e));
+            }
+            let guide = ds_proto::input::Button::Ps.bit();
+            let t0 = Instant::now();
+            for hold in holds {
+                println!("press {hold} ms at {} ms", t0.elapsed().as_millis());
+                let t = Instant::now();
+                while t.elapsed() < Duration::from_millis(hold) {
+                    engine.companion.set(1, guide);
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+                engine.companion.set(1, 0);
+                println!("release at {} ms", t0.elapsed().as_millis());
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            engine.shutdown.store(true, std::sync::atomic::Ordering::Release);
+            engine.companion.stop();
+            println!("stopped at {} ms", t0.elapsed().as_millis());
+        }
+        "ps-home" => {
+            // `ps-home <ds|ds4> <hold ms> <wait ms>`: plug in a virtual
+            // DualSense or DualShock 4, wait, hold PS: does Windows react
+            // to a PlayStation home button the way it does to Guide?
+            let args: Vec<String> = std::env::args().skip_while(|a| a != "ps-home").skip(1).collect();
+            let model = if args.first().map(|s| s.as_str()) == Some("ds4") {
+                usbip::Model::DualShock4
+            } else {
+                usbip::Model::DualSense
+            };
+            let num = |i: usize, d: u64| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+            let (hold, wait) = (num(1, 1500), num(2, 2000));
+            let mut guard = super::audio_default::Guard::take();
+            let sink = usbip::DsSink {
+                on_output: Box::new(|_| {}),
+                mirror: Default::default(),
+            };
+            let t0 = Instant::now();
+            match usbip::UsbPad::create(model, sink) {
+                Ok(pad) => {
+                    println!("{} attached in {} ms", model.name(), t0.elapsed().as_millis());
+                    let mut seq = 0u8;
+                    let mut feed = |until: Duration, ps: bool| {
+                        let mut p = ds_proto::virtual_pad::PadState::default();
+                        p.buttons.set(ds_proto::input::Button::Ps, ps);
+                        while t0.elapsed() < until {
+                            seq = seq.wrapping_add(1);
+                            let rep: Vec<u8> = match model {
+                                usbip::Model::DualShock4 => ds_proto::virtual_pad::ds4_usb_input(&p, None, false, seq).to_vec(),
+                                _ => ds_proto::virtual_pad::ds_usb_input(&p, None, false, seq).to_vec(),
+                            };
+                            let _ = pad.submit(&rep);
+                            if let Some(g) = guard.as_mut() {
+                                g.check();
+                            }
+                            std::thread::sleep(Duration::from_millis(4));
+                        }
+                    };
+                    feed(Duration::from_millis(wait), false);
+                    println!("PS down at {} ms", t0.elapsed().as_millis());
+                    feed(Duration::from_millis(wait + hold), true);
+                    println!("PS up at {} ms", t0.elapsed().as_millis());
+                    feed(Duration::from_millis(wait + hold + 1500), false);
+                }
+                Err(e) => println!("virtual {} failed: {e}", model.name()),
+            }
+        }
+        "x360-guide" => {
+            // `x360-guide <hold ms> <wait ms>`: plug in an Xbox 360 pad,
+            // wait `wait` ms after attach, hold Guide for `hold` ms.
+            let arg = |n: usize, d: u64| {
+                std::env::args()
+                    .skip_while(|a| a != "x360-guide")
+                    .nth(n)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(d)
+            };
+            let (hold, wait) = (arg(1, 1500), arg(2, 0));
+            let slot: u32 = std::env::var("DSZ_PROBE_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+            usbip::reserve_slots_below(slot);
+            // DSZ_PROBE_HIDE=1: hide the pad with HidHide before it exists,
+            // so only whitelisted apps (not this probe's caller) see it.
+            // DSZ_PROBE_ALLOW=<exe>: let that app see the hidden pad for the
+            // run (taken off the list again at the end).
+            let allow = std::env::var("DSZ_PROBE_ALLOW").ok().map(std::path::PathBuf::from);
+            if let Some(a) = &allow {
+                println!("allow {}: {:?}", a.display(), hidhide::set_app(a, true));
+            }
+            let hidden = if std::env::var_os("DSZ_PROBE_HIDE").is_some() {
+                let mut ids = vec![format!(r"USB\VID_045E&PID_028E\DSZV{slot}")];
+                ids.extend(
+                    std::env::var("DSZ_PROBE_HIDE_ALSO")
+                        .unwrap_or_default()
+                        .split(';')
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
+                );
+                let exe = std::env::current_exe().unwrap_or_default();
+                match hidhide::hide(&ids, &exe) {
+                    Ok(ch) => {
+                        println!("hidden: {:?}", ch.devices_added);
+                        Some(ch)
+                    }
+                    Err(e) => {
+                        println!("hidhide: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let sink = usbip::DsSink {
+                on_output: Box::new(|r| println!("driver output {:02X?}", &r[..r.len().min(6)])),
+                mirror: Default::default(),
+            };
+            let t0 = Instant::now();
+            match usbip::UsbPad::create(usbip::Model::Xbox360, sink) {
+                Ok(pad) => {
+                    println!("attached in {} ms", t0.elapsed().as_millis());
+                    let _ = pad.submit_idle();
+                    while !(6..=9).contains(&pad.led()) && t0.elapsed() < Duration::from_secs(5) {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    println!("solid LED, slot {:?}, at {} ms", pad.xinput_slot(), t0.elapsed().as_millis());
+                    std::thread::sleep(Duration::from_millis(wait));
+                    let mut p = ds_proto::virtual_pad::PadState::default();
+                    p.buttons.set(ds_proto::input::Button::Ps, true);
+                    let down = ds_proto::virtual_pad::x360_usb_input(&ds_proto::virtual_pad::xusb_report(&p));
+                    println!("guide down at {} ms, LED slot {:?}", t0.elapsed().as_millis(), pad.xinput_slot());
+                    let _ = pad.submit(&down);
+                    std::thread::sleep(Duration::from_millis(hold));
+                    let _ = pad.submit_idle();
+                    println!("guide up at {} ms, LED slot {:?}", t0.elapsed().as_millis(), pad.xinput_slot());
+                    std::thread::sleep(Duration::from_millis(1500));
+                }
+                Err(e) => println!("virtual Xbox 360 failed: {e}"),
+            }
+            if let Some(ch) = hidden {
+                println!("unhide: {:?}", hidhide::restore(&ch));
+            }
+            if let Some(a) = &allow {
+                println!("disallow {}: {:?}", a.display(), hidhide::set_app(a, false));
+            }
+        }
         "usbip-ds4" => {
             let sink = usbip::DsSink {
                 on_output: Box::new(|r| {
@@ -361,6 +520,39 @@ pub fn probe(what: &str) {
                 println!("{p}: {:?}", crate::dsdetect::scan(std::path::Path::new(&p)));
             }
             println!("scanned {n} programs in {} ms", t0.elapsed().as_millis());
+        }
+        "speaker" => {
+            // `speaker [--secs N]`: speaker stream with no input injection;
+            // prints what the controller sends back.
+            let report = crate::haptics::probe::speaker(secs_arg(4));
+            println!("{report}");
+            if let Some(f) = std::env::var_os("DSZ_PROBE_OUT") {
+                let _ = std::fs::write(f, &report);
+            }
+        }
+        "speaker-ab" => {
+            let only = std::env::args()
+                .skip_while(|a| a != "--variant")
+                .nth(1)
+                .and_then(|s| s.parse().ok());
+            let mic_off_at = std::env::args()
+                .skip_while(|a| a != "--mic-off-at")
+                .nth(1)
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(std::time::Duration::from_secs_f32);
+            let report = crate::haptics::probe::speaker_ab(only, secs_arg(10), mic_off_at);
+            println!("{report}");
+            if let Some(f) = std::env::var_os("DSZ_PROBE_OUT") {
+                let _ = std::fs::write(f, &report);
+            }
+        }
+        "mic-listen" => {
+            // Listen-only: never writes to the controller.
+            let report = crate::haptics::probe::mic_listen(secs_arg(20));
+            println!("{report}");
+            if let Some(f) = std::env::var_os("DSZ_PROBE_OUT") {
+                let _ = std::fs::write(f, &report);
+            }
         }
         "tone" => {
             let _ = play_tone(0, secs_arg(6)).join();

@@ -23,6 +23,22 @@ use crate::virt::mirror::Mirror;
 
 pub const MAX_REPORT: usize = ds_proto::stream::MAX_REPORT;
 
+/// `Device::speaker_route` values below the lowest speaker volume byte.
+pub const SPEAKER_UNTOUCHED: u8 = 0;
+pub const SPEAKER_MUTED: u8 = 1;
+pub const SPEAKER_HEADSET: u8 = 2;
+
+/// The output-report audio route for a `speaker_route` value.
+pub fn audio_route(v: u8) -> ds_proto::AudioRoute {
+    use ds_proto::AudioRoute;
+    match v {
+        SPEAKER_UNTOUCHED => AudioRoute::Untouched,
+        SPEAKER_MUTED => AudioRoute::Muted,
+        SPEAKER_HEADSET => AudioRoute::Headset,
+        volume => AudioRoute::Speaker { volume },
+    }
+}
+
 pub struct StreamPacket {
     pub len: usize,
     pub data: [u8; MAX_REPORT],
@@ -186,6 +202,19 @@ pub struct Device {
     pub pcm_mode: AtomicBool,
     /// Haptic output level 0..=255 per side, for meters.
     pub haptic_level: [AtomicU8; 2],
+    /// Speaker sound level 0..=255 (what the game or PC sends to the
+    /// speaker, whether or not it is playing), for the meter.
+    pub speaker_level: AtomicU8,
+    /// Microphone packets kept while a speaker test runs.
+    pub mic_tap: Mutex<Option<Vec<crate::haptics::mic::Packet>>>,
+    /// Silent reports queued when a speaker stream starts.
+    pub speaker_lead: AtomicU8,
+    /// What the last speaker test heard, for the Haptics page.
+    pub speaker_test_result: Mutex<Option<String>>,
+    /// Where the controller plays audio, set by the haptics thread:
+    /// `SPEAKER_UNTOUCHED`, `SPEAKER_MUTED`, `SPEAKER_HEADSET`, or the
+    /// speaker volume byte.
+    pub speaker_route: AtomicU8,
     pub calibrate_request: AtomicBool,
     /// Calibration feature report (`0x05`) read at connect.
     /// Feature reports a virtual DualSense driven by this controller answers with.
@@ -215,6 +244,48 @@ impl Device {
     /// anything the control report carries (feedback, overrides, toggles).
     pub fn kick(&self) {
         let _ = self.kick_tx.try_send(());
+    }
+
+    /// Play the speaker test through the game-audio path and listen to it
+    /// with the controller's own microphone; the result is logged and kept
+    /// in `speaker_test_result`, and the microphone audio is saved as
+    /// `dsz-speaker-test.wav` in the temp folder. False if a game or another
+    /// test is using the path.
+    pub fn start_speaker_test(self: &Arc<Self>) -> bool {
+        use crate::haptics::game::{TestSignal, TestSource};
+        let len = Duration::from_millis(4000);
+        let src = Arc::new(TestSource::new(len, TestSignal::Speaker));
+        {
+            let mut g = self.game_audio.lock();
+            if g.is_some() {
+                return false;
+            }
+            *g = Some(src.clone());
+        }
+        *self.mic_tap.lock() = Some(Vec::with_capacity(512));
+        *self.speaker_test_result.lock() = Some("Playing…".into());
+        let d = self.clone();
+        std::thread::spawn(move || {
+            // The sound plus the cushion and the radio's delay.
+            std::thread::sleep(len + Duration::from_millis(900));
+            {
+                let mut g = d.game_audio.lock();
+                let ours = g
+                    .as_ref()
+                    .map(|x| Arc::as_ptr(x) as *const () == Arc::as_ptr(&src) as *const ())
+                    .unwrap_or(false);
+                if ours {
+                    *g = None;
+                }
+            }
+            let packets = d.mic_tap.lock().take().unwrap_or_default();
+            let report = crate::haptics::mic::analyze(&packets);
+            log::info!("speaker test: {}", report.summary);
+            let wav = std::env::temp_dir().join("dsz-speaker-test.wav");
+            let _ = std::fs::write(&wav, crate::haptics::mic::wav(&report.audio));
+            *d.speaker_test_result.lock() = Some(report.summary);
+        });
+        true
     }
 
     pub fn identify(&self) {
@@ -423,6 +494,11 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         haptics_wake,
         pcm_mode: AtomicBool::new(false),
         haptic_level: [AtomicU8::new(0), AtomicU8::new(0)],
+        speaker_level: AtomicU8::new(0),
+        speaker_route: AtomicU8::new(SPEAKER_UNTOUCHED),
+        mic_tap: Mutex::new(None),
+        speaker_lead: AtomicU8::new(crate::haptics::streamer::SPEAKER_LEAD as u8),
+        speaker_test_result: Mutex::new(None),
         calibrate_request: AtomicBool::new(false),
         mirror: Mutex::new(mirror),
         virt: Default::default(),
@@ -543,6 +619,17 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                     }
                     Err(ParseError::BadCrc) => {
                         device.stats.crc_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(ParseError::NotState(2)) => {
+                        // Microphone audio: kept only while a speaker test listens.
+                        if let Some(tap) = device.mic_tap.lock().as_mut() {
+                            let n = crate::haptics::mic::MIC_PACKET;
+                            if buf.len() >= 3 + n {
+                                let mut p = [0u8; crate::haptics::mic::MIC_PACKET];
+                                p.copy_from_slice(&buf[3..3 + n]);
+                                tap.push((buf[2], p));
+                            }
+                        }
                     }
                     Err(_) => {}
                 }
@@ -738,7 +825,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         let input = device.live.lock().input;
         let overrides = device.overrides.lock().clone();
         let toggles = *device.toggles.lock();
-        let state = {
+        let mut state = {
             let mut fb = device.feedback.lock();
             fb.prune(now);
             composer.compose(
@@ -751,6 +838,9 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 now,
             )
         };
+        if device.is_bluetooth() {
+            state.audio = audio_route(device.speaker_route.load(Ordering::Acquire));
+        }
         let keepalive =
             now.duration_since(last_write) > Duration::from_millis(if pcm { 1000 } else { 500 });
         let changed = last_sent.as_ref() != Some(&state);

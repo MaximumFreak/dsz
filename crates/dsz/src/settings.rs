@@ -73,6 +73,9 @@ pub struct Settings {
     /// Controller MAC -> the device nodes HidHide hid for it, so the next
     /// start can hide it before it connects.
     pub hide_nodes: BTreeMap<String, Vec<String>>,
+    /// Helper Xbox pad USB serial -> the nodes Windows made below it, so
+    /// the next plug-in hides them before they appear.
+    pub helper_nodes: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -100,6 +103,7 @@ impl Default for Settings {
             persistent_virtual: true,
             last_controller: String::new(),
             hide_nodes: BTreeMap::new(),
+            helper_nodes: BTreeMap::new(),
         }
     }
 }

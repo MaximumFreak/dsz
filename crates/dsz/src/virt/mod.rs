@@ -16,6 +16,7 @@
 //! ```
 
 pub mod audio_default;
+pub mod companion;
 pub mod mirror;
 pub mod hidhide;
 pub mod pool;
@@ -158,8 +159,10 @@ pub struct Hider {
 
 #[derive(Default)]
 struct HiderState {
-    want: BTreeMap<u64, Vec<String>>,
+    /// Per requester: nodes to hide and other apps to let through.
+    want: BTreeMap<u64, (Vec<String>, Vec<PathBuf>)>,
     applied_for: Vec<String>,
+    applied_apps: Vec<PathBuf>,
     applied: hidhide::Changes,
 }
 
@@ -188,36 +191,90 @@ impl Hider {
     /// Ask for `ids` to be hidden on behalf of controller `dev` (empty to
     /// release). Returns whether they are hidden now.
     pub fn set(&self, dev: u64, ids: Vec<String>) -> Result<bool, String> {
+        self.set_with_apps(dev, ids, Vec::new())
+    }
+
+    /// [`Hider::set`], also letting `apps` see what is hidden while this
+    /// request stands. Changes go in as a difference, so nodes that stay
+    /// hidden are never shown in between.
+    pub fn set_with_apps(&self, dev: u64, ids: Vec<String>, apps: Vec<PathBuf>) -> Result<bool, String> {
         let mut st = self.state.lock();
         if ids.is_empty() {
             st.want.remove(&dev);
         } else {
-            st.want.insert(dev, ids);
+            st.want.insert(dev, (ids, apps));
         }
-        let mut union: Vec<String> = st.want.values().flatten().cloned().collect();
+        let mut union: Vec<String> = st.want.values().flat_map(|w| w.0.iter()).cloned().collect();
         union.sort();
         union.dedup();
-        if union == st.applied_for {
+        let mut union_apps: Vec<PathBuf> = st.want.values().flat_map(|w| w.1.iter()).cloned().collect();
+        union_apps.sort();
+        union_apps.dedup();
+        if union == st.applied_for && union_apps == st.applied_apps {
             return Ok(!union.is_empty());
         }
-        if !st.applied.is_empty() {
-            hidhide::restore(&st.applied).map_err(|e| e.to_string())?;
+        if union.is_empty() {
+            if !st.applied.is_empty() {
+                hidhide::restore(&st.applied).map_err(|e| e.to_string())?;
+            }
             st.applied = Default::default();
             st.applied_for.clear();
+            st.applied_apps.clear();
             let _ = std::fs::remove_file(&self.file);
-        }
-        if union.is_empty() {
             log::info!("HidHide: physical controller visible again");
             return Ok(false);
         }
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let ch = hidhide::hide(&union, &exe).map_err(|e| e.to_string())?;
-        if let Ok(t) = serde_json::to_string_pretty(&ch) {
+        // Apps first, so a reader is let through before its device hides.
+        let new_apps: Vec<PathBuf> = union_apps.iter().filter(|a| !st.applied_apps.contains(a)).cloned().collect();
+        for a in &new_apps {
+            match hidhide::set_app(a, true) {
+                Ok(Some(dos)) => st.applied.apps_added.push(dos),
+                Ok(None) => {}
+                Err(e) => log::warn!("HidHide: couldn't let {} through: {e}", a.display()),
+            }
+        }
+        let gone_apps: Vec<PathBuf> = st.applied_apps.iter().filter(|a| !union_apps.contains(a)).cloned().collect();
+        for a in gone_apps {
+            if let Some(dos) = win::dos_device_path(&a.display().to_string()) {
+                if let Some(i) = st.applied.apps_added.iter().position(|x| x.eq_ignore_ascii_case(&dos)) {
+                    let _ = hidhide::set_app(&a, false);
+                    st.applied.apps_added.remove(i);
+                }
+            }
+        }
+        let added: Vec<String> = union.iter().filter(|i| !st.applied_for.contains(i)).cloned().collect();
+        if !added.is_empty() {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let ch = hidhide::hide(&added, &exe).map_err(|e| e.to_string())?;
+            st.applied.devices_added.extend(ch.devices_added);
+            if st.applied.app_added.is_none() {
+                st.applied.app_added = ch.app_added;
+            }
+            st.applied.activated |= ch.activated;
+        }
+        let removed: Vec<String> = st
+            .applied
+            .devices_added
+            .iter()
+            .filter(|d| !union.iter().any(|u| u.eq_ignore_ascii_case(d)))
+            .cloned()
+            .collect();
+        if !removed.is_empty() {
+            let undo = hidhide::Changes {
+                devices_added: removed.clone(),
+                ..Default::default()
+            };
+            hidhide::restore(&undo).map_err(|e| e.to_string())?;
+            st.applied.devices_added.retain(|d| !removed.contains(d));
+        }
+        if let Ok(t) = serde_json::to_string_pretty(&st.applied) {
             let _ = std::fs::write(&self.file, t);
         }
-        log::info!("HidHide: hiding {} node(s) from other apps", union.len());
-        st.applied = ch;
+        if st.applied_for.is_empty() {
+            log::info!("HidHide: hiding {} node(s) from other apps", union.len());
+        }
         st.applied_for = union;
+        st.applied_apps = union_apps;
         Ok(true)
     }
 
@@ -232,6 +289,7 @@ impl Hider {
             let _ = std::fs::remove_file(&self.file);
         }
         st.applied_for.clear();
+        st.applied_apps.clear();
     }
 }
 

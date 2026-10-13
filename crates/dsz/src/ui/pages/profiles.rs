@@ -128,7 +128,7 @@ impl App {
             )
         };
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_profile)
                     .hint_text("New profile name")

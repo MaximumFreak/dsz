@@ -7,7 +7,7 @@
     {
       "button": "Ps",
       "mute": true,
-      "action": { "kind": "key", "vk": 71, "win": true }
+      "action": { "kind": "xbox", "button": "Guide" }
     },
     {
       "button": "Mute",

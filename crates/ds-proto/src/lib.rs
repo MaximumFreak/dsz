@@ -12,7 +12,7 @@ pub mod trigger;
 pub mod virtual_pad;
 
 pub use input::{BatteryStatus, Buttons, InputState, TouchPoint};
-pub use output::OutputState;
+pub use output::{AudioRoute, OutputState};
 pub use trigger::{TriggerEffect, TriggerPreset};
 
 pub const SONY_VID: u16 = 0x054C;

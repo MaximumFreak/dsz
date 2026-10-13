@@ -26,7 +26,7 @@ use theme::*;
 
 static CTX: OnceLock<egui::Context> = OnceLock::new();
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Page {
     Overview,
     Lighting,
@@ -97,7 +97,6 @@ pub struct App {
     edit_pin: Option<String>,
     preview: Composer,
     frames: u64,
-    start_hidden: bool,
     hwnd_found: bool,
     // Page state
     capture_key: Option<usize>,
@@ -113,6 +112,12 @@ pub struct App {
     /// Last outer rectangle that was large enough to be a real window.
     window_frame: Option<crate::platform::WindowFrame>,
     window_repair_logged: bool,
+    /// Zoom the minimum window size was last set for.
+    min_size_zoom: f32,
+    /// The window is at its real size, at least the minimum.
+    window_sized: bool,
+    /// Pages already reported as wider than the window.
+    overflow_logged: std::collections::HashSet<Page>,
     virt_drivers: Option<(Instant, pages::virtual_pad::DriverInfo)>,
     game_test: Option<(u64, Arc<crate::haptics::game::TestSource>)>,
 }
@@ -123,11 +128,15 @@ pub fn run(engine: Arc<Engine>, start_hidden: bool) -> Result<(), String> {
         width: 64,
         height: 64,
     };
+    let (size, min) = crate::platform::initial_window_size([1240.0, 800.0], [760.0, 520.0]);
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(crate::APP_TITLE)
-            .with_inner_size([1240.0, 800.0])
-            .with_min_inner_size([900.0, 600.0])
+            .with_inner_size(size)
+            .with_min_inner_size(min)
+            // Starting minimized: never shown until the tray opens it (the
+            // vendored eframe skips its first-frame show for this).
+            .with_visible(!start_hidden)
             .with_icon(Arc::new(icon)),
         centered: true,
         // Frames are paced by request_repaint_after; vsync makes the NVIDIA GL
@@ -148,14 +157,14 @@ pub fn run(engine: Arc<Engine>, start_hidden: bool) -> Result<(), String> {
             let scale = e.settings.read().ui_scale;
             theme::install(&cc.egui_ctx, scale);
             let _ = CTX.set(cc.egui_ctx.clone());
-            Ok(Box::new(App::new(e, start_hidden)))
+            Ok(Box::new(App::new(e)))
         }),
     )
     .map_err(|e| e.to_string())
 }
 
 impl App {
-    fn new(engine: Arc<Engine>, start_hidden: bool) -> Self {
+    fn new(engine: Arc<Engine>) -> Self {
         let args: Vec<String> = std::env::args().collect();
         let page = args
             .iter()
@@ -180,7 +189,6 @@ impl App {
             edit_pin,
             preview: Composer::new(),
             frames: 0,
-            start_hidden,
             hwnd_found: false,
             capture_key: None,
             rename: None,
@@ -194,6 +202,9 @@ impl App {
             perf: (Instant::now(), 0, 0.0),
             window_frame: None,
             window_repair_logged: false,
+            overflow_logged: Default::default(),
+            min_size_zoom: 0.0,
+            window_sized: false,
             virt_drivers: None,
             game_test: None,
         }
@@ -247,11 +258,42 @@ impl App {
             });
         });
         ui.add_space(22.0);
+        // Rows give up their spacing on short windows so the footer never
+        // lands on them; past that the list scrolls.
+        const FOOTER: f32 = 44.0;
+        let room = (ui.available_height() - FOOTER).max(0.0);
+        let row_h = (room / Page::ALL.len() as f32).clamp(34.0, 46.0);
+        egui::ScrollArea::vertical()
+            .id_salt("nav")
+            .max_height(room)
+            .auto_shrink([false, true])
+            .show(ui, |ui| self.nav(ui, row_h));
+
+        // Footer: connection summary.
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.add_space(14.0);
+            let devs = self.engine.device_list();
+            ui.horizontal(|ui| {
+                ui.add_space(18.0);
+                let (txt, col) = if devs.is_empty() {
+                    ("No controller".to_string(), FAINT)
+                } else {
+                    (format!("{} connected", devs.len()), GOOD)
+                };
+                let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, col);
+                ui.label(RichText::new(txt).size(12.5).color(MUTED));
+            });
+        });
+    }
+
+    fn nav(&mut self, ui: &mut egui::Ui, row_h: f32) {
+        ui.spacing_mut().item_spacing.y = 0.0;
         for page in Page::ALL {
             let sel = self.page == page;
             let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::click());
-            let rect = rect.shrink2(egui::vec2(10.0, 2.0));
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click());
+            let rect = rect.shrink2(egui::vec2(10.0, (row_h - 34.0) / 2.0));
             let p = ui.painter();
             if sel {
                 p.rect_filled(rect, CornerRadius::same(R_CTRL + 2), ACCENT_SOFT);
@@ -290,23 +332,6 @@ impl App {
                 self.capture_key = None;
             }
         }
-
-        // Footer: connection summary.
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            ui.add_space(14.0);
-            let devs = self.engine.device_list();
-            ui.horizontal(|ui| {
-                ui.add_space(18.0);
-                let (txt, col) = if devs.is_empty() {
-                    ("No controller".to_string(), FAINT)
-                } else {
-                    (format!("{} connected", devs.len()), GOOD)
-                };
-                let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
-                ui.painter().circle_filled(r.center(), 4.0, col);
-                ui.label(RichText::new(txt).size(12.5).color(MUTED));
-            });
-        });
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui, dev: Option<&Arc<Device>>) {
@@ -496,6 +521,16 @@ impl App {
 
 /// egui subtracts its predicted frame time (1/60 s) from a repaint delay,
 /// so a plain 16 ms request means "right now" and the UI spins. Add it back.
+/// Lay out `add` in a column at most `max` wide, centred in the space left.
+fn centered<R>(ui: &mut egui::Ui, max: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let avail = ui.available_rect_before_wrap();
+    let w = avail.width().min(max);
+    let left = avail.min.x + ((avail.width() - w) / 2.0).floor();
+    let rect = egui::Rect::from_min_max(egui::pos2(left, avail.min.y), egui::pos2(left + w, avail.max.y));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)), add)
+        .inner
+}
+
 fn repaint_in(ctx: &egui::Context, ms: u64) {
     ctx.request_repaint_after(Duration::from_millis(ms + 17));
 }
@@ -519,13 +554,24 @@ impl eframe::App for App {
                 self.hwnd_found = true;
             }
         }
-        // eframe shows the window after its first frames; hide after that.
-        if self.start_hidden && self.hwnd_found && self.frames >= 4 {
-            crate::tray::hide_main_window();
-            self.start_hidden = false;
-        } else if self.start_hidden {
-            ctx.request_repaint();
+
+        // The minimum size is in zoomed points, so a larger interface size
+        // keeps a usable column; never more than the monitor holds.
+        let zoom = ctx.zoom_factor();
+        let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(f32::MAX, f32::MAX));
+        let min = egui::vec2(760.0f32.min(monitor.x * 0.9), 520.0f32.min(monitor.y * 0.85));
+        if (zoom - self.min_size_zoom).abs() > 0.001 {
+            self.min_size_zoom = zoom;
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min));
         }
+        // Windows doesn't grow a window to a new minimum by itself. (The
+        // first frames report a placeholder size, hence the upper bound.)
+        let now = ctx.input(|i| i.screen_rect().size());
+        let short = now.x + 1.0 < min.x || now.y + 1.0 < min.y;
+        if now.x < 5000.0 && short {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(now.max(min)));
+        }
+        self.window_sized = now.x < 5000.0 && !short;
 
         if ctx.input(|i| i.viewport().close_requested())
             && self.engine.settings.read().close_to_tray
@@ -589,15 +635,20 @@ impl eframe::App for App {
                 bottom: 8,
             }))
             .show(ctx, |ui| {
-                self.top_bar(ui, dev.as_ref());
+                // Pages are at most CONTENT wide, centred in a wider window.
+                const CONTENT: f32 = 1180.0;
+                centered(ui, CONTENT, |ui| self.top_bar(ui, dev.as_ref()));
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .id_salt(format!("{:?}", self.page))
                     .show(ui, |ui| {
-                        let w = ui.available_width().min(1180.0);
-                        ui.set_max_width(w);
+                        centered(ui, CONTENT, |ui| {
+                        // Overflowing content grows max_rect too, so keep
+                        // the column's width from before the page.
+                        let column = ui.max_rect().width();
                         self.editing_banner(ui, dev.as_ref(), &profile.name);
+                        self.finish_game_test();
                         match self.page {
                             Page::Overview => self.page_overview(ui, &mut profile, dev.as_ref()),
                             Page::Lighting => self.page_lighting(ui, &mut profile, dev.as_ref()),
@@ -610,6 +661,16 @@ impl eframe::App for App {
                             Page::Settings => self.page_settings(ui),
                         }
                         ui.add_space(24.0);
+                        // A row that can't wrap widens the whole page and
+                        // clips its right edge: say which page, once.
+                        let over = ui.min_rect().width() - column;
+                        if over > 1.0 && self.window_sized && self.overflow_logged.insert(self.page) {
+                            log::warn!(
+                                "layout: {:?} is {over:.0} pt wider than its {column:.0} pt column",
+                                self.page
+                            );
+                        }
+                        });
                     });
             });
 

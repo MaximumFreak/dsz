@@ -24,6 +24,7 @@ enum AKind {
     Run,
     Profile,
     Gamepad,
+    Xbox,
 }
 
 fn akind(a: &Action) -> AKind {
@@ -41,12 +42,14 @@ fn akind(a: &Action) -> AKind {
         Action::Run { .. } => AKind::Run,
         Action::Profile { .. } => AKind::Profile,
         Action::Gamepad { .. } => AKind::Gamepad,
+        Action::Xbox { .. } => AKind::Xbox,
     }
 }
 
-const KINDS: [(AKind, &str); 13] = [
+const KINDS: [(AKind, &str); 14] = [
     (AKind::None, "Nothing"),
-    (AKind::Gamepad, "Controller button"),
+    (AKind::Gamepad, "PlayStation button"),
+    (AKind::Xbox, "Xbox button"),
     (AKind::Key, "Keyboard key"),
     (AKind::Mouse, "Mouse button"),
     (AKind::ScrollUp, "Scroll up"),
@@ -80,7 +83,7 @@ impl App {
         page_header(
             ui,
             "Button mapping",
-            "Send keys, mouse buttons, media keys, or app actions from any button or combo. With a virtual controller on, a mapping can also hide its button from the game or press a different controller button.",
+            "Send keys, mouse buttons, media keys, or app actions from any button or combo. With a virtual controller on, a mapping can also hide its button from the game or press a different controller button. Xbox buttons work on any profile, so the Xbox button can open Game Bar (tap) or Task View (hold).",
         );
         let edge = self
             .engine
@@ -89,6 +92,8 @@ impl App {
             .map(|d| d.model.is_edge())
             .unwrap_or(true);
         let virtual_on = p.virtual_out.kind != VirtualKind::Off;
+        let xbox_on = p.virtual_out.kind == VirtualKind::Xbox360;
+        let can_hide = self.engine.companion.can_hide();
         let profile_names = self.engine.profiles.names();
 
         // Key capture.
@@ -144,8 +149,30 @@ impl App {
                 .inner_margin(egui::Margin::symmetric(16, 12))
                 .show(ui, |ui| {
                     ui.set_width(row_w);
+                    // The remove button sits in the top-right corner, out of
+                    // the wrapped row, so a narrow window wraps the row
+                    // instead of pushing the card wider.
+                    let top = ui.cursor().min;
+                    let x = egui::Rect::from_min_size(
+                        egui::pos2(top.x + row_w - 20.0, top.y),
+                        egui::vec2(20.0, 28.0),
+                    );
+                    let xr = ui.interact(x, ui.id().with(("map-x", i)), egui::Sense::click()).on_hover_text("Remove");
+                    ui.painter().text(
+                        x.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "✕",
+                        egui::FontId::proportional(14.0),
+                        if xr.hovered() { TEXT } else { MUTED },
+                    );
+                    if xr.clicked() {
+                        remove = Some(i);
+                    }
+                    ui.scope(|ui| {
+                    ui.set_max_width(row_w - 28.0);
                     ui.horizontal_wrapped(|ui| {
                         toggle(ui, &mut m.enabled);
+                        fit(ui, 130.0);
                         egui::ComboBox::from_id_salt(("map-btn", i))
                             .width(130.0)
                             .selected_text(RichText::new(m.button.short_name()).strong())
@@ -154,6 +181,7 @@ impl App {
                                     ui.selectable_value(&mut m.button, b, b.short_name());
                                 }
                             });
+                        fit(ui, 120.0);
                         egui::ComboBox::from_id_salt(("map-act", i))
                             .width(120.0)
                             .selected_text(match m.gesture {
@@ -169,6 +197,7 @@ impl App {
                         ui.label(RichText::new("→").color(MUTED).size(16.0));
                         let mut k = akind(&m.action);
                         let before = k;
+                        fit(ui, 170.0);
                         egui::ComboBox::from_id_salt(("map-kind", i))
                             .width(170.0)
                             .selected_text(KINDS.iter().find(|x| x.0 == k).map(|x| x.1).unwrap_or(""))
@@ -194,10 +223,17 @@ impl App {
                                     name: profile_names.iter().find(|n| **n != p_name).cloned().unwrap_or_default(),
                                 },
                                 AKind::Gamepad => Action::Gamepad { button: m.button },
+                                AKind::Xbox => Action::Xbox {
+                                    button: XboxPadButton::ALL
+                                        .into_iter()
+                                        .find(|x| x.pad_button() == m.button)
+                                        .unwrap_or(XboxPadButton::Guide),
+                                },
                             };
                         }
                         match &mut m.action {
                             Action::Key { vk, ctrl, shift, alt, win } => {
+                                fit(ui, 110.0);
                                 egui::ComboBox::from_id_salt(("map-key", i))
                                     .width(110.0)
                                     .selected_text(key_name(*vk))
@@ -220,6 +256,7 @@ impl App {
                                 ui.checkbox(win, "Win");
                             }
                             Action::Mouse { button } => {
+                                fit(ui, 110.0);
                                 egui::ComboBox::from_id_salt(("map-mouse", i))
                                     .width(110.0)
                                     .selected_text(mouse_label(*button))
@@ -230,6 +267,7 @@ impl App {
                                     });
                             }
                             Action::Media { key } => {
+                                fit(ui, 150.0);
                                 egui::ComboBox::from_id_salt(("map-media", i))
                                     .width(150.0)
                                     .selected_text(key.label())
@@ -240,6 +278,7 @@ impl App {
                                     });
                             }
                             Action::Profile { name } => {
+                                fit(ui, 170.0);
                                 egui::ComboBox::from_id_salt(("map-prof", i))
                                     .width(170.0)
                                     .selected_text(if name.is_empty() { "Choose…" } else { name.as_str() })
@@ -250,6 +289,7 @@ impl App {
                                     });
                             }
                             Action::Gamepad { button } => {
+                                fit(ui, 130.0);
                                 egui::ComboBox::from_id_salt(("map-pad", i))
                                     .width(130.0)
                                     .selected_text(button.short_name())
@@ -262,6 +302,24 @@ impl App {
                                     ui.label(RichText::new("needs a virtual controller").size(12.0).color(WARN));
                                 }
                             }
+                            Action::Xbox { button } => {
+                                fit(ui, 130.0);
+                                egui::ComboBox::from_id_salt(("map-xbox", i))
+                                    .width(130.0)
+                                    .selected_text(button.label())
+                                    .show_ui(ui, |ui| {
+                                        for b in XboxPadButton::ALL {
+                                            ui.selectable_value(button, b, b.label());
+                                        }
+                                    });
+                                if !xbox_on && can_hide {
+                                    ui.label(RichText::new("hidden helper Xbox controller").size(12.0).color(MUTED))
+                                        .on_hover_text("This profile has no virtual Xbox controller, so DSZ keeps a helper one plugged in, hidden from games with HidHide. Only Windows (Task View, Game Bar) sees it. Needs usbip-win2.");
+                                } else if !xbox_on {
+                                    ui.label(RichText::new("games see a helper controller").size(12.0).color(WARN))
+                                        .on_hover_text("Without HidHide, DSZ plugs in a helper Xbox controller for the press, which games can see, and unplugs it 30 seconds after the last press. Windows needs about a second to see it, so the first press arrives late. Install HidHide on the Virtual controller page to hide it.");
+                                }
+                            }
                             Action::Run { path } => {
                                 ui.add(egui::TextEdit::singleline(path).hint_text("C:\\path\\to\\app.exe").desired_width(220.0));
                                 if button(ui, "Browse…").clicked() {
@@ -272,11 +330,7 @@ impl App {
                             }
                             _ => {}
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(RichText::new("✕").color(MUTED)).frame(false)).on_hover_text("Remove").clicked() {
-                                remove = Some(i);
-                            }
-                        });
+                    });
                     });
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new("Together with").size(12.5).color(MUTED));
@@ -286,6 +340,7 @@ impl App {
                         } else {
                             chosen.iter().map(|b| b.short_name()).collect::<Vec<_>>().join(" + ")
                         };
+                        fit(ui, 170.0);
                         egui::ComboBox::from_id_salt(("map-with", i)).width(170.0).selected_text(label).show_ui(ui, |ui| {
                             for b in button_choices(edge) {
                                 if b == m.button {
@@ -313,6 +368,7 @@ impl App {
                     });
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new("Behavior").size(12.5).color(MUTED));
+                        fit(ui, 290.0);
                         segmented(
                             ui,
                             &mut m.mode,
@@ -324,13 +380,16 @@ impl App {
                             ],
                         );
                         if m.mode == HoldStyle::Turbo {
+                            fit(ui, 260.0);
                             ui.add(egui::Slider::new(&mut m.turbo_ms, 30..=1000).suffix(" ms").text("interval"));
                         }
                         match m.gesture {
                             Gesture::LongPress => {
+                                fit(ui, 260.0);
                                 ui.add(egui::Slider::new(&mut m.long_ms, 150..=2000).suffix(" ms").text("hold for"));
                             }
                             Gesture::DoubleTap => {
+                                fit(ui, 260.0);
                                 ui.add(egui::Slider::new(&mut m.double_ms, 120..=800).suffix(" ms").text("window"));
                             }
                             _ => {}

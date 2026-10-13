@@ -1,5 +1,11 @@
 //! Per-controller packet clock. Every 32/3000 s it turns one window of
-//! audio plus event haptics into one Bluetooth haptics report.
+//! audio plus event haptics into one Bluetooth haptics report (`0x32`).
+//! While the speaker may play (a game has the virtual DualSense's audio
+//! open, or PC audio goes to the speaker) it runs every 64/3000 s instead,
+//! silent between sounds as a PS5 is, and sends
+//! two haptic blocks with two Opus frames (`0x39`): the controller plays
+//! the two 10 ms frames over that one 21.3 ms tick, so each report carries
+//! 1024 frames of 48 kHz audio squeezed into 960.
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -7,19 +13,28 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ds_proto::input::Button;
-use ds_proto::stream::{self, StreamCounters, HAPTIC_FRAME};
+use ds_proto::output::{SPEAKER_VOLUME_MAX, SPEAKER_VOLUME_MIN};
+use ds_proto::stream::{self, StreamCounters, BLOCKS, HAPTIC_FRAME, OPUS_FRAME, OPUS_SAMPLES};
 use ds_proto::Buttons;
 
 use super::audio::Sub;
-use super::dsp::{resample_window, soft_clip, HapticFilter};
+use super::dsp::{resample_window, soft_clip, HapticFilter, Squeeze};
+use super::game::WINDOW;
+use super::opus::{Encoder, Pcm};
 use super::synth::Synth;
-use crate::device::{Device, StreamPacket, MAX_REPORT};
+use crate::device::{Device, StreamPacket, MAX_REPORT, SPEAKER_HEADSET, SPEAKER_MUTED, SPEAKER_UNTOUCHED};
 use crate::engine::{Engine, ProfileCache};
 use crate::profile::AudioSource;
 
 const PERIOD: Duration = Duration::from_nanos(stream::PERIOD_NS);
 /// Stop sending after this long with nothing to play.
 const IDLE_AFTER: Duration = Duration::from_millis(400);
+/// Speaker sound below this peak counts as silence.
+const SPEAKER_GATE: f32 = 1.0 / 2048.0;
+/// Silent speaker reports sent at once when a speaker stream starts, so the
+/// controller has a cushion against radio jitter (about 64 ms). Without it
+/// the sound pops wherever a report arrives a little late.
+pub const SPEAKER_LEAD: usize = 3;
 
 struct Source {
     sub: Arc<Sub>,
@@ -29,14 +44,15 @@ struct Source {
 }
 
 impl Source {
-    /// Take one window (about 10.667 ms) of input frames. Empty on underrun.
-    fn take(&mut self, prime_windows: usize, underruns: &mut u64) -> (&[[f32; 2]], u32) {
+    /// Take one window (`frames` frames at 48 kHz) of input. Empty on
+    /// underrun.
+    fn take(&mut self, frames: usize, prime_windows: usize, underruns: &mut u64) -> (&[[f32; 2]], u32) {
         let rate = self.sub.rate.load(Ordering::Relaxed);
         self.chunk.clear();
         if rate == 0 {
             return (&self.chunk, 48_000);
         }
-        self.acc += rate as f64 * 512.0 / 48_000.0;
+        self.acc += rate as f64 * frames as f64 / 48_000.0;
         let l = self.acc.floor() as usize;
         self.acc -= l as f64;
         let mut f = self.sub.fifo.lock();
@@ -65,6 +81,16 @@ impl Source {
     }
 }
 
+/// Speaker volume 1..=100 as the output report's volume byte.
+fn volume_byte(v: u8) -> u8 {
+    let span = (SPEAKER_VOLUME_MAX - SPEAKER_VOLUME_MIN) as u32;
+    SPEAKER_VOLUME_MIN + ((v.clamp(1, 100) as u32 - 1) * span / 99) as u8
+}
+
+fn to_i16(x: f32) -> i16 {
+    (soft_clip(x) * 32767.0).round() as i16
+}
+
 pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     crate::platform::timer_resolution_1ms();
     crate::platform::raise_thread_priority(true);
@@ -83,15 +109,52 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     let mut hap = [[0f32; 2]; 32];
     let mut late = 0u32;
     let mut levels = [0f32; 2];
+    let mut speaker_meter = 0f32;
     let mut pulses: VecDeque<crate::device::HapticPulse> = VecDeque::new();
     let mut game = super::game::GameReader::new();
     let mut to_rumble = super::game::ActuatorRumble::new();
     let mut prev_g = [0f32; 2];
+    let mut prev_pc = [0f32; 2];
+    let mut squeeze = Squeeze::new();
     let mut filtered: Vec<[f32; 2]> = Vec::with_capacity(1024);
+    let mut pc_spk: Vec<[f32; 2]> = Vec::with_capacity(WINDOW);
+    // Speaker audio for one report, before and after fitting to 960 frames.
+    let mut spk: Vec<[f32; 2]> = Vec::with_capacity(BLOCKS * WINDOW);
+    let mut spk_fit: Vec<[f32; 2]> = Vec::with_capacity(BLOCKS * OPUS_SAMPLES + 8);
+    let mut frames = [[0u8; HAPTIC_FRAME]; BLOCKS];
+    let mut opus = [[0u8; OPUS_FRAME]; BLOCKS];
+    let mut pcm: Pcm = [0; OPUS_SAMPLES * 2];
+    let mut encoder: Option<Encoder> = None;
+    let mut was_media = false;
+    let mut lead = 0usize;
+    // The sound that starts a speaker stream was noticed one window
+    // earlier, so the stream joins it mid-sound: fade it in.
+    let mut fade_in = false;
 
     // The stream keeps the actuators until this instant; anything that
     // needs it pushes the instant out by `IDLE_AFTER`.
     let mut stream_until = Instant::now();
+
+    // Stop the microphone stream a speaker stream starts (twice, in case
+    // the radio drops one).
+    let mic_off = |counters: &mut StreamCounters| {
+        let mut b = [0u8; MAX_REPORT];
+        for _ in 0..2 {
+            let len = stream::build_mic_off(counters, &mut b).len();
+            let mut pkt = StreamPacket {
+                len,
+                data: [0u8; MAX_REPORT],
+            };
+            pkt.data[..len].copy_from_slice(&b[..len]);
+            let _ = device.stream_tx.try_send(pkt);
+        }
+    };
+
+    let set_route = |route: u8| {
+        if device.speaker_route.swap(route, Ordering::AcqRel) != route {
+            device.kick();
+        }
+    };
 
     while !device.stop.load(Ordering::Acquire) {
         let profile = cache.get(engine, device);
@@ -99,6 +162,26 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let vo = &profile.virtual_out;
         let enabled = h.enabled && device.is_bluetooth();
         let game_src = device.game_audio.lock().clone();
+        let game_speaker = game_src.is_some() && vo.game_speaker;
+        let pc_speaker = h.pc_audio_on_speaker && h.source == AudioSource::SystemAudio;
+        let speaker_allowed = enabled && h.speaker_volume > 0 && (game_speaker || pc_speaker);
+        // The speaker route goes on when the speaker is first needed and
+        // stays on (silent between sounds) while the profile allows it:
+        // switching the amplifier on for every burst of sound pops. Off
+        // (muted) only when the profile turns the speaker off.
+        let speaker_possible =
+            enabled && h.speaker_volume > 0 && (vo.game_speaker || pc_speaker);
+        let route_now = device.speaker_route.load(Ordering::Acquire);
+        if speaker_allowed || (speaker_possible && route_now > SPEAKER_MUTED) {
+            let headset = h.headset_when_plugged && device.live.lock().input.headphones;
+            set_route(if headset {
+                SPEAKER_HEADSET
+            } else {
+                volume_byte(h.speaker_volume)
+            });
+        } else if !speaker_possible && route_now != SPEAKER_UNTOUCHED {
+            set_route(SPEAKER_MUTED);
+        }
         // The actuators take PCM only while something needs the stream.
         // Otherwise rumble goes to the controller's own rumble emulation,
         // which is what an Xbox game with no haptic modes on gets.
@@ -106,7 +189,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             || h.buttons.enabled
             || h.triggers.enabled
             || h.rumble_as_haptics
-            || (game_src.is_some() && vo.game_haptics);
+            || (game_src.is_some() && (vo.game_haptics || game_speaker));
         let now = Instant::now();
         if enabled
             && (continuous || !device.feedback.lock().pulses.is_empty() || synth.events_active())
@@ -117,8 +200,15 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         device.pcm_mode.store(streaming, Ordering::Release);
         if !streaming {
             source = None;
+            encoder = None;
+            if was_media {
+                was_media = false;
+                mic_off(&mut counters);
+                log::info!("controller speaker stream off");
+            }
             device.haptic_level[0].store(0, Ordering::Relaxed);
             device.haptic_level[1].store(0, Ordering::Relaxed);
+            device.speaker_level.store(0, Ordering::Relaxed);
             synth.rumble(0, 0, 1.0);
             // Pulses without a stream play as a short classic rumble.
             let mut fb = device.feedback.lock();
@@ -133,7 +223,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             // Actuators are off: game haptics become classic rumble.
             let converting = game_src.is_some() && vo.game_haptics;
             if let Some(src) = game_src.filter(|_| vo.game_haptics) {
-                if let Some(w) = game.take(src.as_ref()) {
+                if let Some(w) = game.take(src.as_ref(), WINDOW) {
                     let (heavy, light) = to_rumble.convert(&w.haptics);
                     if heavy > 0 || light > 0 {
                         let until = Instant::now() + Duration::from_millis(40);
@@ -152,6 +242,58 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             deadline = Instant::now();
             continue;
         }
+
+        // Speaker reports while there is speaker sound.
+        if speaker_allowed && encoder.is_none() {
+            encoder = Encoder::new();
+        }
+        if !speaker_allowed {
+            encoder = None;
+        }
+        // Speaker reports run the whole time the speaker may play, silent
+        // between sounds, as a PS5 sends them: starting the controller's
+        // audio for each sound glitches its first moments (heard through
+        // its own microphone as a hard edge or a short burst and a gap).
+        let media = speaker_allowed && encoder.is_some();
+        if media != was_media {
+            was_media = media;
+            if media {
+                squeeze = Squeeze::new();
+                lead = device.speaker_lead.load(Ordering::Relaxed).clamp(1, 12) as usize;
+                fade_in = true;
+            } else {
+                mic_off(&mut counters);
+            }
+            // Start the new cadence from now.
+            deadline = now;
+            log::info!(
+                "controller speaker stream {}",
+                if media { "on" } else { "off" }
+            );
+        }
+        if media && lead > 0 {
+            // A fresh speaker stream: queue the cushion of silence.
+            lead -= 1;
+            if let Some(enc) = encoder.as_mut() {
+                let silent: Pcm = [0; OPUS_SAMPLES * 2];
+                for slot in opus.iter_mut() {
+                    enc.encode(&silent, slot);
+                }
+                let len = stream::build_audio(&mut counters, &opus, &[[0u8; HAPTIC_FRAME]; BLOCKS], &mut buf).len();
+                let mut pkt = StreamPacket {
+                    len,
+                    data: [0u8; MAX_REPORT],
+                };
+                pkt.data[..len].copy_from_slice(&buf[..len]);
+                let _ = device.stream_tx.try_send(pkt);
+            }
+            continue;
+        }
+        let (period, blocks, win) = if media {
+            (PERIOD * BLOCKS as u32, BLOCKS, WINDOW)
+        } else {
+            (PERIOD, 1, WINDOW)
+        };
 
         // Audio source
         match h.source {
@@ -173,13 +315,13 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         }
         // Clock
         let now = Instant::now();
-        deadline += PERIOD;
-        if deadline + PERIOD < now {
+        deadline += period;
+        if deadline + period < now {
             late += 1;
             if late % 100 == 1 {
                 log::debug!("haptics clock fell behind; resyncing");
             }
-            deadline = now + PERIOD;
+            deadline = now + period;
         }
         timer.sleep_until(deadline);
         let now = Instant::now();
@@ -222,76 +364,141 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             synth.pulse(p.left, p.right, p.freq, p.ms);
         }
 
-        // Audio window
-        if let Some(src) = source.as_mut() {
-            let (chunk, rate) = src.take(h.latency.prime_windows(), &mut underruns);
-            // Haptics: filter at the source rate, then decimate to 3 kHz.
-            filter.configure(
-                rate as f32,
-                h.low_pass_hz.clamp(60.0, 1400.0),
-                h.high_pass_hz.clamp(5.0, 300.0),
-            );
-            filtered.clear();
-            for fr in chunk {
-                let (l, r) = if h.stereo {
-                    (fr[0], fr[1])
-                } else {
-                    let m = 0.5 * (fr[0] + fr[1]);
-                    (m, m)
-                };
-                let a = filter.run(0, l) * h.gain;
-                let b = filter.run(1, r) * h.gain;
-                filtered.push([a, b]);
+        spk.clear();
+        let mut speaker_peak = 0f32;
+        let mut any_haptics = false;
+        for frame in frames.iter_mut().take(blocks) {
+            // PC audio window
+            pc_spk.clear();
+            if let Some(src) = source.as_mut() {
+                let (chunk, rate) = src.take(win, h.latency.prime_windows(), &mut underruns);
+                // Haptics: filter at the source rate, then decimate to 3 kHz.
+                filter.configure(
+                    rate as f32,
+                    h.low_pass_hz.clamp(60.0, 1400.0),
+                    h.high_pass_hz.clamp(5.0, 300.0),
+                );
+                filtered.clear();
+                for fr in chunk {
+                    let (l, r) = if h.stereo {
+                        (fr[0], fr[1])
+                    } else {
+                        let m = 0.5 * (fr[0] + fr[1]);
+                        (m, m)
+                    };
+                    let a = filter.run(0, l) * h.gain;
+                    let b = filter.run(1, r) * h.gain;
+                    filtered.push([a, b]);
+                }
+                resample_window(&mut prev_h, &filtered, &mut hap);
+                if pc_speaker && !chunk.is_empty() {
+                    pc_spk.resize(win, [0.0; 2]);
+                    resample_window(&mut prev_pc, chunk, &mut pc_spk);
+                }
+            } else {
+                hap.fill([0.0; 2]);
             }
-            resample_window(&mut prev_h, &filtered, &mut hap);
-        } else {
-            hap.fill([0.0; 2]);
-        }
 
-        // Game audio from the virtual DualSense: actuator channels into the
-        // haptics. The speaker channels are not played.
-        if let Some(src) = game_src.as_ref() {
-            if let Some(w) = game.take(src.as_ref()) {
-                if vo.game_haptics {
-                    let lvl = vo.game_haptics_level.min(100) as f32 / 100.0;
-                    let mut g = [[0f32; 2]; 32];
-                    resample_window(&mut prev_g, &w.haptics, &mut g);
-                    for (o, v) in hap.iter_mut().zip(g.iter()) {
-                        o[0] += v[0] * lvl;
-                        o[1] += v[1] * lvl;
+            // Game audio from the virtual DualSense: actuator channels into
+            // the haptics, speaker channels to the speaker.
+            let at = spk.len();
+            spk.resize(at + win, [0.0; 2]);
+            if let Some(src) = game_src.as_ref() {
+                if let Some(w) = game.take(src.as_ref(), win) {
+                    if vo.game_haptics {
+                        let lvl = vo.game_haptics_level.min(100) as f32 / 100.0;
+                        let mut g = [[0f32; 2]; 32];
+                        resample_window(&mut prev_g, &w.haptics, &mut g);
+                        for (o, v) in hap.iter_mut().zip(g.iter()) {
+                            o[0] += v[0] * lvl;
+                            o[1] += v[1] * lvl;
+                        }
+                        if w.peak > 1e-4 {
+                            last_sound = now;
+                        }
                     }
-                    if w.peak > 1e-4 {
-                        last_sound = now;
+                    if vo.game_speaker {
+                        let lvl = vo.game_speaker_level.min(100) as f32 / 100.0;
+                        for (o, v) in spk[at..].iter_mut().zip(w.speaker.iter()) {
+                            o[0] += v[0] * lvl;
+                            o[1] += v[1] * lvl;
+                        }
                     }
                 }
             }
-        }
+            for (o, v) in spk[at..].iter_mut().zip(pc_spk.iter()) {
+                o[0] += v[0];
+                o[1] += v[1];
+            }
+            for f in &spk[at..] {
+                speaker_peak = speaker_peak.max(f[0].abs()).max(f[1].abs());
+            }
 
-        synth.render(&mut hap);
-        let mut frame = [0u8; HAPTIC_FRAME];
-        let mut peak = [0f32; 2];
-        for (k, s) in hap.iter().enumerate() {
-            let l = soft_clip(s[0]);
-            let r = soft_clip(s[1]);
-            peak[0] = peak[0].max(l.abs());
-            peak[1] = peak[1].max(r.abs());
-            frame[2 * k] = stream::haptic_sample(l);
-            frame[2 * k + 1] = stream::haptic_sample(r);
+            synth.render(&mut hap);
+            let mut peak = [0f32; 2];
+            for (k, s) in hap.iter().enumerate() {
+                let l = soft_clip(s[0]);
+                let r = soft_clip(s[1]);
+                peak[0] = peak[0].max(l.abs());
+                peak[1] = peak[1].max(r.abs());
+                frame[2 * k] = stream::haptic_sample(l);
+                frame[2 * k + 1] = stream::haptic_sample(r);
+            }
+            for c in 0..2 {
+                levels[c] = peak[c].max(levels[c] * 0.88);
+                device.haptic_level[c].store((levels[c] * 255.0) as u8, Ordering::Relaxed);
+            }
+            any_haptics |= frame.iter().any(|&b| b != 0);
         }
-        for c in 0..2 {
-            levels[c] = peak[c].max(levels[c] * 0.88);
-            device.haptic_level[c].store((levels[c] * 255.0) as u8, Ordering::Relaxed);
-        }
-        let haptic_nonzero = frame.iter().any(|&b| b != 0);
-        if haptic_nonzero || synth.active() {
+        speaker_meter = speaker_peak.min(1.0).max(speaker_meter * 0.85);
+        device
+            .speaker_level
+            .store((speaker_meter * 255.0) as u8, Ordering::Relaxed);
+        let speaker_sound = speaker_peak > SPEAKER_GATE;
+        if any_haptics || synth.active() || (media && speaker_sound) {
             last_sound = now;
         }
-        if now.duration_since(last_sound) > IDLE_AFTER {
+        if now.duration_since(last_sound) > IDLE_AFTER && !media {
             // Nothing to play: keep the radio quiet.
             continue;
         }
 
-        let len = stream::build(&mut counters, &frame, &mut buf).len();
+        let len = if media {
+            // 1024 frames squeezed into 960 (the controller's 21.3 ms tick).
+            spk_fit.clear();
+            squeeze.run(&spk, &mut spk_fit);
+            spk_fit.resize(BLOCKS * OPUS_SAMPLES, [0.0; 2]);
+            if fade_in {
+                fade_in = false;
+                for (k, f) in spk_fit.iter_mut().take(OPUS_SAMPLES).enumerate() {
+                    let g = k as f32 / OPUS_SAMPLES as f32;
+                    *f = [f[0] * g, f[1] * g];
+                }
+            }
+            let headset = device.speaker_route.load(Ordering::Acquire) == SPEAKER_HEADSET;
+            if let Some(enc) = encoder.as_mut() {
+                for (k, slot) in opus.iter_mut().enumerate() {
+                    for (i, f) in spk_fit[k * OPUS_SAMPLES..(k + 1) * OPUS_SAMPLES].iter().enumerate() {
+                        let (l, r) = if headset {
+                            (f[0], f[1])
+                        } else {
+                            // One speaker: a mono mix on both channels (it
+                            // plays the right one).
+                            let m = 0.5 * (f[0] + f[1]);
+                            (m, m)
+                        };
+                        pcm[2 * i] = to_i16(l);
+                        pcm[2 * i + 1] = to_i16(r);
+                    }
+                    if !enc.encode(&pcm, slot) {
+                        device.stats.stream_underruns.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            stream::build_audio(&mut counters, &opus, &frames, &mut buf).len()
+        } else {
+            stream::build(&mut counters, &frames[0], &mut buf).len()
+        };
         let mut pkt = StreamPacket {
             len,
             data: [0u8; MAX_REPORT],
@@ -312,5 +519,25 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             underruns = 0;
         }
     }
+    if was_media {
+        mic_off(&mut counters);
+    }
     device.pcm_mode.store(false, Ordering::Release);
+    if device.speaker_route.load(Ordering::Acquire) != SPEAKER_UNTOUCHED {
+        device.speaker_route.store(SPEAKER_MUTED, Ordering::Release);
+        device.kick();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn volume_spans_the_accepted_range() {
+        assert_eq!(volume_byte(1), SPEAKER_VOLUME_MIN);
+        assert_eq!(volume_byte(100), SPEAKER_VOLUME_MAX);
+        assert!(volume_byte(50) > SPEAKER_VOLUME_MIN && volume_byte(50) < SPEAKER_VOLUME_MAX);
+        assert!(volume_byte(1) > SPEAKER_HEADSET, "volume bytes never collide with route codes");
+    }
 }

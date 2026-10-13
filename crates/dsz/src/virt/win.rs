@@ -287,6 +287,38 @@ pub fn parent_instance_id(instance_id: &str) -> Option<String> {
     }
 }
 
+/// Instance ids of every node below `instance_id` (children, their
+/// children, ...), for the nodes present now.
+pub fn descendant_ids(instance_id: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    unsafe {
+        let w = wide(instance_id);
+        let mut root = 0u32;
+        if CM_Locate_DevNodeW(&mut root, w.as_ptr(), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS {
+            return out;
+        }
+        let mut stack = vec![root];
+        while let Some(n) = stack.pop() {
+            let mut c = 0u32;
+            if CM_Get_Child(&mut c, n, 0) != CR_SUCCESS {
+                continue;
+            }
+            loop {
+                if let Some(id) = device_id(c) {
+                    out.push(id);
+                }
+                stack.push(c);
+                let mut s = 0u32;
+                if CM_Get_Sibling(&mut s, c, 0) != CR_SUCCESS {
+                    break;
+                }
+                c = s;
+            }
+        }
+    }
+    out
+}
+
 /// File version (`a.b.c.d`) from a PE version resource.
 pub fn file_version(path: &str) -> Option<[u16; 4]> {
     let w = wide(path);

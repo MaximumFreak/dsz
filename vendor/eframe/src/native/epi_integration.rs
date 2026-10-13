@@ -156,6 +156,9 @@ pub struct EpiIntegration {
     last_auto_save: Instant,
     pub beginning: Instant,
     is_first_frame: bool,
+    /// DSZ patch: the app's viewport asked to start hidden
+    /// (`with_visible(false)`), so the first frame doesn't show the window.
+    start_hidden: bool,
     pub egui_ctx: egui::Context,
     pending_full_output: egui::FullOutput,
 
@@ -222,6 +225,7 @@ impl EpiIntegration {
             app_icon_setter,
             beginning: Instant::now(),
             is_first_frame: true,
+            start_hidden: native_options.viewport.visible == Some(false),
         }
     }
 
@@ -305,7 +309,7 @@ impl EpiIntegration {
 
     pub fn post_rendering(&mut self, window: &winit::window::Window) {
         profiling::function_scope!();
-        if std::mem::take(&mut self.is_first_frame) {
+        if std::mem::take(&mut self.is_first_frame) && !self.start_hidden {
             // We keep hidden until we've painted something. See https://github.com/emilk/egui/pull/2279
             window.set_visible(true);
         }

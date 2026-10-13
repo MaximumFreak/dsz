@@ -67,11 +67,13 @@ impl App {
                             d.haptic_level[1].load(Ordering::Relaxed) as f32 / 255.0,
                         ];
                         ui.horizontal(|ui| {
+                            // Room for the two labels and the status pill.
+                            let mw = ((ui.available_width() - 170.0) / 2.0).clamp(30.0, 120.0);
                             ui.label(RichText::new("Left").color(MUTED));
-                            meter(ui, lv[0], ACCENT, 120.0);
+                            meter(ui, lv[0], ACCENT, mw);
                             ui.add_space(8.0);
                             ui.label(RichText::new("Right").color(MUTED));
-                            meter(ui, lv[1], ACCENT, 120.0);
+                            meter(ui, lv[1], ACCENT, mw);
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -137,7 +139,7 @@ impl App {
                             },
                         );
                         let peak = self.engine.audio.peak();
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new("Input").color(MUTED));
                             meter(ui, peak, VIOLET, 160.0);
                             if capture.running {
@@ -196,6 +198,75 @@ impl App {
                     );
                 });
             } else {
+                card(
+                    ui,
+                    "Controller speaker",
+                    "Speaker sound over Bluetooth: a game's own speaker sounds through the virtual DualSense, and PC audio if you want it",
+                    |ui| {
+                        let h = &mut p.haptics;
+                        slider_row(
+                            ui,
+                            "Volume",
+                            "0 keeps the speaker off",
+                            &mut h.speaker_volume,
+                            0..=100,
+                            "%",
+                        );
+                        let mut pc = h.pc_audio_on_speaker;
+                        if toggle_row(
+                            ui,
+                            "PC audio on the speaker",
+                            "Plays the captured system audio (the haptics source) on the speaker too",
+                            &mut pc,
+                        ) {
+                            h.pc_audio_on_speaker = pc;
+                            if pc {
+                                h.source = AudioSource::SystemAudio;
+                                h.enabled = true;
+                            }
+                        }
+                        toggle_row(
+                            ui,
+                            "Headset when plugged in",
+                            "Sends speaker sound to a headset in the controller's jack instead",
+                            &mut h.headset_when_plugged,
+                        );
+                        if let Some(d) = dev {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Speaker sound").color(MUTED));
+                                meter(
+                                    ui,
+                                    d.speaker_level.load(Ordering::Relaxed) as f32 / 255.0,
+                                    VIOLET,
+                                    184.0,
+                                );
+                            });
+                            if bt && h.enabled && h.speaker_volume > 0 {
+                                ui.add_space(6.0);
+                                let busy = d.game_audio.lock().is_some();
+                                if button(ui, "Test speaker").clicked() && !busy {
+                                    d.start_speaker_test();
+                                }
+                                muted(ui, "Four rising notes, then a steady tone. The controller's microphone listens for clicks.");
+                                if let Some(r) = d.speaker_test_result.lock().as_ref() {
+                                    muted(ui, r);
+                                }
+                                if busy && d.mic_tap.lock().is_none() {
+                                    muted(ui, "A game is using the virtual DualSense; its speaker sound plays here.");
+                                }
+                            }
+                        }
+                        if !bt || !p.haptics.enabled {
+                            muted(ui, "Needs Bluetooth and haptics streaming on.");
+                        }
+                    },
+                );
+            }
+        });
+        ui.add_space(12.0);
+        two_columns(ui, |ui, col| {
+            if col == 0 {
                 card(
                     ui,
                     "Event haptics",
@@ -267,7 +338,7 @@ impl App {
                         }
                     },
                 );
-                ui.add_space(12.0);
+            } else {
                 card(
                     ui,
                     "Rumble",

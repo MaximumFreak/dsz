@@ -91,7 +91,9 @@ pub fn install(ctx: &egui::Context, scale: f32) {
     fonts.families.insert(semibold(), sb);
     ctx.set_fonts(fonts);
 
-    ctx.set_pixels_per_point(ctx.native_pixels_per_point().unwrap_or(1.0) * scale.clamp(0.75, 2.0));
+    // A zoom on top of Windows' own display scale, so it follows the window
+    // to a monitor with a different scale.
+    ctx.set_zoom_factor(scale.clamp(0.75, 2.0));
 
     ctx.style_mut(|s| {
         s.text_styles = [

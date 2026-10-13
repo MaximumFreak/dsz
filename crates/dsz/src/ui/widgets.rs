@@ -196,6 +196,9 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
 
 /// Horizontal level meter 0..=1.
 pub fn meter(ui: &mut Ui, v: f32, color: Color32, width: f32) -> Response {
+    // Never wider than the room left, so a narrow column doesn't push the
+    // page wider.
+    let width = width.min(ui.available_width()).max(24.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 8.0), Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(4), FIELD);
@@ -236,7 +239,9 @@ pub fn danger_button(ui: &mut Ui, text: &str) -> Response {
 }
 
 pub fn muted(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(12.5).color(MUTED));
+    // Wraps in the room left even inside a row, where labels would
+    // otherwise run past the column.
+    ui.add(egui::Label::new(RichText::new(text).size(12.5).color(MUTED)).wrap());
 }
 
 pub fn note(ui: &mut Ui, text: &str, color: Color32) {
@@ -280,9 +285,23 @@ pub fn swatches(ui: &mut Ui, current: [u8; 3], colors: &[[u8; 3]]) -> Option<[u8
 
 /// Two-column grid of cards with equal widths.
 /// `f` is called with column 0, then column 1. Stacks on narrow windows.
+/// In a wrapped row, start a new line unless `w` points still fit. Combo
+/// boxes and sliders lay out in their own inner row, which a wrapped row
+/// can't break, so without this they push the row (and the page) wider.
+pub fn fit(ui: &mut Ui, w: f32) {
+    // A wrapped row's available width is the whole row; what's left is
+    // from the cursor to the row's right edge.
+    let left = ui.max_rect().right() - ui.cursor().min.x;
+    if left < w + ui.spacing().item_spacing.x {
+        ui.end_row();
+    }
+}
+
 pub fn two_columns(ui: &mut Ui, mut f: impl FnMut(&mut Ui, usize)) {
     let w = ui.available_width();
-    if w < 820.0 {
+    // Below this a column can't hold the widest rows (the six lightbar
+    // modes, a trigger's byte string beside its button).
+    if w < 900.0 {
         f(ui, 0);
         ui.add_space(12.0);
         f(ui, 1);

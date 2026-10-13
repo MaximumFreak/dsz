@@ -31,7 +31,15 @@ pub fn main_window() -> HWND {
 }
 
 pub fn show_main_window() {
-    let h = main_window();
+    let mut h = main_window();
+    if h.is_null() {
+        // Started hidden and the UI hasn't found its window yet.
+        let t = crate::platform::wide(crate::APP_TITLE);
+        h = unsafe { FindWindowW(std::ptr::null(), t.as_ptr()) };
+        if !h.is_null() {
+            set_main_window(h as isize);
+        }
+    }
     if !h.is_null() {
         unsafe {
             ShowWindow(h, SW_SHOW);

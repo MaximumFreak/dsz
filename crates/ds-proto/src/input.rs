@@ -207,6 +207,30 @@ pub enum ParseError {
     TooShort,
     UnknownReport(u8),
     BadCrc,
+    /// A Bluetooth `0x31` report that carries something other than the
+    /// controller state (its type nibble is not 1): microphone audio while
+    /// the controller receives speaker audio. Same id, same length, valid
+    /// CRC, so the type nibble is the only way to tell.
+    NotState(u8),
+    /// A touch point off the pad: not a real state report.
+    Implausible,
+}
+
+/// Type nibble (low four bits of byte 1) of a Bluetooth `0x31` report that
+/// carries the controller state. Observed on a DualSense Edge: state
+/// reports are `31 x1`; while the speaker plays, microphone packets arrive
+/// as `31 x2 <counter> D4 …`.
+const BT_STATE_TYPE: u8 = 0x01;
+
+/// Reject a state whose active touch points are well off the 1920 × 1080
+/// pad (a little past the edge is allowed).
+fn plausible(s: InputState) -> Result<InputState, ParseError> {
+    let off = |t: &TouchPoint| t.active && (t.x > 1950 || t.y > 1110);
+    if s.touch.iter().any(off) {
+        Err(ParseError::Implausible)
+    } else {
+        Ok(s)
+    }
 }
 
 #[inline]
@@ -278,7 +302,12 @@ pub fn parse(
             if check_crc && !crc::verify(crc::PREFIX_INPUT, &report[..crate::BT_INPUT_LEN]) {
                 return Err(ParseError::BadCrc);
             }
-            Ok(parse_full(report, 1, model))
+            let kind = report[1] & 0x0F;
+            // 0 is accepted too, for firmware that leaves the nibble clear.
+            if kind != BT_STATE_TYPE && kind != 0 {
+                return Err(ParseError::NotState(kind));
+            }
+            plausible(parse_full(report, 1, model))
         }
         (Connection::Bluetooth, 0x01) => {
             if report.len() < 10 {
@@ -290,7 +319,7 @@ pub fn parse(
             if report.len() < 64 {
                 return Err(ParseError::TooShort);
             }
-            Ok(parse_full(report, 0, model))
+            plausible(parse_full(report, 0, model))
         }
         (_, id) => Err(ParseError::UnknownReport(id)),
     }
@@ -455,6 +484,41 @@ mod tests {
         assert_eq!(
             parse(&bt, Connection::Bluetooth, Model::DualSense, true),
             Err(ParseError::BadCrc)
+        );
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        s.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
+    }
+
+    /// Reports captured from a DualSense Edge over Bluetooth while it played
+    /// speaker audio: a state report, then a microphone packet with the
+    /// same id, length and a valid CRC.
+    #[test]
+    fn microphone_packets_are_not_state() {
+        let state = unhex("31 31 7F 82 82 7E 00 00 01 08 00 00 00 6A 26 6E B8 06 00 08 00 FB FF BF FF 0A 20 A1 05 D3 4E E2 3B 12 80 00 00 00 80 00 00 00 00 09 09 00 00 00 00 00 3C 00 08 01 04 00 00 1A 14 86 AD 81 73 D1 89 00 00 00 00 00 00 00 00 00 91 E8 B6 B1");
+        let mic = unhex("31 12 00 D4 7E CE 2B EF 0E 45 AC 7B AB 01 FF DA C3 0D 66 CE 3A 3C 87 D9 95 68 7F 1F ED 42 0F B5 3B EF 67 03 CE 5E D3 8C 25 E0 C4 6F 63 3B DC C4 7C C2 F5 C1 56 7D C4 F8 AE AB A0 96 89 5B 68 94 2A DD 21 B0 13 5F 8C 3C 80 24 47 A5 39 73");
+        assert!(crc::verify(crc::PREFIX_INPUT, &state));
+        assert!(crc::verify(crc::PREFIX_INPUT, &mic), "the mic packet's CRC is valid");
+        let s = parse(&state, Connection::Bluetooth, Model::DualSenseEdge, true).unwrap();
+        assert_eq!(s.buttons.0, 0);
+        assert!(!s.touch[0].active);
+        assert_eq!(
+            parse(&mic, Connection::Bluetooth, Model::DualSenseEdge, true),
+            Err(ParseError::NotState(2))
+        );
+    }
+
+    #[test]
+    fn touch_off_the_pad_is_rejected() {
+        let mut usb = usb_report();
+        // Touch point 1 active at x = 0xFFF.
+        usb[33] = 0x01;
+        usb[34] = 0xFF;
+        usb[35] = 0x0F;
+        assert_eq!(
+            parse(&usb, Connection::Usb, Model::DualSense, false),
+            Err(ParseError::Implausible)
         );
     }
 

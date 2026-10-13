@@ -1,130 +1,177 @@
-//! The DualSense silhouette, in code: the outline the overview page draws
-//! and the app icon. Shared with `build.rs`, which turns the icon into the
-//! `.ico` embedded in the exe, so keep this file free of crate imports.
-//!
-//! Geometry lives in a 1000 × 660 design space (the controller seen from
-//! above, x to the right, y down). Outlines are the right half as cubic
-//! Béziers from the top center to the bottom center, mirrored for the left.
+//! The DualSense silhouette for the app icon and the sidebar mark, from
+//! OpenController's drawing (Brunovncs, MIT, `assets/OpenController-LICENSE`):
+//! the `dualsense` look in `assets/pads.json`, SVG paths on a 400 × 280
+//! grid. Shared with `build.rs`, which turns the icon into the `.ico`
+//! embedded in the exe, so keep this file free of crate imports (the JSON
+//! is read with a few string searches rather than serde).
 
-pub const DESIGN_W: f32 = 1000.0;
-pub const DESIGN_H: f32 = 660.0;
+pub const PADS: &str = include_str!("../assets/pads.json");
 
-#[derive(Clone, Copy)]
-pub enum Seg {
-    Line(f32, f32),
-    /// Control point 1, control point 2, end point.
-    Cubic(f32, f32, f32, f32, f32, f32),
-}
-
-use Seg::{Cubic, Line};
-
-/// Right half of the shell, top center to bottom center.
-const BODY: [Seg; 8] = [
-    Line(660.0, 70.0),
-    Cubic(720.0, 52.0, 800.0, 40.0, 880.0, 52.0),
-    Cubic(950.0, 64.0, 988.0, 130.0, 994.0, 230.0),
-    Cubic(1000.0, 330.0, 978.0, 450.0, 940.0, 548.0),
-    Cubic(912.0, 622.0, 872.0, 654.0, 826.0, 650.0),
-    Cubic(782.0, 646.0, 754.0, 615.0, 734.0, 568.0),
-    Cubic(708.0, 512.0, 668.0, 470.0, 610.0, 462.0),
-    Cubic(570.0, 456.0, 530.0, 456.0, 500.0, 456.0),
-];
-
-/// Right half of the dark center panel (sticks, PS button), which meets the
-/// shell's inner grip edge.
-const PLATE: [Seg; 6] = [
-    Line(655.0, 70.0),
-    Cubic(690.0, 120.0, 695.0, 220.0, 705.0, 285.0),
-    Cubic(715.0, 350.0, 762.0, 392.0, 768.0, 455.0),
-    Cubic(772.0, 505.0, 754.0, 540.0, 734.0, 568.0),
-    Cubic(708.0, 512.0, 668.0, 470.0, 610.0, 462.0),
-    Cubic(570.0, 456.0, 530.0, 456.0, 500.0, 456.0),
-];
-
-/// The center panel with its bottom pushed below the shell, for clipping.
-const PLATE_PAST: [Seg; 6] = [
-    Line(655.0, 70.0),
-    Cubic(690.0, 120.0, 695.0, 220.0, 705.0, 285.0),
-    Cubic(715.0, 350.0, 762.0, 392.0, 768.0, 455.0),
-    Cubic(772.0, 505.0, 754.0, 540.0, 734.0, 568.0),
-    Line(700.0, 640.0),
-    Line(500.0, 640.0),
-];
-
-/// Right half of the touchpad: flush with the top edge, narrowing a little
-/// toward its rounded bottom corners.
-const TOUCHPAD: [Seg; 4] = [
-    Line(659.0, 70.0),
-    Line(651.0, 240.0),
-    Cubic(650.0, 256.0, 642.0, 264.0, 626.0, 264.0),
-    Line(500.0, 264.0),
-];
-
-/// Lightbar strips beside the touchpad: (top, bottom) of the right one.
-pub const LIGHTBAR: [(f32, f32); 2] = [(672.0, 84.0), (662.0, 246.0)];
-/// Stick centers (right one) and radius.
-pub const STICK: (f32, f32, f32) = (640.0, 372.0, 56.0);
-
-fn flatten(segs: &[Seg], steps: usize) -> Vec<(f32, f32)> {
-    let mut pts = vec![(500.0, 70.0)];
-    let mut cur = (500.0f32, 70.0f32);
-    for s in segs {
-        match *s {
-            Line(x, y) => {
-                cur = (x, y);
-                pts.push(cur);
+/// An SVG path (M, L, H, V, C, Z, absolute or relative) as one outline;
+/// each cubic is flattened into `steps` segments. Repeated points and a
+/// closing point equal to the first are dropped.
+pub fn flatten_path(d: &str, steps: usize) -> Vec<(f32, f32)> {
+    let mut toks: Vec<Result<f32, char>> = Vec::new();
+    let mut num = String::new();
+    let end = |num: &mut String, toks: &mut Vec<Result<f32, char>>| {
+        if !num.is_empty() {
+            toks.push(Ok(num.parse().unwrap_or(0.0)));
+            num.clear();
+        }
+    };
+    for ch in d.chars() {
+        match ch {
+            '0'..='9' => num.push(ch),
+            '.' if num.contains('.') && !num.contains('e') => {
+                end(&mut num, &mut toks);
+                num.push(ch);
             }
-            Cubic(x1, y1, x2, y2, x, y) => {
-                for i in 1..=steps {
-                    let t = i as f32 / steps as f32;
-                    let u = 1.0 - t;
-                    let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
-                    pts.push((
-                        a * cur.0 + b * x1 + c * x2 + d * x,
-                        a * cur.1 + b * y1 + c * y2 + d * y,
-                    ));
+            '-' | '+' if !num.ends_with('e') => {
+                end(&mut num, &mut toks);
+                num.push(ch);
+            }
+            '.' | '-' | '+' | 'e' => num.push(ch),
+            c if c.is_ascii_alphabetic() => {
+                end(&mut num, &mut toks);
+                toks.push(Err(c));
+            }
+            _ => end(&mut num, &mut toks),
+        }
+    }
+    end(&mut num, &mut toks);
+
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    let push = |out: &mut Vec<(f32, f32)>, q: (f32, f32)| {
+        let new = match out.last() {
+            Some(l) => (l.0 - q.0).abs() > 1e-3 || (l.1 - q.1).abs() > 1e-3,
+            None => true,
+        };
+        if new {
+            out.push(q);
+        }
+    };
+    let (mut x, mut y) = (0f32, 0f32);
+    let mut cmd = 'M';
+    let mut args: Vec<f32> = Vec::new();
+    for t in toks {
+        match t {
+            Err(c) => {
+                cmd = c;
+                args.clear();
+            }
+            Ok(v) => {
+                args.push(v);
+                let need = match cmd.to_ascii_uppercase() {
+                    'M' | 'L' => 2,
+                    'H' | 'V' => 1,
+                    'C' => 6,
+                    _ => 0,
+                };
+                if args.len() < need {
+                    continue;
                 }
-                cur = (x, y);
+                let (ox, oy) = if cmd.is_ascii_lowercase() { (x, y) } else { (0.0, 0.0) };
+                match cmd.to_ascii_uppercase() {
+                    'M' | 'L' => (x, y) = (args[0] + ox, args[1] + oy),
+                    'H' => x = args[0] + ox,
+                    'V' => y = args[0] + oy,
+                    'C' => {
+                        let a = &args;
+                        let (x0, y0) = (x, y);
+                        let c = [(a[0] + ox, a[1] + oy), (a[2] + ox, a[3] + oy), (a[4] + ox, a[5] + oy)];
+                        for k in 1..steps {
+                            let t = k as f32 / steps as f32;
+                            let m = 1.0 - t;
+                            let (b0, b1, b2, b3) = (m * m * m, 3.0 * m * m * t, 3.0 * m * t * t, t * t * t);
+                            push(
+                                &mut out,
+                                (
+                                    b0 * x0 + b1 * c[0].0 + b2 * c[1].0 + b3 * c[2].0,
+                                    b0 * y0 + b1 * c[0].1 + b2 * c[1].1 + b3 * c[2].1,
+                                ),
+                            );
+                        }
+                        (x, y) = c[2];
+                    }
+                    _ => {}
+                }
+                push(&mut out, (x, y));
+                // Extra pairs after M are line-tos.
+                if cmd == 'M' {
+                    cmd = 'L';
+                } else if cmd == 'm' {
+                    cmd = 'l';
+                }
+                args.clear();
             }
         }
     }
-    pts
-}
-
-/// A closed outline from a right half: the half, then its mirror image back
-/// up the left side. No point repeats.
-fn mirrored(segs: &[Seg], steps: usize) -> Vec<(f32, f32)> {
-    let right = flatten(segs, steps);
-    let n = right.len();
-    let mut pts = right.clone();
-    for &(x, y) in right[1..n - 1].iter().rev() {
-        pts.push((DESIGN_W - x, y));
+    if out.len() > 2 && out.first() == out.last() {
+        out.pop();
     }
-    pts
+    out
 }
 
-pub fn body_outline(steps: usize) -> Vec<(f32, f32)> {
-    mirrored(&BODY, steps)
+/// The parts of the plain DualSense the icon and the mark use, as
+/// outlines on the 400 × 280 grid.
+pub struct Silhouette {
+    pub body: Vec<(f32, f32)>,
+    /// The dark center panel.
+    pub plate: Vec<(f32, f32)>,
+    /// The lightbar strip round the touchpad.
+    pub lightbar: Vec<(f32, f32)>,
+    pub touchpad: Vec<(f32, f32)>,
+    /// Stick caps: x, y, radius.
+    pub sticks: [(f32, f32, f32); 2],
 }
 
-pub fn plate_outline(steps: usize) -> Vec<(f32, f32)> {
-    mirrored(&PLATE, steps)
+/// The text right after `pat` in `s`.
+fn after<'a>(s: &'a str, pat: &str) -> &'a str {
+    let i = s.find(pat).unwrap_or_else(|| panic!("pads.json: no {pat}"));
+    &s[i + pat.len()..]
 }
 
-pub fn touchpad_outline(steps: usize) -> Vec<(f32, f32)> {
-    mirrored(&TOUCHPAD, steps)
+/// A JSON string value starting right after its opening quote.
+fn string(s: &str) -> &str {
+    &s[..s.find('"').expect("pads.json: unterminated string")]
 }
 
-/// The left lightbar strip as a quad, `w` design units wide.
-fn lightbar_quad(right: bool, w: f32) -> Vec<(f32, f32)> {
-    let [(xt, yt), (xb, yb)] = LIGHTBAR;
-    let m = |x: f32| if right { x } else { DESIGN_W - x };
-    vec![
-        (m(xt - w / 2.0), yt),
-        (m(xt + w / 2.0), yt),
-        (m(xb + w / 2.0), yb),
-        (m(xb - w / 2.0), yb),
-    ]
+pub fn silhouette(steps: usize) -> Silhouette {
+    // One look per line; the plain DualSense's line starts with its key.
+    let look = PADS
+        .lines()
+        .find(|l| l.starts_with("\"dualsense\":"))
+        .expect("pads.json: no dualsense look");
+    let path = |key: &str| flatten_path(string(after(look, key)), steps);
+    let circle = |s: &str| {
+        let v: Vec<f32> = string_until(after(s, "\"circle\":["), ']')
+            .split(',')
+            .map(|n| n.trim().parse().unwrap_or(0.0))
+            .collect();
+        (v[0], v[1], v[2])
+    };
+    let sticks = after(look, "\"sticks\":[");
+    let second = after(sticks, "},{");
+    Silhouette {
+        body: path("\"body\":\""),
+        plate: path("{\"style\":\"shade\",\"d\":\""),
+        lightbar: path("{\"style\":\"light\",\"d\":\""),
+        touchpad: path("\"touchpad\":\""),
+        sticks: [circle(sticks), circle(second)],
+    }
+}
+
+fn string_until(s: &str, c: char) -> &str {
+    &s[..s.find(c).expect("pads.json: unterminated list")]
+}
+
+/// Bounds of an outline: x0, y0, x1, y1.
+pub fn bounds(pts: &[(f32, f32)]) -> [f32; 4] {
+    let mut bb = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for &(x, y) in pts {
+        bb = [bb[0].min(x), bb[1].min(y), bb[2].max(x), bb[3].max(y)];
+    }
+    bb
 }
 
 /// `pts` moved `d` outward along the averaged edge normals (fine for the
@@ -198,40 +245,38 @@ fn coverage(poly: &[(f32, f32)], w: usize, h: usize, scale: f32, off: (f32, f32)
 /// Square RGBA app icon of `size` pixels: a white DualSense with its dark
 /// center panel and blue lightbar, on a transparent background.
 pub fn icon_rgba(size: usize) -> Vec<u8> {
+    let g = silhouette(10);
     let s = size as f32;
-    let scale = s * 0.98 / DESIGN_W;
-    // The shell spans y 40..656; center that span.
-    let off = (s * 0.01, (s - 616.0 * scale) / 2.0 - 40.0 * scale);
+    let [x0, y0, x1, y1] = bounds(&g.body);
+    let scale = s * 0.98 / (x1 - x0);
+    let off = (
+        (s - (x1 - x0) * scale) / 2.0 - x0 * scale,
+        (s - (y1 - y0) * scale) / 2.0 - y0 * scale,
+    );
     let detailed = size >= 32;
     // Thin parts get at least about a pixel.
     let px = 1.0 / scale;
 
     // (outline, color, clip to the shell); `None` color is the shaded shell.
-    let body = body_outline(24);
     let rim_px = if size <= 32 { 1.0 } else { 1.4 };
     let mut layers: Vec<(Vec<(f32, f32)>, Option<[f32; 3]>, bool)> = vec![
         // A darker rim keeps the white shell visible on light backgrounds.
-        (grown(&body, rim_px * px), Some([84.0, 93.0, 110.0]), false),
-        (body.clone(), None, false),
-        (mirrored(&PLATE_PAST, 24), Some([27.0, 33.0, 46.0]), true),
-        (touchpad_outline(12), Some([250.0, 251.0, 253.0]), false),
+        (grown(&g.body, rim_px * px), Some([84.0, 93.0, 110.0]), false),
+        (g.body.clone(), None, false),
+        (g.plate.clone(), Some([27.0, 33.0, 46.0]), true),
+        // The strip shows round the touchpad; small icons get it a little
+        // wider so it stays visible.
+        (grown(&g.lightbar, (px * 0.6 - 1.2).max(0.0)), Some([59.0, 130.0, 246.0]), false),
+        (g.touchpad.clone(), Some([250.0, 251.0, 253.0]), false),
     ];
-    for right in [false, true] {
-        layers.push((
-            lightbar_quad(right, 14.0f32.max(px * 1.1)),
-            Some([59.0, 130.0, 246.0]),
-            false,
-        ));
-    }
     if detailed {
-        let (cx, cy, r) = STICK;
-        for x in [cx, DESIGN_W - cx] {
-            layers.push((circle(x, cy, r), Some([12.0, 15.0, 22.0]), false));
-            layers.push((circle(x, cy, r * 0.62), Some([52.0, 60.0, 78.0]), false));
+        for &(x, y, r) in &g.sticks {
+            layers.push((circle(x, y, r * 1.45), Some([12.0, 15.0, 22.0]), false));
+            layers.push((circle(x, y, r), Some([52.0, 60.0, 78.0]), false));
         }
     }
 
-    let shell = coverage(&body, size, size, scale, off);
+    let shell = coverage(&g.body, size, size, scale, off);
     let mut rgba = vec![0.0f32; size * size * 4];
     for (poly, color, clip) in &layers {
         let cov = coverage(poly, size, size, scale, off);
@@ -246,7 +291,7 @@ pub fn icon_rgba(size: usize) -> Vec<u8> {
             let rgb = color.unwrap_or_else(|| {
                 // Light at the top, a cooler grey toward the grips.
                 let y = (i / size) as f32 / s;
-                let t = ((y - 0.2) / 0.6).clamp(0.0, 1.0);
+                let t = ((y - 0.25) / 0.5).clamp(0.0, 1.0);
                 [242.0 - 50.0 * t, 245.0 - 46.0 * t, 250.0 - 36.0 * t]
             });
             let d = &mut rgba[i * 4..i * 4 + 4];

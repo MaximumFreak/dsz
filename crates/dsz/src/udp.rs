@@ -55,7 +55,7 @@ const TYPES: [&str; 8] = [
     "ResetToUserSettings",
 ];
 
-const EXT: [(&str, usize); 2] = [("HapticPulse", 100), ("Rumble", 101)];
+const EXT: [(&str, usize); 3] = [("HapticPulse", 100), ("Rumble", 101), ("SpeakerTest", 102)];
 
 fn kind(v: &Value) -> Option<usize> {
     match v {
@@ -92,6 +92,8 @@ enum Change {
     Reset,
     Pulse(crate::device::HapticPulse),
     Rumble { heavy: u8, light: u8, ms: u64 },
+    /// Optionally with a new start cushion, in reports.
+    SpeakerTest { lead: Option<u8> },
     /// Understood, but nothing to do on a physical controller.
     Nothing,
 }
@@ -160,6 +162,10 @@ fn change(ty: usize, p: &[i64]) -> Option<Change> {
             light: at(1).unwrap_or(0).clamp(0, 255) as u8,
             ms: at(2).unwrap_or(250).clamp(10, 10_000) as u64,
         },
+        // Extension: [start cushion in reports (optional, 1-12)]
+        102 => Change::SpeakerTest {
+            lead: at(0).map(|n| n.clamp(1, 12) as u8),
+        },
         _ => return None,
     })
 }
@@ -191,6 +197,12 @@ fn apply(engine: &Engine, ty: usize, p: &[i64]) {
             Change::Reset => *o = Default::default(),
             Change::Pulse(p) => d.pulse(*p),
             Change::Rumble { heavy, light, ms } => d.test_rumble(*heavy, *light, *ms),
+            Change::SpeakerTest { lead } => {
+                if let Some(l) = lead {
+                    d.speaker_lead.store(*l, Ordering::Relaxed);
+                }
+                d.start_speaker_test();
+            }
             Change::Nothing => {}
         }
         drop(o);

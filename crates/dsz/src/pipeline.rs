@@ -521,7 +521,11 @@ struct MapRt {
 fn holdable(a: &Action) -> bool {
     matches!(
         a,
-        Action::Key { .. } | Action::Mouse { .. } | Action::Media { .. } | Action::Gamepad { .. }
+        Action::Key { .. }
+            | Action::Mouse { .. }
+            | Action::Media { .. }
+            | Action::Gamepad { .. }
+            | Action::Xbox { .. }
     )
 }
 
@@ -584,7 +588,7 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
             }
         }
         // Read from the mapping state when the pad is built.
-        Action::Gamepad { .. } => {}
+        Action::Gamepad { .. } | Action::Xbox { .. } => {}
         Action::Run { path } => {
             if !path.trim().is_empty() {
                 let p = path.trim().to_string();
@@ -643,6 +647,8 @@ pub struct Pipeline {
     gyro_toggle: bool,
     last_at: Option<Instant>,
     gyro_was_active: bool,
+    /// Buttons last pressed on the helper Xbox pad.
+    helper_sent: u32,
 }
 
 impl Pipeline {
@@ -659,6 +665,7 @@ impl Pipeline {
             gyro_toggle: false,
             last_at: None,
             gyro_was_active: false,
+            helper_sent: 0,
         }
     }
 
@@ -1001,12 +1008,24 @@ impl Pipeline {
             }
         }
         let mut inject = 0u32;
+        let mut helper = 0u32;
+        // Xbox buttons go to the virtual Xbox pad, or without one to the
+        // helper pad.
+        let own_xbox = device.virt.active() == Some(VirtualKind::Xbox360);
         for (m, rt) in profile.mappings.iter().zip(self.maps.iter()) {
-            if let Action::Gamepad { button } = m.action {
-                if m.enabled && rt.out_down {
-                    inject |= button.bit();
-                }
+            if !m.enabled || !rt.out_down {
+                continue;
             }
+            match m.action {
+                Action::Gamepad { button } => inject |= button.bit(),
+                Action::Xbox { button } if own_xbox => inject |= button.pad_button().bit(),
+                Action::Xbox { button } => helper |= button.pad_button().bit(),
+                _ => {}
+            }
+        }
+        if helper != 0 || self.helper_sent != 0 {
+            engine.companion.set(device.id, helper);
+            self.helper_sent = helper;
         }
         (suppress, inject)
     }

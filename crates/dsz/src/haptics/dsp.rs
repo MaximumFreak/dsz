@@ -151,6 +151,99 @@ pub fn resample_window(prev: &mut [f32; 2], input: &[[f32; 2]], out: &mut [[f32;
     *prev = *input.last().unwrap();
 }
 
+/// Streaming 16:15 resampler for the controller speaker: 1024 frames of
+/// 48 kHz audio in, 960 out per report, because the controller plays each
+/// report's two 10 ms Opus frames over one 21.3 ms haptics tick (measured
+/// through its own microphone: a 440 Hz tone sent unsqueezed comes back at
+/// 412.5 Hz). Windowed sinc (Kaiser, 32 taps, cutoff 20.5 kHz), so the
+/// highs stay clean, unlike linear interpolation.
+pub struct Squeeze {
+    /// Input not yet fully used; `buf[0]` is input frame `base`.
+    buf: Vec<[f32; 2]>,
+    base: u64,
+    /// Next output frame.
+    n: u64,
+    /// One normalized kernel per phase.
+    table: [[f32; 2 * SQUEEZE_HALF]; SQUEEZE_DEN as usize],
+}
+
+const SQUEEZE_NUM: u64 = 16;
+const SQUEEZE_DEN: u64 = 15;
+const SQUEEZE_HALF: usize = 16;
+
+impl Squeeze {
+    pub fn new() -> Squeeze {
+        // Kaiser window, beta 8; I0 by its series.
+        let i0 = |x: f64| {
+            let (mut sum, mut term) = (1.0, 1.0);
+            for k in 1..30 {
+                term *= (x / 2.0) / k as f64;
+                sum += term * term;
+            }
+            sum
+        };
+        let beta = 8.0;
+        let fc = 20_500.0 / 48_000.0;
+        let h = SQUEEZE_HALF as f64;
+        let mut table = [[0f32; 2 * SQUEEZE_HALF]; SQUEEZE_DEN as usize];
+        for (p, row) in table.iter_mut().enumerate() {
+            let frac = p as f64 / SQUEEZE_DEN as f64;
+            let mut taps = [0f64; 2 * SQUEEZE_HALF];
+            for (k, t) in taps.iter_mut().enumerate() {
+                // Tap k is input frame i - HALF + 1 + k; distance from the
+                // output instant i + frac.
+                let x = (k as f64 - h + 1.0) - frac;
+                let sinc = if x.abs() < 1e-9 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * 2.0 * fc * x).sin() / (std::f64::consts::PI * 2.0 * fc * x)
+                };
+                let r = (x / h).clamp(-1.0, 1.0);
+                *t = sinc * i0(beta * (1.0 - r * r).sqrt()) / i0(beta);
+            }
+            let sum: f64 = taps.iter().sum();
+            for (o, t) in row.iter_mut().zip(taps.iter()) {
+                *o = (*t / sum) as f32;
+            }
+        }
+        // Start with a kernel's worth of silence (less two frames), so every
+        // 1024 frames in give exactly 960 out from the first call.
+        Squeeze {
+            buf: vec![[0.0; 2]; 2 * SQUEEZE_HALF - 2],
+            base: 0,
+            n: 0,
+            table,
+        }
+    }
+
+    /// Push `input` and append every output frame it completes to `out`.
+    pub fn run(&mut self, input: &[[f32; 2]], out: &mut Vec<[f32; 2]>) {
+        self.buf.extend_from_slice(input);
+        let end = self.base + self.buf.len() as u64;
+        loop {
+            let pos = self.n * SQUEEZE_NUM;
+            let i = pos / SQUEEZE_DEN + SQUEEZE_HALF as u64 - 1;
+            if i + SQUEEZE_HALF as u64 >= end {
+                break;
+            }
+            let first = (i + 1 - SQUEEZE_HALF as u64 - self.base) as usize;
+            let row = &self.table[(pos % SQUEEZE_DEN) as usize];
+            let mut acc = [0f32; 2];
+            for (t, f) in row.iter().zip(&self.buf[first..first + 2 * SQUEEZE_HALF]) {
+                acc[0] += t * f[0];
+                acc[1] += t * f[1];
+            }
+            out.push(acc);
+            self.n += 1;
+        }
+        // Drop input no later output needs.
+        let need = self.n * SQUEEZE_NUM / SQUEEZE_DEN;
+        let drop = need.saturating_sub(self.base).min(self.buf.len() as u64) as usize;
+        self.buf.drain(..drop);
+        self.base += drop as u64;
+    }
+}
+
 /// Soft knee limiter: linear to 0.7, then compresses smoothly toward 1.
 #[inline]
 pub fn soft_clip(x: f32) -> f32 {
@@ -167,6 +260,39 @@ pub fn soft_clip(x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn squeeze_gives_960_per_1024_and_keeps_the_tone() {
+        let mut sq = Squeeze::new();
+        let mut out = Vec::new();
+        let mut t = 0u64;
+        for k in 0..20 {
+            let input: Vec<[f32; 2]> = (0..1024)
+                .map(|_| {
+                    let v = (t as f32 * 1000.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5;
+                    t += 1;
+                    [v, v]
+                })
+                .collect();
+            let before = out.len();
+            sq.run(&input, &mut out);
+            assert_eq!(out.len() - before, 960, "report {k}");
+        }
+        // Played at 45 kHz the tone is still 1 kHz: 45 samples a cycle.
+        let x: Vec<f32> = out[2000..].iter().map(|f| f[0]).collect();
+        let power = |hz: f32| {
+            let w = std::f32::consts::TAU * hz / 45_000.0;
+            let (re, im) = x.iter().enumerate().fold((0f32, 0f32), |(re, im), (i, v)| {
+                (re + v * (w * i as f32).cos(), im - v * (w * i as f32).sin())
+            });
+            (re * re + im * im).sqrt() / x.len() as f32
+        };
+        assert!(power(1000.0) > 0.2, "{}", power(1000.0));
+        assert!(power(1066.7) < 0.02);
+        // Amplitude kept (the kernel is normalized).
+        let peak = x.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 0.5).abs() < 0.02, "{peak}");
+    }
 
     #[test]
     fn resample_counts() {

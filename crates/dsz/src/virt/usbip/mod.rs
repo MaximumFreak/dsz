@@ -466,6 +466,12 @@ impl Shared {
 
 static SLOTS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 
+/// Probes: start numbering pads at `first`, so a probe's pads don't share
+/// a serial (`DSZV<n>`) with the running app's.
+pub fn reserve_slots_below(first: u32) {
+    SLOTS.lock().extend(1..first);
+}
+
 pub struct UsbPad {
     shared: Arc<Shared>,
     addr: SocketAddr,
@@ -478,6 +484,12 @@ impl UsbPad {
     /// Serve a virtual pad and attach it. Blocks until Windows has the
     /// device (a few hundred milliseconds).
     pub fn create(model: Model, sink: DsSink) -> io::Result<UsbPad> {
+        Self::create_with(model, sink, &|_| {})
+    }
+
+    /// [`UsbPad::create`], calling `before_attach` with the pad's USB serial
+    /// once it is chosen and before Windows sees the device (to hide it).
+    pub fn create_with(model: Model, sink: DsSink, before_attach: &dyn Fn(&str)) -> io::Result<UsbPad> {
         let paths = win::interface_paths(&GUID_VHCI);
         let Some(vhci_path) = paths.first() else {
             return Err(io::Error::new(
@@ -542,6 +554,7 @@ impl UsbPad {
         if let Some(why) = blocked() {
             return Err(io::Error::new(io::ErrorKind::Unsupported, why));
         }
+        before_attach(&format!("{SERIAL_PREFIX}{slot}"));
         let h = win::open_overlapped(vhci_path)?;
         let mut ov = win::Overlapped::new()?;
         let mut out = vec![0u8; PLUGIN_SIZE_WITH_SERIAL];
@@ -597,6 +610,11 @@ impl UsbPad {
     /// driver lit.
     pub fn xinput_slot(&self) -> Option<u32> {
         ds_proto::virtual_pad::x360_player(self.shared.led.load(Ordering::Relaxed))
+    }
+
+    /// The ring LED pattern the Xbox 360 driver last set (0 before any).
+    pub fn led(&self) -> u8 {
+        self.shared.led.load(Ordering::Relaxed)
     }
 
     /// Present an input report: the model's USB interrupt-IN packet.

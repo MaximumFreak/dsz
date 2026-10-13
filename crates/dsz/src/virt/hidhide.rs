@@ -119,12 +119,18 @@ pub fn snapshot() -> io::Result<Snapshot> {
 pub struct Changes {
     pub devices_added: Vec<String>,
     pub app_added: Option<String>,
+    /// Other apps let through (the helper Xbox pad's readers); taken off
+    /// the list again on restore, unlike this app.
+    pub apps_added: Vec<String>,
     pub activated: bool,
 }
 
 impl Changes {
     pub fn is_empty(&self) -> bool {
-        self.devices_added.is_empty() && self.app_added.is_none() && !self.activated
+        self.devices_added.is_empty()
+            && self.app_added.is_none()
+            && self.apps_added.is_empty()
+            && !self.activated
     }
 }
 
@@ -163,6 +169,28 @@ pub fn hide(instance_ids: &[String], exe: &Path) -> io::Result<Changes> {
     Ok(ch)
 }
 
+/// Let `exe` see hidden devices (`allow`) or take it off the list again.
+/// Returns the list entry when this call added it.
+pub fn set_app(exe: &Path, allow: bool) -> io::Result<Option<String>> {
+    let h = open()?;
+    let Some(dos) = dos_device_path(&exe.display().to_string()) else {
+        return Err(io::Error::other("no device path for the exe"));
+    };
+    let mut apps = get_list(&h, GET_WHITELIST)?;
+    let had = apps.iter().any(|a| eq(a, &dos));
+    if allow && !had {
+        apps.push(dos.clone());
+        set_list(&h, SET_WHITELIST, &apps)?;
+        Ok(Some(dos))
+    } else if !allow && had {
+        apps.retain(|a| !eq(a, &dos));
+        set_list(&h, SET_WHITELIST, &apps)?;
+        Ok(None)
+    } else {
+        Ok(None)
+    }
+}
+
 /// Undo [`hide`]. Entries that were already there before stay.
 pub fn restore(ch: &Changes) -> io::Result<()> {
     if ch.is_empty() {
@@ -175,6 +203,13 @@ pub fn restore(ch: &Changes) -> io::Result<()> {
             .filter(|d| !ch.devices_added.iter().any(|x| eq(x, d)))
             .collect();
         set_list(&h, SET_BLACKLIST, &devs)?;
+    }
+    if !ch.apps_added.is_empty() {
+        let apps: Vec<String> = get_list(&h, GET_WHITELIST)?
+            .into_iter()
+            .filter(|a| !ch.apps_added.iter().any(|x| eq(x, a)))
+            .collect();
+        set_list(&h, SET_WHITELIST, &apps)?;
     }
     if ch.activated {
         set_bool(&h, SET_ACTIVE, false)?;

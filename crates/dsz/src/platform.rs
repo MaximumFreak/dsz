@@ -457,6 +457,34 @@ fn place_window(
     }
 }
 
+/// The first window size in points: `want`, shrunk to fit the primary
+/// monitor's work area (less the title bar and some room) at its display
+/// scale, so a small or high-scale screen gets a window that fits. Snapshot
+/// runs take `DSZ_SNAPSHOT_SIZE=WxH` as is.
+pub fn initial_window_size(want: [f32; 2], min: [f32; 2]) -> ([f32; 2], [f32; 2]) {
+    if let Some((w, h)) = std::env::var("DSZ_SNAPSHOT_SIZE")
+        .ok()
+        .and_then(|v| v.split_once('x').map(|(w, h)| (w.parse().ok(), h.parse().ok())))
+        .and_then(|(w, h)| Some((w?, h?)))
+    {
+        return ([w, h], [w.min(min[0]), h.min(min[1])]);
+    }
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
+    let mut work: RECT = unsafe { std::mem::zeroed() };
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut RECT as *mut _, 0) } != 0;
+    let dpi = unsafe { GetDpiForSystem() }.max(96) as f32;
+    if !ok {
+        return (want, min);
+    }
+    let scale = dpi / 96.0;
+    let avail_w = (work.right - work.left) as f32 / scale - 24.0;
+    let avail_h = (work.bottom - work.top) as f32 / scale - 56.0;
+    let size = [want[0].min(avail_w), want[1].min(avail_h)];
+    (size, [min[0].min(size[0]), min[1].min(size[1])])
+}
+
 fn default_frame(work_x: i32, work_y: i32, work_w: i32, work_h: i32) -> WindowFrame {
     let work_w = work_w.max(1);
     let work_h = work_h.max(1);

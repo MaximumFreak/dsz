@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, RichText};
 
 use crate::device::Device;
-use crate::haptics::game::TestSource;
+use crate::haptics::game::{TestSignal, TestSource};
 use crate::install;
 use crate::profile::*;
 use crate::ui::theme::*;
@@ -150,6 +150,40 @@ fn driver_row(
 }
 
 impl App {
+    /// Feed a test signal through the game-audio path of `d`, unless a game
+    /// is already using it or a test is running.
+    pub(crate) fn start_game_test(&mut self, d: &Arc<Device>, signal: TestSignal) {
+        if self.game_test.is_some() || d.game_audio.lock().is_some() {
+            return;
+        }
+        let len = match signal {
+            TestSignal::Actuators => 3,
+            TestSignal::Speaker => 4,
+        };
+        let src = Arc::new(TestSource::new(Duration::from_secs(len), signal));
+        *d.game_audio.lock() = Some(src.clone());
+        self.game_test = Some((d.id, src));
+    }
+
+    /// Detach a finished test signal. Called every frame, whatever page is
+    /// showing.
+    pub(crate) fn finish_game_test(&mut self) {
+        if let Some((id, src)) = &self.game_test {
+            if src.finished() {
+                if let Some(d) = self.engine.device_list().into_iter().find(|d| d.id == *id) {
+                    let mut g = d.game_audio.lock();
+                    if g.as_ref()
+                        .map(|x| Arc::as_ptr(x) as *const () == Arc::as_ptr(src) as *const ())
+                        .unwrap_or(false)
+                    {
+                        *g = None;
+                    }
+                }
+                self.game_test = None;
+            }
+        }
+    }
+
     fn driver_info(&mut self) -> DriverInfo {
         let stale = self
             .virt_drivers
@@ -185,22 +219,6 @@ impl App {
             "Give games an Xbox 360 or DualSense controller driven by this one, with your mappings applied, while the real controller is hidden from them.",
         );
         let drivers = self.driver_info();
-
-        // Finish a game-haptics test.
-        if let Some((id, src)) = &self.game_test {
-            if src.finished() {
-                if let Some(d) = self.engine.device_list().into_iter().find(|d| d.id == *id) {
-                    let mut g = d.game_audio.lock();
-                    if g.as_ref()
-                        .map(|x| Arc::as_ptr(x) as *const () == Arc::as_ptr(src) as *const ())
-                        .unwrap_or(false)
-                    {
-                        *g = None;
-                    }
-                }
-                self.game_test = None;
-            }
-        }
 
         two_columns(ui, |ui, col| {
             if col == 0 {
@@ -379,7 +397,33 @@ impl App {
                                 "%",
                             );
                         }
+                        toggle_row(
+                            ui,
+                            "Game speaker",
+                            "The game's controller-speaker sound, to the speaker over Bluetooth",
+                            &mut vo.game_speaker,
+                        );
+                        if vo.game_speaker {
+                            slider_row(
+                                ui,
+                                "Speaker level",
+                                "",
+                                &mut vo.game_speaker_level,
+                                0..=100,
+                                "%",
+                            );
+                        }
                         if let Some(d) = dev {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Game speaker sound").color(MUTED));
+                                meter(
+                                    ui,
+                                    d.speaker_level.load(Ordering::Relaxed) as f32 / 255.0,
+                                    VIOLET,
+                                    184.0,
+                                );
+                            });
                             let fb = d.feedback.lock();
                             let g = fb.game.clone();
                             let (h, l) = fb.game_rumble_now();
@@ -395,16 +439,11 @@ impl App {
                             }
                             ui.add_space(6.0);
                             let testing = self.game_test.is_some();
-                            ui.horizontal(|ui| {
-                            let has_real = d.game_audio.lock().is_some() && !testing;
                             let label = if testing { "Testing…" } else { "Test game haptics" };
-                            if button(ui, label).clicked() && !testing && !has_real {
-                                let src = Arc::new(TestSource::new(Duration::from_secs(3)));
-                                *d.game_audio.lock() = Some(src.clone());
-                                self.game_test = Some((d.id, src));
+                            if button(ui, label).clicked() {
+                                self.start_game_test(d, TestSignal::Actuators);
                             }
                             muted(ui, "Plays a sweep on the left grip, then the right, through the game-haptics path.");
-                        });
                         }
                     },
                 );

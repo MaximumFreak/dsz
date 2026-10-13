@@ -56,6 +56,8 @@ pub struct Engine {
     pub hider: crate::virt::Hider,
     /// Virtual pads, which outlive controller connections.
     pub pads: crate::virt::Pool,
+    /// The helper Xbox pad for Xbox buttons on profiles without one.
+    pub companion: crate::virt::companion::Companion,
 }
 
 /// Cached profile for a hot loop: refetched only when something changed.
@@ -106,6 +108,7 @@ impl Engine {
             next_id: AtomicU64::new(1),
             open_failures: Mutex::new(HashMap::new()),
             pads: Default::default(),
+            companion: Default::default(),
         })
     }
 
@@ -317,6 +320,11 @@ impl Engine {
             .name("udp".into())
             .spawn(move || crate::udp::run(e))
             .unwrap();
+        let e = self.clone();
+        std::thread::Builder::new()
+            .name("xbox-helper".into())
+            .spawn(move || crate::virt::companion::run(e))
+            .unwrap();
     }
 
     fn hotplug_loop(self: Arc<Self>) {
@@ -387,6 +395,7 @@ impl Engine {
             std::thread::sleep(Duration::from_millis(20));
         }
         self.pads.clear(self);
+        self.companion.stop();
         self.hider.release_all();
     }
 }

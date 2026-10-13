@@ -488,7 +488,7 @@ impl App {
                 ui.add_space(10.0);
                 editor(ui, title, e);
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if button(
                         ui,
                         if left {
