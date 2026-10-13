@@ -309,6 +309,9 @@ fn hide_ids(device: &Device) -> Vec<String> {
 // ------------------------------------------------------------------ manager
 
 const RETRY_AFTER: Duration = Duration::from_secs(30);
+/// Hider key (plus the controller's id) that keeps a controller hidden
+/// while one virtual pad replaces another. Pad ids start at 1 << 40.
+const SWAP_HIDE: u64 = 1 << 39;
 const NO_HIDHIDE: &str =
     "Install HidHide to hide the physical controller; until then games may see both.";
 
@@ -373,8 +376,17 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let have = pad.as_ref().map(|p| p.kind());
         let want_some = (want != VirtualKind::Off).then_some(want);
 
+        let mut swap_hidden = false;
         if have != want_some {
             if let Some(p) = pad.take() {
+                // Keep the controller hidden until the new pad hides it.
+                // Unplugging the old pad undoes its hiding, and a game
+                // starting right then (the usual reason for a swap) can open
+                // the physical controller in that gap.
+                let ids = p.hidden_ids();
+                if want_some.is_some() && !ids.is_empty() {
+                    swap_hidden = engine.hider.set(SWAP_HIDE + device.id, ids).unwrap_or(false);
+                }
                 detach(device);
                 engine.pads.destroy(engine, &p);
                 engine.toast("Virtual controller disconnected");
@@ -430,6 +442,11 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 }
             } else {
                 engine.pads.unhide(engine, p);
+            }
+        }
+        if swap_hidden {
+            if let Err(e) = engine.hider.set(SWAP_HIDE + device.id, Vec::new()) {
+                log::warn!("HidHide: {e}");
             }
         }
 

@@ -23,6 +23,10 @@ use crate::device::Device;
 use crate::engine::Engine;
 use crate::profile::VirtualKind;
 
+/// Hider key that keeps an absent controller hidden while its idle pad is
+/// replaced. The companion pad uses `u64::MAX`; pad ids start at 1 << 40.
+const SWAP_HIDE_IDLE: u64 = u64::MAX - 1;
+
 /// Where a pad's game feedback goes: the controller driving it, if any.
 #[derive(Default)]
 pub struct Route {
@@ -56,6 +60,10 @@ impl Pad {
 
     pub fn is_hidden(&self) -> bool {
         !self.hidden.lock().is_empty()
+    }
+
+    pub fn hidden_ids(&self) -> Vec<String> {
+        self.hidden.lock().clone()
     }
 
     fn alive(&self) -> bool {
@@ -361,6 +369,10 @@ impl Pool {
             }
             if want != p.kind() {
                 let hidden = p.hidden.lock().clone();
+                // Keep the controller hidden while the pads swap, as the
+                // controller's own service does (`virt::run`).
+                let bridged = !hidden.is_empty()
+                    && engine.hider.set(SWAP_HIDE_IDLE, hidden.clone()).unwrap_or(false);
                 self.destroy(engine, &p);
                 match self.create(want, &mac, None) {
                     Ok(n) => {
@@ -374,6 +386,11 @@ impl Pool {
                         );
                     }
                     Err(e) => log::warn!("virtual {}: {e}", want.label()),
+                }
+                if bridged {
+                    if let Err(e) = engine.hider.set(SWAP_HIDE_IDLE, Vec::new()) {
+                        log::warn!("HidHide: {e}");
+                    }
                 }
             }
         }

@@ -254,6 +254,9 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         // between sounds, as a PS5 sends them: starting the controller's
         // audio for each sound glitches its first moments (heard through
         // its own microphone as a hard edge or a short burst and a gap).
+        // Don't wait for the game's first speaker sound either: game haptics
+        // ride in these reports, and in the haptics-only `0x32` reports they
+        // felt harsher and later (tried and reverted in 0.3.3).
         let media = speaker_allowed && encoder.is_some();
         if media != was_media {
             was_media = media;
