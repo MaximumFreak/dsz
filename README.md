@@ -5,7 +5,7 @@
 ## Why use it
 
 - **Game haptics and adaptive triggers over Bluetooth.** Games with native DualSense support normally only do this over a USB cable.
-- **Automatic DualSense mode.** When you launch a game, DSZ detects whether it supports the DualSense natively. If it does, DSZ switches to a virtual DualSense, so the game's own haptics and adaptive triggers work. Every other game gets a virtual Xbox 360 controller. It switches back when the game closes. ([How it works](#automatic-dualsense-switching))
+- **Automatic DualSense mode.** When you launch a game, DSZ detects whether it supports the DualSense natively. If it does, DSZ switches to a virtual DualSense, so the game's own haptics and adaptive triggers work. For a Steam, GOG, or Xbox app game that doesn't, you choose the virtual controller: DualShock 4, Xbox 360, or the profile's own. It switches back when the game closes. ([How it works](#automatic-dualsense-switching))
 - **The rest of the controller:** lighting, adaptive triggers in any game, system audio as haptics, touchpad and gyro mouse, button mapping, and per-game profiles.
 - **Extremely fast and lightweight:** a single `.exe` with nothing to install. It starts in about 0.2 s and uses under 1% CPU in the tray. ([Performance](#performance))
 - **Free and open source**, with no account or license check.
@@ -81,7 +81,7 @@ A fresh install starts with two profiles, from `crates\dsz\defaults\`: **Xbox** 
 
 The first time a game runs, the app checks its files once for signs of native DualSense support: Sony's PC pad library, Wwise's DualSense haptics, DualSenseWindows, or DualSense controller names. While a game that has them is running, the controller switches to your DualSense profile, which presents a virtual DualSense, so the game's own haptics and trigger effects reach the controller. When the game closes, it switches back.
 
-Everything else keeps your default profile: out of the box, a virtual Xbox 360 controller. A per-game rule overrides the check, and a long press on Mute switches by hand.
+Steam, GOG, and Xbox app games without that support can present a virtual DualShock 4 or Xbox 360 instead (Profiles & games, Other games). Until you choose one, they keep the profile's own virtual controller. A per-game rule overrides the check, and a long press on Mute switches by hand.
 
 ### Mod compatibility
 

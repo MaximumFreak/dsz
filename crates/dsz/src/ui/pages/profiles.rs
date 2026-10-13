@@ -5,7 +5,7 @@ use eframe::egui::{self, CornerRadius, RichText, Sense, Stroke, StrokeKind};
 
 use crate::device::Device;
 use crate::profile::*;
-use crate::settings::GameRule;
+use crate::settings::{FallbackPad, GameRule};
 use crate::ui::theme::*;
 use crate::ui::widgets::*;
 use crate::ui::App;
@@ -544,6 +544,28 @@ impl App {
                         }
                     }
                 }
+                ui.add_space(8.0);
+                row(
+                    ui,
+                    "Other games",
+                    "No native DualSense support, and no rule above",
+                    |ui| {
+                        let before = s.fallback_pad;
+                        egui::ComboBox::from_id_salt("fallback-pad")
+                            .width(200.0)
+                            .selected_text(s.fallback_pad.label())
+                            .show_ui(ui, |ui| {
+                                for pad in [FallbackPad::Off, FallbackPad::DualShock4, FallbackPad::Xbox360] {
+                                    ui.selectable_value(&mut s.fallback_pad, pad, pad.label());
+                                }
+                            });
+                        changed |= before != s.fallback_pad;
+                    },
+                );
+                muted(
+                    ui,
+                    "Steam, GOG, and Xbox app installs, while Switch automatically is on. DualShock 4 is the one games such as Dead Cells use for PlayStation prompts. A rule above wins.",
+                );
                 drop(s);
                 if changed {
                     engine.settings_changed();

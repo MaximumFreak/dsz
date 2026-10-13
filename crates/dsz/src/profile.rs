@@ -1149,6 +1149,7 @@ mod tests {
         let d = crate::settings::Settings::default();
         assert_eq!(d.default_profile, "Xbox");
         assert_eq!(d.dualsense_profile, "DualSense");
+        assert_eq!(d.fallback_pad, crate::settings::FallbackPad::Off);
     }
 
     #[test]

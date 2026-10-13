@@ -39,6 +39,9 @@ pub struct Engine {
     settings_dirty: AtomicBool,
     /// Profile forced by a running game, if any: (profile, exe).
     pub game_override: RwLock<Option<(String, String)>>,
+    /// Game with no DualSense support whose virtual controller is the
+    /// fallback pad. The profile stays; only the pad kind changes.
+    pub fallback_exe: RwLock<Option<String>>,
     /// A game whose profile was overridden by a manual pick: its rule stays
     /// off until it closes.
     pub game_dismissed: Mutex<Option<String>>,
@@ -99,6 +102,7 @@ impl Engine {
             settings_rev: AtomicU64::new(1),
             settings_dirty: AtomicBool::new(false),
             game_override: RwLock::new(None),
+            fallback_exe: RwLock::new(None),
             game_dismissed: Mutex::new(None),
             session_assigned: Mutex::new(Default::default()),
             audio: AudioHub::new(),
@@ -205,9 +209,18 @@ impl Engine {
                 s.device_profiles.insert(mac, name.to_string());
             }
         }
-        // A manual pick beats a running game's profile until that game closes.
-        if let Some((_, exe)) = self.game_override.write().take() {
-            log::info!("profile \"{name}\" picked while {exe} runs: game profile off until it closes");
+        // A manual pick beats a running game's profile, or its fallback
+        // pad, until that game closes.
+        let dismissed = self
+            .game_override
+            .write()
+            .take()
+            .map(|(_, exe)| exe)
+            .or_else(|| self.fallback_exe.write().take());
+        if let Some(exe) = dismissed {
+            log::info!(
+                "profile \"{name}\" picked while {exe} runs: game profile off until it closes"
+            );
             *self.game_dismissed.lock() = Some(exe);
             self.bump_config();
         }

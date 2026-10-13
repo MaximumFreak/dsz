@@ -132,10 +132,11 @@ pub struct DsSink {
 
 impl DsSink {
     /// Answer for a feature-report `GET_REPORT`; `None` declines it.
-    pub fn feature(&self, model: Model, id: u8) -> Option<Vec<u8>> {
+    /// `devnum` is this pad's slot, so a DualShock 4's MAC matches its USB serial.
+    pub fn feature(&self, model: Model, id: u8, devnum: u32) -> Option<Vec<u8>> {
         let m = self.mirror.lock();
         if model == Model::DualShock4 {
-            return d::ds4::feature(id, m.calibration.as_deref());
+            return d::ds4::feature(id, m.calibration.as_deref(), &ds4_mac(devnum));
         }
         m.answer(id)
     }
@@ -158,6 +159,27 @@ const RING_FRAMES: usize = 9600;
 
 /// Serial prefix that marks our virtual controllers in device instance ids.
 pub const SERIAL_PREFIX: &str = "DSZV";
+
+/// USB serial of a virtual DualShock 4: 12 hex digits, locally administered
+/// (`02`…). Steam treats a pad as a DualShock 4 only when its serial is 12
+/// hex digits and matches feature report `0x12`. `DSZV1` is not hex, so
+/// Steam takes the pad as a generic gamepad and the game shows Xbox prompts.
+pub fn ds4_serial(devnum: u32) -> String {
+    format!(
+        "{:012X}",
+        0x0200_0000_0000u64 | u64::from(devnum & 0x00FF_FFFF)
+    )
+}
+
+/// The same identity as six MAC bytes, in transmission order.
+pub fn ds4_mac(devnum: u32) -> [u8; 6] {
+    let s = ds4_serial(devnum);
+    let mut m = [0u8; 6];
+    for i in 0..6 {
+        m[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    m
+}
 
 /// Whether a usbip-win2 host controller we may use is present.
 pub fn available() -> bool {
@@ -554,7 +576,11 @@ impl UsbPad {
         if let Some(why) = blocked() {
             return Err(io::Error::new(io::ErrorKind::Unsupported, why));
         }
-        before_attach(&format!("{SERIAL_PREFIX}{slot}"));
+        let serial = match model {
+            Model::DualShock4 => ds4_serial(slot),
+            _ => format!("{SERIAL_PREFIX}{slot}"),
+        };
+        before_attach(&serial);
         let h = win::open_overlapped(vhci_path)?;
         let mut ov = win::Overlapped::new()?;
         let mut out = vec![0u8; PLUGIN_SIZE_WITH_SERIAL];
@@ -993,7 +1019,10 @@ fn control(s: &Shared, u: &Submit) -> Option<Vec<u8>> {
                     Model::Xbox360 => d::x360::configuration(),
                     Model::DualShock4 => d::ds4::configuration(),
                 }),
-                3 if idx == 3 => Some(d::utf16_string(&format!("{SERIAL_PREFIX}{}", s.devnum))),
+                3 if idx == 3 => Some(d::utf16_string(&match model {
+                    Model::DualShock4 => ds4_serial(s.devnum),
+                    _ => format!("{SERIAL_PREFIX}{}", s.devnum),
+                })),
                 3 => match model {
                     Model::DualSense => d::string(idx),
                     Model::Xbox360 => d::x360::string(idx),
@@ -1101,7 +1130,7 @@ fn hid_request(s: &Shared, req: u8, value: u16, data: &[u8]) -> Option<Vec<u8>> 
                 Some(rep[..n].to_vec())
             }
             3 => {
-                let a = s.sink.feature(s.model, id);
+                let a = s.sink.feature(s.model, id, s.devnum);
                 if a.is_none() {
                     log::debug!(
                         "virtual {}: unanswered feature report 0x{id:02X}",
@@ -1199,6 +1228,26 @@ mod tests {
         c.q.clear();
         c.admit(3, vec![384; 2], late, epoch);
         assert_eq!(c.q[0].due, late + Duration::from_millis(2));
+    }
+
+    #[test]
+    fn ds4_serial_is_twelve_hex_digits_and_matches_the_feature_report() {
+        let serial = ds4_serial(1);
+        assert_eq!(serial.len(), 12);
+        assert!(serial.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(serial.starts_with("02"));
+        assert_ne!(ds4_serial(1), ds4_serial(2));
+        assert!(!serial.contains(SERIAL_PREFIX));
+        let mac = ds4_mac(1);
+        let report = d::ds4::feature(0x12, None, &mac).unwrap();
+        // SDL prints the MAC from the report as data[6], data[5], … data[1].
+        let printed = format!(
+            "{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+            report[6], report[5], report[4], report[3], report[2], report[1]
+        );
+        assert_eq!(printed, serial);
+        let mac_report = d::ds4::feature(0x81, None, &mac).unwrap();
+        assert_eq!(&mac_report[1..7], &report[1..7]);
     }
 
     #[test]

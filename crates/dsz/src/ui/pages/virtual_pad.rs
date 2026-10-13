@@ -273,6 +273,15 @@ impl App {
                                 note(ui, n, WARN);
                             }
                         }
+                        if let Some(exe) = self.engine.fallback_exe.read().clone() {
+                            note(
+                                ui,
+                                &format!(
+                                    "{exe} has no DualSense support, so games see the fallback controller from Profiles & games."
+                                ),
+                                VIOLET,
+                            );
+                        }
                     } else {
                         let idle = self.engine.pads.list();
                         if idle.is_empty() {
