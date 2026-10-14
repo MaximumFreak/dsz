@@ -13,11 +13,20 @@
 //!   `0CE6054C-0000-0000-0000...`, as in Final Fantasy XIV);
 //! - a wide-string (UTF-16) "DualSense" together with `hid.dll`: the game
 //!   names the pad in its own UI or device list and talks to it over HID
-//!   (Animal Well, and Unreal's WinDualShock plugin).
+//!   (Animal Well, and Unreal's WinDualShock plugin);
+//! - SDL with its PS5 driver (`SDL_JOYSTICK_HIDAPI_PS5`), built into the
+//!   exe (Astral Ascent), or in an `SDL2.dll`/`SDL3.dll` beside it when the
+//!   exe opens gamepads through it. SDL reads a DualSense natively (rumble,
+//!   lightbar, player LEDs) and shows PlayStation prompts;
+//! - Rewired, the Unity input plugin, with its DualSense driver
+//!   (`DualSenseExtension` in `<game>_Data\Managed\Rewired_Core.dll`, as in
+//!   Death Squared).
 //!
-//! "DualSense Wireless Controller" is not a marker: SDL carries that name
-//! in its controller list, so it is in nearly every SDL game, and those
-//! games only rumble.
+//! "DualSense Wireless Controller" alone is not a marker: SDL builds carry
+//! that name in their controller list whether or not the PS5 driver is in.
+//! An SDL library beside the exe isn't either: some games use SDL for the
+//! window or sound and read pads through XInput, and would lose the
+//! controller in DualSense mode.
 //!
 //! Results are cached by path, size, and modification time in
 //! `dualsense-detect.json`, so each exe is read once. A cached "no" from an
@@ -44,11 +53,25 @@ const MARKERS: &[&str] = &[
     // DirectInput product GUIDs (PID then VID) that a game maps buttons for.
     "0CE6054C-0000-0000-0000",
     "0DF2054C-0000-0000-0000",
+    // SDL built in, with its PS5 driver (the driver's hint name).
+    SDL_PS5,
 ];
+
+/// SDL's hint for its PS5 driver: in any SDL build that has the driver.
+const SDL_PS5: &str = "SDL_JOYSTICK_HIDAPI_PS5";
+/// SDL 2 and 3 gamepad and joystick openers, as an exe imports them.
+const SDL_OPENERS: &[&str] = &[
+    "SDL_GameControllerOpen",
+    "SDL_OpenGamepad",
+    "SDL_JoystickOpen",
+    "SDL_OpenJoystick",
+];
+/// Rewired's DualSense driver, in `Rewired_Core.dll`.
+const REWIRED_DS: &str = "DualSenseExtension";
 
 /// Bumped when the scan learns new signs, so programs it said no to are
 /// read again.
-const SCAN_VERSION: u32 = 2;
+const SCAN_VERSION: u32 = 3;
 
 /// Reported for a UTF-16 "DualSense" next to `hid.dll`.
 const WIDE_WITH_HID: &str = "DualSense (UTF-16) with hid.dll";
@@ -163,6 +186,7 @@ fn is_system(path_lower: &str) -> bool {
 
 /// Look beside and inside `exe` for a DualSense library.
 pub fn scan(exe: &Path) -> Option<String> {
+    let mut sdl_dll = None;
     if let Some(dir) = exe.parent() {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
@@ -170,11 +194,69 @@ pub fn scan(exe: &Path) -> Option<String> {
                 if n.ends_with(".dll") && LIBRARIES.iter().any(|l| n.starts_with(l)) {
                     return Some(format!("ships {}", e.file_name().to_string_lossy()));
                 }
+                if n == "sdl2.dll" || n == "sdl3.dll" {
+                    sdl_dll = Some(e.path());
+                }
+            }
+        }
+        // A Unity game with Rewired's DualSense driver.
+        if let Some(stem) = exe.file_stem() {
+            let core = dir
+                .join(format!("{}_Data", stem.to_string_lossy()))
+                .join("Managed")
+                .join("Rewired_Core.dll");
+            if open_find(&core, &[REWIRED_DS]).is_some() {
+                return Some("Rewired with its DualSense driver".into());
             }
         }
     }
     let f = std::fs::File::open(exe).ok()?;
-    find_marker(f).map(|m| format!("\"{m}\" in the exe"))
+    if let Some(m) = find_marker(f) {
+        return Some(if m == SDL_PS5 {
+            "SDL with its PS5 driver, built in".into()
+        } else {
+            format!("\"{m}\" in the exe")
+        });
+    }
+    // SDL as a library: it needs the PS5 driver and the exe has to open
+    // gamepads through it.
+    let dll = sdl_dll?;
+    open_find(&dll, &[SDL_PS5])?;
+    open_find(exe, SDL_OPENERS)?;
+    Some(format!(
+        "SDL with its PS5 driver ({})",
+        dll.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+
+/// The first of `needles` in the file at `path`.
+fn open_find(path: &Path, needles: &[&'static str]) -> Option<&'static str> {
+    find_any(std::fs::File::open(path).ok()?, needles)
+}
+
+/// Stream `r` once and return the first of `needles` found.
+fn find_any(mut r: impl Read, needles: &[&'static str]) -> Option<&'static str> {
+    let longest = needles.iter().map(|m| m.len()).max()?;
+    let firsts: Vec<u8> = needles.iter().filter_map(|m| m.bytes().next()).collect();
+    let mut buf = vec![0u8; (8 << 20) + longest];
+    let mut keep = 0usize;
+    loop {
+        let n = r.read(&mut buf[keep..]).ok()?;
+        if n == 0 {
+            return None;
+        }
+        let data = &buf[..keep + n];
+        for i in 0..data.len() {
+            if firsts.contains(&data[i]) {
+                if let Some(m) = needles.iter().find(|m| data[i..].starts_with(m.as_bytes())) {
+                    return Some(m);
+                }
+            }
+        }
+        keep = (longest - 1).min(data.len());
+        let len = data.len();
+        buf.copy_within(len - keep..len, 0);
+    }
 }
 
 /// Stream `r` once and return the first marker found, or
@@ -201,7 +283,7 @@ fn find_marker(mut r: impl Read) -> Option<&'static str> {
         let mut i = 0;
         while i < data.len() {
             match data[i] {
-                b'l' | b's' | b'A' | b'd' | b'D' | b'0' => {
+                b'l' | b's' | b'A' | b'd' | b'D' | b'0' | b'S' => {
                     for m in MARKERS {
                         let mb = m.as_bytes();
                         if data[i..].starts_with(mb) {
@@ -242,6 +324,11 @@ mod tests {
         );
         // SDL's controller name list alone is not DualSense support.
         assert_eq!(find_marker(&b"..DualSense Wireless Controller.."[..]), None);
+        // Its PS5 driver is (Astral Ascent).
+        assert_eq!(
+            find_marker(&b"..#@SDL_JOYSTICK_HIDAPI_PS5\0SDL_JOYSTICK_HIDAPI_PS5_RUMBLE.."[..]),
+            Some(SDL_PS5)
+        );
         assert_eq!(
             find_marker(&b"..DualSense Wireless Controller..HID.DLL.."[..]),
             None
@@ -267,6 +354,32 @@ mod tests {
         // Either half alone is not enough.
         assert_eq!(find_marker(&wide[..]), None);
         assert_eq!(find_marker(&b"..hid.dll..HidD_GetAttributes.."[..]), None);
+    }
+
+    #[test]
+    fn finds_sdl_libraries_and_rewired() {
+        let dir = std::env::temp_dir().join(format!("dsz-detect-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Game_Data").join("Managed")).unwrap();
+        let exe = dir.join("Game.exe");
+        std::fs::write(&exe, b"MZ..SDL2.dll\0SDL_Init\0SDL_PollEvent").unwrap();
+        // SDL beside a game that only makes its window with it.
+        std::fs::write(dir.join("SDL2.dll"), b"..SDL_JOYSTICK_HIDAPI_PS5..").unwrap();
+        assert_eq!(scan(&exe), None);
+        // The game opens gamepads through it.
+        std::fs::write(&exe, b"MZ..SDL2.dll\0SDL_Init\0SDL_GameControllerOpen").unwrap();
+        assert_eq!(scan(&exe).as_deref(), Some("SDL with its PS5 driver (SDL2.dll)"));
+        // An SDL too old for the PS5 driver.
+        std::fs::write(dir.join("SDL2.dll"), b"..SDL_JOYSTICK_HIDAPI_PS4..").unwrap();
+        assert_eq!(scan(&exe), None);
+        // Rewired with its DualSense driver.
+        std::fs::write(
+            dir.join("Game_Data").join("Managed").join("Rewired_Core.dll"),
+            b"..IDriver_DualSense..DualSenseExtension..",
+        )
+        .unwrap();
+        assert_eq!(scan(&exe).as_deref(), Some("Rewired with its DualSense driver"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

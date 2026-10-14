@@ -333,6 +333,28 @@ impl Engine {
             .name("udp".into())
             .spawn(move || crate::udp::run(e))
             .unwrap();
+        let w = Arc::downgrade(self);
+        std::thread::Builder::new()
+            .name("audio-defaults".into())
+            .spawn(move || {
+                let Some(prefs) = w.upgrade().map(|e| e.settings.read().audio_on_virtual) else {
+                    return;
+                };
+                let mut watcher = crate::virt::audio_default::Watcher::new(prefs);
+                loop {
+                    let Some(e) = w.upgrade() else { return };
+                    if e.shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if watcher.tick() {
+                        e.settings.write().audio_on_virtual = watcher.prefs;
+                        e.settings_save_later();
+                    }
+                    drop(e);
+                    std::thread::sleep(Duration::from_millis(if watcher.busy() { 100 } else { 500 }));
+                }
+            })
+            .unwrap();
         let e = self.clone();
         std::thread::Builder::new()
             .name("xbox-helper".into())

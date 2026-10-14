@@ -540,6 +540,11 @@ struct Shared {
     urbs: AtomicU64,
     /// Last Xbox 360 ring-LED pattern the driver set (the XInput slot).
     led: std::sync::atomic::AtomicU8,
+    /// A replug is under way: the server waits for the driver to connect
+    /// again instead of ending when the connection closes.
+    replug: AtomicBool,
+    /// When Windows last got the device.
+    attached: Mutex<Instant>,
 }
 
 impl Shared {
@@ -614,6 +619,8 @@ impl UsbPad {
             ended: AtomicBool::new(false),
             urbs: AtomicU64::new(0),
             led: Default::default(),
+            replug: AtomicBool::new(false),
+            attached: Mutex::new(Instant::now()),
         });
         // From here on Drop releases the slot, detaches, and joins.
         let dev = UsbPad {
@@ -645,38 +652,8 @@ impl UsbPad {
             _ => format!("{SERIAL_PREFIX}{slot}"),
         };
         before_attach(&serial);
-        let h = win::open_overlapped(vhci_path)?;
-        let mut ov = win::Overlapped::new()?;
-        let layouts = plugin_layouts(driver_version());
-        let mut out = vec![0u8; layouts.iter().map(|l| l.size).max().unwrap_or(0)];
-        let mut last = None;
-        // The driver rejects a size it does not expect before it connects,
-        // so a layout for another release fails immediately and the next
-        // one is tried. The returned port stays at offset 4 in all of them.
-        let service = addr.port().to_string();
-        for layout in layouts {
-            let req = plugin_request(layout, &shared.busid, &service, "127.0.0.1");
-            match ov.call(
-                h.raw(),
-                IOCTL_PLUGIN_HARDWARE_ONCE,
-                &req,
-                &mut out[..layout.size],
-                15_000,
-            ) {
-                Ok(_) => {
-                    last = None;
-                    break;
-                }
-                Err(e) => last = Some(e),
-            }
-        }
-        if let Some(e) = last {
-            return Err(io::Error::new(e.kind(), format!("usbip-win2 attach: {e}")));
-        }
-        let port = i32::from_le_bytes([out[4], out[5], out[6], out[7]]);
-        if port <= 0 {
-            return Err(io::Error::other("usbip-win2 attach returned no port"));
-        }
+        let port = plug_in(vhci_path, &shared.busid, addr)?;
+        *shared.attached.lock() = Instant::now();
         dev.port.store(port, Ordering::Release);
         log::info!(
             "virtual {} attached on usbip-win2 port {port} ({})",
@@ -756,7 +733,86 @@ impl UsbPad {
     }
 }
 
+/// Ask the driver to connect to the server at `addr` for `busid`; the
+/// usbip-win2 port it got.
+fn plug_in(vhci_path: &str, busid: &str, addr: SocketAddr) -> io::Result<i32> {
+    let h = win::open_overlapped(vhci_path)?;
+    let mut ov = win::Overlapped::new()?;
+    let layouts = plugin_layouts(driver_version());
+    let mut out = vec![0u8; layouts.iter().map(|l| l.size).max().unwrap_or(0)];
+    let mut last = None;
+    // The driver rejects a size it does not expect before it connects,
+    // so a layout for another release fails immediately and the next
+    // one is tried. The returned port stays at offset 4 in all of them.
+    let service = addr.port().to_string();
+    for layout in layouts {
+        let req = plugin_request(layout, busid, &service, "127.0.0.1");
+        match ov.call(
+            h.raw(),
+            IOCTL_PLUGIN_HARDWARE_ONCE,
+            &req,
+            &mut out[..layout.size],
+            15_000,
+        ) {
+            Ok(_) => {
+                last = None;
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    if let Some(e) = last {
+        return Err(io::Error::new(e.kind(), format!("usbip-win2 attach: {e}")));
+    }
+    let port = i32::from_le_bytes([out[4], out[5], out[6], out[7]]);
+    if port <= 0 {
+        return Err(io::Error::other("usbip-win2 attach returned no port"));
+    }
+    Ok(port)
+}
+
 impl UsbPad {
+    /// Unplug the device and plug it in again, keeping this pad (and its
+    /// serial): Windows sees it arrive afresh.
+    pub fn replug(&self) -> io::Result<()> {
+        let Some(vhci_path) = win::interface_paths(&GUID_VHCI).into_iter().next() else {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "usbip-win2 is not installed"));
+        };
+        self.shared.replug.store(true, Ordering::Release);
+        self.detach_now();
+        // The server takes the closed connection as a replug and listens.
+        let t = Instant::now();
+        while self.shared.conn.lock().is_some() && t.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        match plug_in(&vhci_path, &self.shared.busid, self.addr) {
+            Ok(port) => {
+                *self.shared.attached.lock() = Instant::now();
+                self.port.store(port, Ordering::Release);
+                Ok(())
+            }
+            Err(e) => {
+                self.shared.replug.store(false, Ordering::Release);
+                self.shared.ended.store(true, Ordering::Release);
+                Err(e)
+            }
+        }
+    }
+
+    /// How long Windows has had the device.
+    pub fn attached_for(&self) -> Duration {
+        self.shared.attached.lock().elapsed()
+    }
+
+    /// The HID node Windows made below the pad, if there is one yet.
+    pub fn hid_instance(&self) -> Option<String> {
+        let (vid, pid) = self.shared.model.ids();
+        let root = format!(r"USB\VID_{vid:04X}&PID_{pid:04X}\{}", self.serial());
+        win::descendant_ids(&root)
+            .into_iter()
+            .find(|d| d.to_ascii_uppercase().starts_with(r"HID\"))
+    }
+
     /// Unplug the device from Windows now, even while other handles to
     /// this pad remain; dropping the last one stops the server.
     pub fn detach_now(&self) {
@@ -816,18 +872,27 @@ fn device_info(s: &Shared) -> Vec<u8> {
 /// Accept the driver's connection, do the import handshake, then read
 /// URBs until it goes away.
 fn serve(s: &Arc<Shared>, listener: TcpListener) {
+    loop {
+        if !session(s, &listener) {
+            return;
+        }
+    }
+}
+
+/// Serve one connection from the driver. True when a replug wants the next.
+fn session(s: &Arc<Shared>, listener: &TcpListener) -> bool {
     let stream = loop {
         let (mut st, peer) = match listener.accept() {
             Ok(x) => x,
             Err(e) => {
                 log::warn!("virtual {}: accept: {e}", s.model.name());
                 s.ended.store(true, Ordering::Release);
-                return;
+                return false;
             }
         };
         if s.stop.load(Ordering::Acquire) {
             s.ended.store(true, Ordering::Release);
-            return;
+            return false;
         }
         if !peer.ip().is_loopback() {
             continue;
@@ -869,12 +934,11 @@ fn serve(s: &Arc<Shared>, listener: TcpListener) {
             _ => {}
         }
     };
-    drop(listener);
     let _ = stream.set_read_timeout(None);
     let _ = stream.set_nodelay(true);
     let Ok(w) = stream.try_clone() else {
         s.ended.store(true, Ordering::Release);
-        return;
+        return false;
     };
     *s.conn.lock() = Some(Conn {
         w,
@@ -906,10 +970,14 @@ fn serve(s: &Arc<Shared>, listener: TcpListener) {
     }
     *s.conn.lock() = None;
     s.audio.clear();
+    if !s.stop.load(Ordering::Acquire) && s.replug.swap(false, Ordering::AcqRel) {
+        return true;
+    }
     s.ended.store(true, Ordering::Release);
     if !s.stop.load(Ordering::Acquire) {
         log::warn!("virtual {}: the driver closed the connection", s.model.name());
     }
+    false
 }
 
 fn unlink(s: &Shared, seq: u32, victim: u32) {

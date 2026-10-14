@@ -132,6 +132,11 @@ pub struct Settings {
     /// Helper Xbox pad USB serial -> the nodes Windows made below it, so
     /// the next plug-in hides them before they appear.
     pub helper_nodes: BTreeMap<String, Vec<String>>,
+    /// Default audio slots (output, then microphone; each for console,
+    /// multimedia and communications) the user set to a virtual DualSense.
+    /// DSZ keeps them there when one is plugged in, and keeps Windows from
+    /// moving the others to it.
+    pub audio_on_virtual: [bool; 6],
 }
 
 impl Default for Settings {
@@ -162,6 +167,7 @@ impl Default for Settings {
             last_controller: String::new(),
             hide_nodes: BTreeMap::new(),
             helper_nodes: BTreeMap::new(),
+            audio_on_virtual: [false; 6],
         }
     }
 }

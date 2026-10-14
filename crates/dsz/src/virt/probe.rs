@@ -147,7 +147,8 @@ pub fn probe(what: &str) {
             };
             let num = |i: usize, d: u64| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
             let (hold, wait) = (num(1, 1500), num(2, 2000));
-            let mut guard = super::audio_default::Guard::take();
+            let mut guard = super::audio_default::Watcher::new([false; 6]);
+            guard.tick();
             let sink = usbip::DsSink {
                 on_output: Box::new(|_| {}),
                 mirror: Default::default(),
@@ -167,9 +168,7 @@ pub fn probe(what: &str) {
                                 _ => ds_proto::virtual_pad::ds_usb_input(&p, None, false, seq).to_vec(),
                             };
                             let _ = pad.submit(&rep);
-                            if let Some(g) = guard.as_mut() {
-                                g.check();
-                            }
+                            guard.tick();
                             std::thread::sleep(Duration::from_millis(4));
                         }
                     };
@@ -521,6 +520,46 @@ pub fn probe(what: &str) {
             }
             println!("scanned {n} programs in {} ms", t0.elapsed().as_millis());
         }
+        "dsdetect-all" => {
+            // Scan every program in the detection cache again (no cache).
+            let file = std::env::var("APPDATA").map(std::path::PathBuf::from).unwrap_or_default()
+                .join("DSZ").join("dualsense-detect.json");
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            let map: std::collections::BTreeMap<String, serde_json::Value> =
+                serde_json::from_str(&text).unwrap_or_default();
+            // DSZ_SCAN_DIRS=<dir;dir>: scan every exe below these too.
+            let mut map = map;
+            for d in std::env::var("DSZ_SCAN_DIRS").unwrap_or_default().split(';').filter(|d| !d.is_empty()) {
+                let mut stack = vec![(std::path::PathBuf::from(d), 0)];
+                while let Some((dir, depth)) = stack.pop() {
+                    let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+                    for e in rd.flatten() {
+                        let p = e.path();
+                        if p.is_dir() {
+                            if depth < 5 { stack.push((p, depth + 1)); }
+                        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")) {
+                            map.entry(p.display().to_string().to_ascii_lowercase()).or_insert(serde_json::Value::Null);
+                        }
+                    }
+                }
+            }
+            let t0 = Instant::now();
+            let mut n = 0;
+            for (path, old) in &map {
+                let p = std::path::Path::new(path);
+                if !p.exists() {
+                    continue;
+                }
+                n += 1;
+                let now = crate::dsdetect::scan(p);
+                let before = old.get("found").and_then(|v| v.as_str()).map(String::from);
+                if now.is_some() || before.is_some() {
+                    let mark = if before.is_none() { "NEW " } else if now.is_none() { "LOST" } else { "    " };
+                    println!("{mark} {:<45} {}", now.or(before).unwrap_or_default(), path);
+                }
+            }
+            println!("scanned {n} programs in {} ms", t0.elapsed().as_millis());
+        }
         "speaker" => {
             // `speaker [--secs N]`: speaker stream with no input injection;
             // prints what the controller sends back.
@@ -556,6 +595,283 @@ pub fn probe(what: &str) {
         }
         "tone" => {
             let _ = play_tone(0, secs_arg(6)).join();
+        }
+        "default-watch" => {
+            // How Windows moves the default audio devices when a virtual
+            // DualSense comes and goes, and whether it puts back a default
+            // the user picked. Restores the original defaults at the end.
+            use super::audio_default::probe as ad;
+            let slot: u32 = std::env::var("DSZ_PROBE_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+            usbip::reserve_slots_below(slot);
+            let orig = ad::snapshot();
+            let short = |id: &Option<String>| {
+                id.as_deref().map(|s| s.rsplit('.').next().unwrap_or(s).to_string()).unwrap_or_default()
+            };
+            for (i, (id, ours)) in orig.iter().enumerate() {
+                println!("start slot {i}: {} ours {ours}", short(id));
+            }
+            let watch = |label: &str, secs: u64| {
+                let t0 = Instant::now();
+                let mut last = ad::snapshot();
+                let mut seen = [false, false];
+                while t0.elapsed() < Duration::from_secs(secs) {
+                    std::thread::sleep(Duration::from_millis(25));
+                    for f in 0..2 {
+                        let now = !ad::ours(f).is_empty();
+                        if now != seen[f as usize] {
+                            seen[f as usize] = now;
+                            println!("{label} +{:>5} ms flow {f}: our endpoint {}", t0.elapsed().as_millis(),
+                                if now { "active" } else { "gone" });
+                        }
+                    }
+                    let now = ad::snapshot();
+                    for i in 0..6 {
+                        if now[i] != last[i] {
+                            println!("{label} +{:>5} ms slot {i}: {} -> {} ours {}", t0.elapsed().as_millis(),
+                                short(&last[i].0), short(&now[i].0), now[i].1);
+                        }
+                    }
+                    last = now;
+                }
+            };
+            let sink = || usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            let restore = |what: &str| {
+                for (i, (id, _)) in orig.iter().enumerate() {
+                    if let Some(id) = id {
+                        ad::set(id, (i % 3) as i32);
+                    }
+                }
+                println!("{what}: original defaults restored");
+            };
+
+            println!("--- 1: attach");
+            let pad = match usbip::UsbPad::create(usbip::Model::DualSense, sink()) {
+                Ok(p) => p,
+                Err(e) => { println!("attach failed: {e}"); return; }
+            };
+            watch("attach1", 12);
+            restore("after attach1");
+            watch("settle1", 2);
+            let render = ad::ours(0);
+            println!("our render endpoints: {render:?}");
+            println!("--- 2: pick ours as the default output, as a user would");
+            if let Some(id) = render.first() {
+                for role in 0..3 {
+                    ad::set(id, role);
+                }
+            }
+            watch("picked", 2);
+            println!("--- 3: detach");
+            drop(pad);
+            watch("detach", 6);
+            println!("--- 4: attach again");
+            let pad = match usbip::UsbPad::create(usbip::Model::DualSense, sink()) {
+                Ok(p) => p,
+                Err(e) => { println!("attach failed: {e}"); restore("end"); return; }
+            };
+            watch("attach2", 12);
+            restore("before detach2");
+            drop(pad);
+            watch("detach2", 4);
+            restore("end");
+            for (i, (id, ours)) in ad::snapshot().iter().enumerate() {
+                println!("end slot {i}: {} ours {ours}", short(id));
+            }
+        }
+        "default-guard" => {
+            // The audio-default watcher against Windows: plug, pick, unplug,
+            // replug, un-pick. Prints the defaults and the learned slots
+            // after each step; restores the original defaults at the end.
+            use super::audio_default::{probe as ad, Watcher};
+            use std::sync::{Arc, Mutex};
+            let slot: u32 = std::env::var("DSZ_PROBE_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+            usbip::reserve_slots_below(slot);
+            let orig = ad::snapshot();
+            // DSZ_PROBE_PREFS=110000: start with those slots chosen.
+            let mut prefs = [false; 6];
+            for (i, c) in std::env::var("DSZ_PROBE_PREFS").unwrap_or_default().chars().take(6).enumerate() {
+                prefs[i] = c == '1';
+            }
+            let w = Arc::new(Mutex::new(Watcher::new(prefs)));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (w2, stop2) = (w.clone(), stop.clone());
+            let t = std::thread::spawn(move || {
+                while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                    let busy = {
+                        let mut g = w2.lock().unwrap();
+                        g.tick();
+                        g.busy()
+                    };
+                    std::thread::sleep(Duration::from_millis(if busy { 100 } else { 500 }));
+                }
+            });
+            let show = |step: &str| {
+                let snap = ad::snapshot();
+                let marks: String = snap
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (id, ours))| {
+                        if *ours { 'V' } else if id == &orig[i].0 { 'o' } else { '?' }
+                    })
+                    .collect();
+                println!("{step:<34} defaults {marks}  learned {:?}", w.lock().unwrap().prefs.map(|b| b as u8));
+            };
+            let sink = || usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            let restore = || {
+                for (i, (id, _)) in orig.iter().enumerate() {
+                    if let Some(id) = id {
+                        ad::set(id, (i % 3) as i32);
+                    }
+                }
+            };
+            println!("defaults: o = original, V = virtual DualSense; slots out x3, mic x3");
+            std::thread::sleep(Duration::from_secs(1));
+            show("start");
+            let pad = match usbip::UsbPad::create(usbip::Model::DualSense, sink()) {
+                Ok(p) => p,
+                Err(e) => { println!("attach failed: {e}"); return; }
+            };
+            std::thread::sleep(Duration::from_secs(5));
+            show("1 plugged (expect oooooo)");
+            if let Some(id) = ad::ours(0).first() {
+                ad::set(id, 0);
+                ad::set(id, 1);
+            }
+            std::thread::sleep(Duration::from_secs(2));
+            show("2 user picks output (VVo ooo)");
+            drop(pad);
+            std::thread::sleep(Duration::from_secs(3));
+            show("3 unplugged (oooooo, kept 110)");
+            let pad = match usbip::UsbPad::create(usbip::Model::DualSense, sink()) {
+                Ok(p) => p,
+                Err(e) => { println!("attach failed: {e}"); restore(); return; }
+            };
+            std::thread::sleep(Duration::from_secs(5));
+            show("4 replugged (VVoooo)");
+            if let Some(id) = &orig[0].0 {
+                ad::set(id, 0);
+                ad::set(id, 1);
+            }
+            std::thread::sleep(Duration::from_secs(2));
+            show("5 user picks original (oooooo, 0)");
+            drop(pad);
+            std::thread::sleep(Duration::from_secs(3));
+            let pad = match usbip::UsbPad::create(usbip::Model::DualSense, sink()) {
+                Ok(p) => p,
+                Err(e) => { println!("attach failed: {e}"); restore(); return; }
+            };
+            std::thread::sleep(Duration::from_secs(5));
+            show("6 replugged (oooooo)");
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = t.join();
+            drop(pad);
+            std::thread::sleep(Duration::from_secs(2));
+            restore();
+            show("end, restored");
+        }
+        "hold-x360" => {
+            // Plug a virtual Xbox 360 pad on a probe slot (never hidden) and
+            // hold it, so other tools can look at it.
+            let slot: u32 = std::env::var("DSZ_PROBE_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+            usbip::reserve_slots_below(slot);
+            let sink = usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            match usbip::UsbPad::create(usbip::Model::Xbox360, sink) {
+                Ok(pad) => {
+                    println!("attached");
+                    std::thread::sleep(Duration::from_secs(secs_arg(10)));
+                    drop(pad);
+                    println!("removed");
+                }
+                Err(e) => println!("attach failed: {e}"),
+            }
+        }
+        "hide-cycle" => {
+            // A probe Xbox 360 pad: plugged at 0 s, hidden with HidHide at
+            // 4 s, shown again at 10 s, unplugged at 16 s. Look at raw input
+            // from outside in between.
+            let slot: u32 = std::env::var("DSZ_PROBE_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+            usbip::reserve_slots_below(slot);
+            let sink = usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            let t0 = Instant::now();
+            // DSZ_PROBE_PRE_HIDE=<id;id>: hide these (and the pad) before it
+            // is plugged in, as a parked pad is, and show them at 6 s.
+            let exe = std::env::current_exe().unwrap_or_default();
+            let pre: Vec<String> = std::env::var("DSZ_PROBE_PRE_HIDE")
+                .unwrap_or_default()
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            if !pre.is_empty() {
+                let mut ids = vec![format!(r"USB\VID_045E&PID_028E\DSZV{slot}")];
+                ids.extend(pre);
+                let ch = match hidhide::hide(&ids, &exe) {
+                    Ok(c) => c,
+                    Err(e) => { println!("hide failed: {e}"); return; }
+                };
+                let pad = match usbip::UsbPad::create(usbip::Model::Xbox360, sink) {
+                    Ok(p) => p,
+                    Err(e) => { println!("attach failed: {e}"); let _ = hidhide::restore(&ch); return; }
+                };
+                println!("+{:>5} ms attached hidden {ids:?}", t0.elapsed().as_millis());
+                // DSZ_PROBE_LATE_HIDE=1: hide the rest of the pad's nodes
+                // (its HID child) once Windows has made them.
+                let late = if std::env::var_os("DSZ_PROBE_LATE_HIDE").is_some() {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    let root = format!(r"USB\VID_045E&PID_028E\DSZV{slot}");
+                    let rest: Vec<String> = super::win::descendant_ids(&root)
+                        .into_iter()
+                        .filter(|d| !ids.iter().any(|i| i.eq_ignore_ascii_case(d)))
+                        .collect();
+                    println!("+{:>5} ms late hide {rest:?}", t0.elapsed().as_millis());
+                    hidhide::hide(&rest, &exe).ok()
+                } else {
+                    None
+                };
+                std::thread::sleep(Duration::from_millis(4500));
+                if let Some(l) = &late {
+                    println!("late restore {:?}", hidhide::restore(l));
+                }
+                println!("+{:>5} ms showing: {:?}", t0.elapsed().as_millis(), hidhide::restore(&ch));
+                // DSZ_PROBE_REPLUG=1: then heal it the way the pool does.
+                if std::env::var_os("DSZ_PROBE_REPLUG").is_some() {
+                    std::thread::sleep(Duration::from_secs(2));
+                    let hid = pad.hid_instance();
+                    let listed = hid.as_deref().map(super::win::raw_input_lists);
+                    println!("+{:>5} ms hid {hid:?} in raw input: {listed:?}", t0.elapsed().as_millis());
+                    let r = pad.replug();
+                    println!("+{:>5} ms replug: {r:?}", t0.elapsed().as_millis());
+                    std::thread::sleep(Duration::from_secs(2));
+                    let hid = pad.hid_instance();
+                    let listed = hid.as_deref().map(super::win::raw_input_lists);
+                    println!("+{:>5} ms hid {hid:?} in raw input: {listed:?} alive {}", t0.elapsed().as_millis(), pad.alive());
+                    let ok = pad.submit_idle();
+                    println!("submit after replug: {ok:?}");
+                }
+                std::thread::sleep(Duration::from_secs(8));
+                drop(pad);
+                println!("+{:>5} ms removed", t0.elapsed().as_millis());
+                return;
+            }
+            let pad = match usbip::UsbPad::create(usbip::Model::Xbox360, sink) {
+                Ok(p) => p,
+                Err(e) => { println!("attach failed: {e}"); return; }
+            };
+            println!("+{:>5} ms attached", t0.elapsed().as_millis());
+            std::thread::sleep(Duration::from_secs(4));
+            let root = format!(r"USB\VID_045E&PID_028E\DSZV{slot}");
+            let mut ids = vec![root.clone()];
+            ids.extend(super::win::descendant_ids(&root));
+            println!("+{:>5} ms hiding {ids:?}", t0.elapsed().as_millis());
+            let ch = match hidhide::hide(&ids, &exe) {
+                Ok(c) => c,
+                Err(e) => { println!("hide failed: {e}"); return; }
+            };
+            std::thread::sleep(Duration::from_secs(6));
+            println!("+{:>5} ms showing again: {:?}", t0.elapsed().as_millis(), hidhide::restore(&ch));
+            std::thread::sleep(Duration::from_secs(6));
+            drop(pad);
+            println!("+{:>5} ms removed", t0.elapsed().as_millis());
         }
         "default-audio" => {
             use cpal::traits::{DeviceTrait, HostTrait};

@@ -345,6 +345,56 @@ pub fn descendant_ids(instance_id: &str) -> Vec<String> {
     out
 }
 
+/// Whether Windows' raw input lists the HID node `instance_id`
+/// (`HID\VID_..\..`). Raw input opens a device once, when it arrives; a
+/// device hidden by HidHide at that moment stays off the list after it is
+/// shown again, and games that read controllers through raw input (SDL's
+/// default on Windows) never see it.
+pub fn raw_input_lists(instance_id: &str) -> bool {
+    #[repr(C)]
+    struct RawInputDeviceList {
+        device: *mut core::ffi::c_void,
+        kind: u32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetRawInputDeviceList(list: *mut RawInputDeviceList, n: *mut u32, size: u32) -> u32;
+        fn GetRawInputDeviceInfoW(device: *mut core::ffi::c_void, cmd: u32, data: *mut u16, size: *mut u32) -> u32;
+    }
+    const RIM_TYPEHID: u32 = 2;
+    const RIDI_DEVICENAME: u32 = 0x2000_0007;
+    // `HID\VID_045E&PID_028E&IG_01\4&2B121EDF&0&0000` is named
+    // `\\?\HID#VID_045E&PID_028E&IG_01#4&2b121edf&0&0000#{interface}`.
+    let want = format!(r"\\?\{}#", instance_id.replace('\\', "#")).to_ascii_uppercase();
+    let size = std::mem::size_of::<RawInputDeviceList>() as u32;
+    unsafe {
+        let mut n = 0u32;
+        if GetRawInputDeviceList(std::ptr::null_mut(), &mut n, size) == u32::MAX {
+            return false;
+        }
+        let mut list: Vec<RawInputDeviceList> = (0..n + 8)
+            .map(|_| RawInputDeviceList { device: std::ptr::null_mut(), kind: 0 })
+            .collect();
+        let mut cap = list.len() as u32;
+        let got = GetRawInputDeviceList(list.as_mut_ptr(), &mut cap, size);
+        if got == u32::MAX {
+            return false;
+        }
+        for d in list.iter().take(got as usize).filter(|d| d.kind == RIM_TYPEHID) {
+            let mut len = 0u32;
+            GetRawInputDeviceInfoW(d.device, RIDI_DEVICENAME, std::ptr::null_mut(), &mut len);
+            let mut buf = vec![0u16; len as usize + 1];
+            if GetRawInputDeviceInfoW(d.device, RIDI_DEVICENAME, buf.as_mut_ptr(), &mut len) == u32::MAX {
+                continue;
+            }
+            if from_wide(&buf).to_ascii_uppercase().starts_with(&want) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// File version (`a.b.c.d`) from a PE version resource.
 pub fn file_version(path: &str) -> Option<[u16; 4]> {
     let w = wide(path);

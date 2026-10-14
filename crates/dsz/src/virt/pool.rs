@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use ds_proto::virtual_pad as vp;
 use parking_lot::Mutex;
 
-use super::{audio_default, hidhide, usbip, Target};
+use super::{hidhide, usbip, Target};
 use crate::device::Device;
 use crate::engine::Engine;
 use crate::profile::VirtualKind;
@@ -35,6 +35,27 @@ const PARK_HIDE: u64 = 1 << 62;
 const PARK_WATCH: Duration = Duration::from_secs(15);
 const PARK_EVERY_EARLY: Duration = Duration::from_millis(20);
 const PARK_EVERY_LATE: Duration = Duration::from_secs(5);
+/// How often an Xbox pad in use is checked for raw input, and the least
+/// time between two replugs of one pad.
+const RAW_CHECK_EVERY: Duration = Duration::from_secs(5);
+const REPLUG_AGAIN_AFTER: Duration = Duration::from_secs(60);
+/// A pad this new may not be in raw input's list yet.
+const RAW_SETTLE: Duration = Duration::from_secs(3);
+
+/// When an Xbox pad's raw input check is next due, and its last replug.
+struct RawCheck {
+    next: Instant,
+    replugged: Option<Instant>,
+}
+
+impl RawCheck {
+    fn new() -> Self {
+        RawCheck {
+            next: Instant::now() + RAW_SETTLE,
+            replugged: None,
+        }
+    }
+}
 
 /// Where a pad's game feedback goes: the controller driving it, if any.
 #[derive(Default)]
@@ -64,6 +85,8 @@ pub struct Pad {
     /// while its controller's profile uses another kind or none. It only
     /// presses Xbox buttons.
     parked: Mutex<Option<Parked>>,
+    /// See [`Pool::heal`].
+    raw_check: Mutex<RawCheck>,
 }
 
 /// How a parked pad is hidden.
@@ -219,22 +242,6 @@ impl Pool {
             *route.owner.lock() = Arc::downgrade(d);
             *route.mirror.lock() = d.mirror.lock().clone();
         }
-        if kind == VirtualKind::DualSense && usbip::available() {
-            // Keep Windows from making the new audio device the default. The
-            // watch has its own thread: the controller can drop before
-            // Windows switches, and the pad stays plugged in without it.
-            if let Some(mut g) = audio_default::Guard::take() {
-                std::thread::Builder::new()
-                    .name("audio-default-guard".into())
-                    .spawn(move || {
-                        while !g.expired() {
-                            std::thread::sleep(std::time::Duration::from_millis(250));
-                            g.check();
-                        }
-                    })
-                    .ok();
-            }
-        }
         let target = Arc::new(plug(kind, &route)?);
         let pad = Arc::new(Pad {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
@@ -244,6 +251,7 @@ impl Pool {
             owner: Mutex::new(device.map(|d| d.id)),
             hidden: Mutex::new(Vec::new()),
             parked: Mutex::new(None),
+            raw_check: Mutex::new(RawCheck::new()),
         });
         self.pads.lock().push(pad.clone());
         Ok(pad)
@@ -409,8 +417,22 @@ impl Pool {
         let apps = super::companion::readers();
         let hidden: Mutex<Vec<String>> = Mutex::new(Vec::new());
         let r = plug_with(VirtualKind::Xbox360, &route, &|serial| {
+            // Not the HID child: Windows' raw input opens it only as it
+            // arrives, and one hidden then stays out of raw input for good
+            // (SDL games would never see the pad once it is back in use).
+            // `park` below hides it as soon as it exists.
             let mut ids = vec![super::companion::usb_id(serial)];
-            ids.extend(engine.settings.read().helper_nodes.get(serial).cloned().unwrap_or_default());
+            ids.extend(
+                engine
+                    .settings
+                    .read()
+                    .helper_nodes
+                    .get(serial)
+                    .into_iter()
+                    .flatten()
+                    .filter(|n| !n.to_ascii_uppercase().starts_with(r"HID\"))
+                    .cloned(),
+            );
             match engine.hider.set_with_apps(id + PARK_HIDE, ids.clone(), apps.clone()) {
                 Ok(true) => *hidden.lock() = ids,
                 Ok(false) => {}
@@ -418,6 +440,7 @@ impl Pool {
             }
         });
         let hidden = hidden.into_inner();
+        let pre_hidden = !hidden.is_empty();
         let target = match r {
             Ok(t) => Arc::new(t),
             Err(e) => {
@@ -435,6 +458,7 @@ impl Pool {
             mac: Mutex::new(mac.to_string()),
             owner: Mutex::new(Some(device.id)),
             hidden: Mutex::new(Vec::new()),
+            raw_check: Mutex::new(RawCheck::new()),
             parked: Mutex::new(Some(Parked {
                 apps: if hidden.is_empty() { Vec::new() } else { apps },
                 ids: hidden,
@@ -443,6 +467,14 @@ impl Pool {
             })),
         });
         self.pads.lock().push(pad.clone());
+        // Hide the HID child the moment Windows has made it.
+        let t = Instant::now();
+        while pre_hidden
+            && pad.target.hid_instance().is_none()
+            && t.elapsed() < Duration::from_millis(1500)
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         // Picks up the nodes Windows adds below it.
         self.park(engine, &pad, true);
         Ok(pad)
@@ -450,6 +482,7 @@ impl Pool {
 
     /// Put a parked pad back in service for `device` (or for nobody yet).
     pub fn unpark(&self, engine: &Engine, pad: &Pad, device: Option<&Arc<Device>>) {
+        pad.raw_check.lock().next = Instant::now();
         let was = pad.parked.lock().take();
         if was.is_some_and(|p| !p.ids.is_empty()) {
             if let Err(e) = engine.hider.set(pad.id + PARK_HIDE, Vec::new()) {
@@ -569,7 +602,44 @@ impl Pool {
     /// Keep pads nobody drives in line with settings and profiles: unplug
     /// them when persistence is off or their profile no longer wants that
     /// kind (a game rule, an edit), replug when it wants the other kind.
+    /// Plug an Xbox pad in use in again when Windows' raw input has lost
+    /// it. Raw input opens a device only as it arrives, so one that was
+    /// hidden then (or knocked off some other way) stays invisible to games
+    /// that read controllers through raw input, SDL's default, even though
+    /// XInput still sees it. A replug is a fresh arrival.
+    fn heal(&self) {
+        for p in self.list() {
+            if p.kind() != VirtualKind::Xbox360 || !p.alive() || p.is_parked() {
+                continue;
+            }
+            let mut rc = p.raw_check.lock();
+            let now = Instant::now();
+            if now < rc.next {
+                continue;
+            }
+            rc.next = now + RAW_CHECK_EVERY;
+            if p.target.attached_for() < RAW_SETTLE {
+                continue;
+            }
+            let Some(hid) = p.target.hid_instance() else {
+                continue;
+            };
+            if super::win::raw_input_lists(&hid)
+                || rc.replugged.is_some_and(|t| t.elapsed() < REPLUG_AGAIN_AFTER)
+            {
+                continue;
+            }
+            rc.replugged = Some(now);
+            drop(rc);
+            log::info!("virtual Xbox 360 controller missing from raw input (games using SDL can't see it): plugging it in again");
+            if let Err(e) = p.target.replug() {
+                log::warn!("virtual Xbox 360 controller replug: {e}");
+            }
+        }
+    }
+
     pub fn maintain(&self, engine: &Engine) {
+        self.heal();
         let (on, hide_ok, last, fallback_pad, keep_xbox) = {
             let s = engine.settings.read();
             (
