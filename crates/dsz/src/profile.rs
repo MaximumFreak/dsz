@@ -1097,6 +1097,21 @@ impl ProfileStore {
         removed
     }
 
+    /// Replace every profile (a restore). Files of profiles that are gone
+    /// are removed at the next flush.
+    pub fn replace_all(&self, profiles: Vec<Profile>) {
+        let mut l = self.list.write();
+        let old: Vec<String> = l.iter().map(|p| p.name.clone()).collect();
+        *l = profiles.into_iter().map(Arc::new).collect();
+        let mut dirty = self.dirty.lock();
+        dirty.clear();
+        dirty.extend(l.iter().map(|p| p.name.clone()));
+        drop(dirty);
+        drop(l);
+        self.removed.lock().extend(old);
+        self.bump();
+    }
+
     pub fn import(&self, path: &Path) -> Result<String, String> {
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut p: Profile = serde_json::from_str(text.trim_start_matches(crate::settings::BOM))
@@ -1147,10 +1162,6 @@ impl ProfileStore {
             }
         }
     }
-
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
 }
 
 #[cfg(test)]
@@ -1164,6 +1175,29 @@ mod tests {
             let q: Profile = serde_json::from_str(&s).unwrap();
             assert_eq!(p, q);
         }
+    }
+
+    #[test]
+    fn replace_all_swaps_profiles_and_their_files() {
+        let dir = std::env::temp_dir().join(format!("dsz-replace-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = ProfileStore::load(&dir);
+        assert_eq!(store.names(), ["Xbox", "DualSense"]);
+        let rev = store.revision();
+        store.replace_all(vec![Profile::named("Racing"), Profile::named("xbox")]);
+        assert_eq!(store.names(), ["Racing", "xbox"]);
+        assert!(store.revision() > rev);
+        store.flush();
+        let mut files: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_lowercase())
+            .collect();
+        files.sort();
+        // "Xbox" and "xbox" are one file on Windows; DualSense is gone.
+        assert_eq!(files, ["racing.json", "xbox.json"]);
+        let again = ProfileStore::load(&dir);
+        assert_eq!(again.names(), ["Racing", "xbox"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

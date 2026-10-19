@@ -226,11 +226,11 @@ impl App {
                     },
                 );
                 ui.add_space(12.0);
-                card(ui, "Data & logs", "", |ui| {
+                self.backup_card(ui);
+                ui.add_space(12.0);
+                card(ui, "Logs", "", |ui| {
                     ui.horizontal(|ui| {
-                        if button(ui, "Open data folder").clicked() {
-                            crate::platform::open_in_explorer(&engine.data_dir);
-                        }
+                        muted(ui, "Show");
                         egui::ComboBox::from_id_salt("log-level")
                             .width(110.0)
                             .selected_text(format!("{}", self.log_level))
@@ -293,6 +293,89 @@ impl App {
                     );
                 });
             }
+        });
+    }
+
+    /// Backup & restore: one file with every profile and the app settings,
+    /// and the folder they all live in.
+    fn backup_card(&mut self, ui: &mut egui::Ui) {
+        let engine = self.engine.clone();
+        card(ui, "Backup & restore", "", |ui| {
+            muted(
+                ui,
+                "Save all profiles and app settings to one file, to keep a copy before troubleshooting or to move them to another PC.",
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if primary_button(ui, "Back up all settings…").clicked() {
+                    if let Some(f) = rfd::FileDialog::new()
+                        .set_file_name(crate::backup::suggested_name())
+                        .add_filter("DSZ backup", &["json"])
+                        .save_file()
+                    {
+                        match crate::backup::export(&engine, &f) {
+                            Ok(()) => engine.toast("Backup saved"),
+                            Err(e) => engine.warn_toast(format!("Couldn't save the backup: {e}")),
+                        }
+                    }
+                }
+                if button(ui, "Restore from backup…").clicked() {
+                    if let Some(f) = rfd::FileDialog::new()
+                        .add_filter("DSZ backup", &["json"])
+                        .pick_file()
+                    {
+                        match crate::backup::read(&f) {
+                            Ok(b) => self.restore_pending = Some((f, b)),
+                            Err(e) => {
+                                self.restore_pending = None;
+                                engine.warn_toast(e);
+                            }
+                        }
+                    }
+                }
+                if button(ui, "Open settings folder").clicked() {
+                    crate::platform::open_in_explorer(&engine.data_dir);
+                }
+            });
+            if let Some((path, b)) = self.restore_pending.clone() {
+                ui.add_space(8.0);
+                let file = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                note(
+                    ui,
+                    &format!(
+                        "Restore \"{file}\" ({})? This replaces all your current profiles and settings. They are saved first to the {} folder, so you can go back.",
+                        b.summary(),
+                        crate::backup::AUTO_DIR
+                    ),
+                    WARN,
+                );
+                ui.horizontal(|ui| {
+                    if danger_button(ui, "Restore").clicked() {
+                        match crate::backup::restore(&engine, &b) {
+                            Ok(saved) => engine.toast(format!(
+                                "Settings restored. The previous ones are in {}",
+                                saved.display()
+                            )),
+                            Err(e) => engine.warn_toast(e),
+                        }
+                        self.edit_pin = None;
+                        self.restore_pending = None;
+                    } else if button(ui, "Cancel").clicked() {
+                        self.restore_pending = None;
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            muted(
+                ui,
+                &format!(
+                    "Everything is kept in {} (profiles in its profiles folder).",
+                    engine.data_dir.display()
+                ),
+            );
         });
     }
 }
