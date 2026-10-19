@@ -313,6 +313,10 @@ impl Engine {
 
     /// Start background services. Returns immediately.
     pub fn start(self: &Arc<Self>) {
+        // Before any virtual pad is plugged in.
+        let pad_nodes: Vec<String> =
+            self.settings.read().helper_nodes.values().flatten().cloned().collect();
+        self.hider.clear_stale_pads(&pad_nodes);
         let e = self.clone();
         std::thread::Builder::new()
             .name("hotplug".into())

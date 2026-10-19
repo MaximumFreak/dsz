@@ -342,7 +342,7 @@ pub fn is_ours_instance(id: &str) -> bool {
 }
 
 /// Whether one instance id (no parents) carries one of our serials.
-fn has_our_serial(id: &str) -> bool {
+pub(crate) fn has_our_serial(id: &str) -> bool {
     let id = id.to_ascii_uppercase();
     id.contains(&format!("\\{SERIAL_PREFIX}")) || id.contains(&format!("\\{DS4_SERIAL_PREFIX}"))
 }

@@ -198,22 +198,69 @@ struct HiderState {
 impl Hider {
     pub fn new(data_dir: &std::path::Path) -> Hider {
         let file = data_dir.join("hidhide-changes.json");
+        let mut state = HiderState::default();
         // Undo whatever a previous run left behind.
         if let Ok(text) = std::fs::read_to_string(&file) {
             if let Ok(ch) = serde_json::from_str::<hidhide::Changes>(&text) {
                 match hidhide::restore(&ch) {
-                    Ok(()) => log::info!(
-                        "HidHide: undid leftovers from the last run ({} node(s))",
-                        ch.devices_added.len()
-                    ),
-                    Err(e) => log::warn!("HidHide: could not undo leftovers: {e}"),
+                    Ok(()) => {
+                        log::info!(
+                            "HidHide: undid leftovers from the last run ({} node(s))",
+                            ch.devices_added.len()
+                        );
+                        let _ = std::fs::remove_file(&file);
+                    }
+                    Err(e) => {
+                        // Keep the record: forgotten entries would stay on
+                        // HidHide's list for good. They are undone with the
+                        // next change, and at exit.
+                        log::warn!("HidHide: could not undo leftovers from the last run, will retry: {e}");
+                        state.applied = ch;
+                    }
                 }
+            } else {
+                let _ = std::fs::remove_file(&file);
             }
-            let _ = std::fs::remove_file(&file);
         }
         Hider {
             file,
-            state: Mutex::new(HiderState::default()),
+            state: Mutex::new(state),
+        }
+    }
+
+    /// At startup, before any virtual pad exists: take this app's virtual
+    /// pads off HidHide's list. None of them should be there now, and one
+    /// left behind (a crash before it was recorded, or a record lost by an
+    /// older version) would hide the next pad with that serial from every
+    /// game for good, since only what this app put on is ever taken off.
+    /// `pad_nodes`: nodes Windows made below our pads on earlier runs
+    /// (their ids don't carry the pad's serial).
+    pub fn clear_stale_pads(&self, pad_nodes: &[String]) {
+        if !hidhide::available() {
+            return;
+        }
+        let st = self.state.lock();
+        if !st.want.is_empty() {
+            return;
+        }
+        match hidhide::blocklist() {
+            Ok(list) => {
+                let stale = stale_pad_entries(&list, pad_nodes, &st.applied.devices_added);
+                if !stale.is_empty() {
+                    let undo = hidhide::Changes {
+                        devices_added: stale.clone(),
+                        ..Default::default()
+                    };
+                    match hidhide::restore(&undo) {
+                        Ok(()) => log::info!(
+                            "HidHide: took {} stale virtual controller node(s) off the block list: {stale:?}",
+                            stale.len()
+                        ),
+                        Err(e) => log::warn!("HidHide: could not take stale virtual controller nodes off the block list: {e}"),
+                    }
+                }
+            }
+            Err(e) => log::warn!("HidHide: could not read the block list: {e}"),
         }
     }
 
@@ -311,15 +358,31 @@ impl Hider {
         let mut st = self.state.lock();
         st.want.clear();
         if !st.applied.is_empty() {
-            if let Err(e) = hidhide::restore(&st.applied) {
-                log::warn!("HidHide: restore failed: {e}");
+            match hidhide::restore(&st.applied) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&self.file);
+                }
+                // The record stays on disk, so the next start undoes it.
+                Err(e) => log::warn!("HidHide: restore failed, will retry at the next start: {e}"),
             }
             st.applied = Default::default();
-            let _ = std::fs::remove_file(&self.file);
         }
         st.applied_for.clear();
         st.applied_apps.clear();
     }
+}
+
+/// Block-list entries that belong to this app's virtual pads (a serial of
+/// ours, or a node recorded below one) and that `pending` doesn't already
+/// cover. Only called while no virtual pad exists.
+fn stale_pad_entries(list: &[String], pad_nodes: &[String], pending: &[String]) -> Vec<String> {
+    list.iter()
+        .filter(|d| {
+            usbip::has_our_serial(d) || pad_nodes.iter().any(|n| n.eq_ignore_ascii_case(d))
+        })
+        .filter(|d| !pending.iter().any(|p| p.eq_ignore_ascii_case(d)))
+        .cloned()
+        .collect()
 }
 
 /// HidHide block-list ids for a controller: its HID node and the parent
@@ -616,6 +679,31 @@ pub(crate) fn park_allowed(keep_xbox: bool, want: VirtualKind, hide_ok: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_entries_are_only_our_pads() {
+        let list: Vec<String> = [
+            r"USB\VID_045E&PID_028E\DSZV1",
+            r"HID\VID_045E&PID_028E&IG_00\8&2C1B3F1&0&0000",
+            r"USB\VID_054C&PID_05C4\0244535A0001",
+            r"USB\VID_054C&PID_0CE6\DSZV2",
+            // The physical controller and someone else's entries stay.
+            r"HID\{00001124-0000-1000-8000-00805F9B34FB}_VID&0002054C_PID&0CE6\9&1&0&0000",
+            r"USB\VID_045E&PID_028E\5&1A2B3C&0&2",
+            r"HID\VID_045E&PID_028E&IG_00\7&FFFF&0&0000",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let pad_nodes = vec![r"hid\vid_045e&pid_028e&ig_00\8&2c1b3f1&0&0000".to_string()];
+        let stale = stale_pad_entries(&list, &pad_nodes, &[]);
+        assert_eq!(stale, list[..4].to_vec());
+        // Already in the pending record: undone with it, not twice.
+        let pending = vec![r"usb\vid_045e&pid_028e\dszv1".to_string()];
+        let stale = stale_pad_entries(&list, &pad_nodes, &pending);
+        assert_eq!(stale, list[1..4].to_vec());
+        assert!(stale_pad_entries(&list[4..], &[], &[]).is_empty());
+    }
 
     #[test]
     fn parking_rules() {

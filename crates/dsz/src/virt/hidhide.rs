@@ -191,6 +191,12 @@ pub fn set_app(exe: &Path, allow: bool) -> io::Result<Option<String>> {
     }
 }
 
+/// The device block list as it stands.
+pub fn blocklist() -> io::Result<Vec<String>> {
+    let h = open()?;
+    get_list(&h, GET_BLACKLIST)
+}
+
 /// Undo [`hide`]. Entries that were already there before stay.
 pub fn restore(ch: &Changes) -> io::Result<()> {
     if ch.is_empty() {

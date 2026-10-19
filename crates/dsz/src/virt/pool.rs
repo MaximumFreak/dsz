@@ -481,17 +481,42 @@ impl Pool {
     }
 
     /// Put a parked pad back in service for `device` (or for nobody yet).
+    ///
+    /// A pad that was hidden while parked is plugged in again once it is
+    /// shown. Taking it off HidHide's list tells nobody: games, Steam and
+    /// Windows' own input services found their controllers while it was
+    /// hidden (it was hidden before Windows first saw it), and they only
+    /// look again when a device arrives. Without a fresh arrival the pad is
+    /// in Device Manager and Settings but no game finds it.
     pub fn unpark(&self, engine: &Engine, pad: &Pad, device: Option<&Arc<Device>>) {
-        pad.raw_check.lock().next = Instant::now();
         let was = pad.parked.lock().take();
-        if was.is_some_and(|p| !p.ids.is_empty()) {
+        let was_hidden = was.is_some_and(|p| !p.ids.is_empty());
+        let mut shown = true;
+        if was_hidden {
             if let Err(e) = engine.hider.set(pad.id + PARK_HIDE, Vec::new()) {
-                log::warn!("HidHide: {e}");
+                log::warn!("HidHide, unparking the Xbox controller: {e}");
+                shown = false;
             }
         }
         if let Some(d) = device {
             *pad.route.owner.lock() = Arc::downgrade(d);
             *pad.route.mirror.lock() = d.mirror.lock().clone();
+        }
+        if was_hidden && shown && pad.alive() {
+            log::info!("virtual Xbox 360 controller shown again: plugging it in again so games see it arrive");
+            match pad.target.replug() {
+                Ok(()) => {
+                    let mut rc = pad.raw_check.lock();
+                    rc.replugged = Some(Instant::now());
+                    rc.next = Instant::now() + RAW_SETTLE;
+                }
+                Err(e) => {
+                    log::warn!("virtual Xbox 360 controller replug after unparking: {e}");
+                    pad.raw_check.lock().next = Instant::now();
+                }
+            }
+        } else {
+            pad.raw_check.lock().next = Instant::now();
         }
     }
 
