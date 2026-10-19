@@ -14,7 +14,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ds_proto::virtual_pad as vp;
 use parking_lot::Mutex;
@@ -41,6 +41,9 @@ const RAW_CHECK_EVERY: Duration = Duration::from_secs(5);
 const REPLUG_AGAIN_AFTER: Duration = Duration::from_secs(60);
 /// A pad this new may not be in raw input's list yet.
 const RAW_SETTLE: Duration = Duration::from_secs(3);
+/// A game started this long before a pad was hidden may still have been
+/// starting up (looking for controllers) by then.
+const GAME_START_MARGIN: Duration = Duration::from_secs(30);
 
 /// When an Xbox pad's raw input check is next due, and its last replug.
 struct RawCheck {
@@ -96,6 +99,12 @@ struct Parked {
     apps: Vec<std::path::PathBuf>,
     since: Instant,
     checked: Instant,
+    /// Hidden before Windows first saw it: nothing running then found it.
+    born_hidden: bool,
+    /// When it was hidden. A game started since (or just before: the game
+    /// that switched to DualSense starts up while it is hidden) looked for
+    /// controllers without it.
+    hidden_at: SystemTime,
 }
 
 impl Parked {
@@ -105,8 +114,33 @@ impl Parked {
             apps: Vec::new(),
             since: Instant::now(),
             checked: Instant::now(),
+            born_hidden: false,
+            hidden_at: SystemTime::now(),
         }
     }
+}
+
+/// Why a parked pad, now shown, has to be plugged in again for games to
+/// find it, or `None`. Games look for controllers when they start and when
+/// one arrives, and taking a pad off HidHide's list is no arrival. A pad
+/// that was visible when it arrived and when every game still running
+/// started needs nothing: switching back after a DualSense game closes
+/// stays a replug-free swap.
+fn missed_by(engine: &Engine, p: &Parked) -> Option<String> {
+    if p.born_hidden {
+        return Some("it was hidden when it was plugged in".into());
+    }
+    let since = p.hidden_at - GAME_START_MARGIN;
+    crate::platform::process_list()
+        .into_iter()
+        .filter(|(pid, _)| crate::platform::process_started(*pid).is_some_and(|t| t >= since))
+        .find(|(pid, _)| {
+            crate::platform::process_path(*pid).is_some_and(|path| {
+                crate::games::is_likely_game(&path.to_string_lossy())
+                    || engine.dsdetect.check(&path).is_some()
+            })
+        })
+        .map(|(_, name)| format!("{name} started while it was hidden"))
 }
 
 impl Pad {
@@ -363,6 +397,7 @@ impl Pool {
         let since = parked.as_ref().map(|p| p.since).unwrap_or_else(Instant::now);
         if !hide {
             if hidden_now {
+                log::info!("parked Xbox 360 controller no longer hidden from games (HidHide off or gone)");
                 if let Err(e) = engine.hider.set(key, Vec::new()) {
                     log::warn!("HidHide: {e}");
                 }
@@ -396,11 +431,17 @@ impl Pool {
                 engine.settings_save_later();
             }
         }
+        let (born_hidden, hidden_at) = match parked.as_ref() {
+            Some(p) if hidden_now => (p.born_hidden, p.hidden_at),
+            _ => (false, SystemTime::now()),
+        };
         *parked = Some(Parked {
             ids,
             apps,
             since,
             checked: Instant::now(),
+            born_hidden,
+            hidden_at,
         });
     }
 
@@ -464,6 +505,8 @@ impl Pool {
                 ids: hidden,
                 since: Instant::now(),
                 checked: Instant::now() - PARK_EVERY_LATE,
+                born_hidden: pre_hidden,
+                hidden_at: SystemTime::now(),
             })),
         });
         self.pads.lock().push(pad.clone());
@@ -483,27 +526,26 @@ impl Pool {
     /// Put a parked pad back in service for `device` (or for nobody yet).
     ///
     /// A pad that was hidden while parked is plugged in again once it is
-    /// shown. Taking it off HidHide's list tells nobody: games, Steam and
-    /// Windows' own input services found their controllers while it was
-    /// hidden (it was hidden before Windows first saw it), and they only
-    /// look again when a device arrives. Without a fresh arrival the pad is
-    /// in Device Manager and Settings but no game finds it.
+    /// shown, when something may have looked for controllers while it was
+    /// hidden (see [`missed_by`]). Taking it off HidHide's list tells
+    /// nobody, so without a fresh arrival such a game (an SDL game started
+    /// in DualSense mode, then switched to Xbox) never finds it, though it
+    /// is in Device Manager and Settings.
     pub fn unpark(&self, engine: &Engine, pad: &Pad, device: Option<&Arc<Device>>) {
-        let was = pad.parked.lock().take();
-        let was_hidden = was.is_some_and(|p| !p.ids.is_empty());
-        let mut shown = true;
-        if was_hidden {
-            if let Err(e) = engine.hider.set(pad.id + PARK_HIDE, Vec::new()) {
-                log::warn!("HidHide, unparking the Xbox controller: {e}");
-                shown = false;
+        let was = pad.parked.lock().take().filter(|p| !p.ids.is_empty());
+        let mut why = None;
+        if let Some(p) = &was {
+            match engine.hider.set(pad.id + PARK_HIDE, Vec::new()) {
+                Ok(_) => why = missed_by(engine, p),
+                Err(e) => log::warn!("HidHide, unparking the Xbox controller: {e}"),
             }
         }
         if let Some(d) = device {
             *pad.route.owner.lock() = Arc::downgrade(d);
             *pad.route.mirror.lock() = d.mirror.lock().clone();
         }
-        if was_hidden && shown && pad.alive() {
-            log::info!("virtual Xbox 360 controller shown again: plugging it in again so games see it arrive");
+        if let (Some(why), true) = (why, pad.alive()) {
+            log::info!("virtual Xbox 360 controller shown again; {why}: plugging it in again so games see it arrive");
             match pad.target.replug() {
                 Ok(()) => {
                     let mut rc = pad.raw_check.lock();

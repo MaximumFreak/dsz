@@ -28,7 +28,9 @@ const GET_ACTIVE: u32 = code(2052);
 const SET_ACTIVE: u32 = code(2053);
 const GET_INVERSE: u32 = code(2054);
 
-fn open() -> io::Result<Handle> {
+/// The control device takes one handle at a time: while another thread (or
+/// app) has it open, opening it fails with access denied.
+fn open_once() -> io::Result<Handle> {
     let w = wide(r"\\.\HidHide");
     let h = unsafe {
         CreateFileW(
@@ -47,9 +49,30 @@ fn open() -> io::Result<Handle> {
     Ok(Handle::from_raw(h))
 }
 
-/// Is the HidHide driver installed and reachable?
+fn in_use(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+}
+
+/// [`open_once`], waiting up to 200 ms for whoever holds the device.
+fn open() -> io::Result<Handle> {
+    let t = std::time::Instant::now();
+    loop {
+        match open_once() {
+            Err(e) if in_use(&e) && t.elapsed() < std::time::Duration::from_millis(200) => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            r => return r,
+        }
+    }
+}
+
+/// Is the HidHide driver installed and reachable? In use counts: taken for
+/// gone, a parked pad would be shown to games until the next check.
 pub fn available() -> bool {
-    open().is_ok()
+    match open_once() {
+        Ok(_) => true,
+        Err(e) => in_use(&e),
+    }
 }
 
 fn get_list(h: &Handle, code: u32) -> io::Result<Vec<String>> {
