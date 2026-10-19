@@ -265,6 +265,34 @@ pub fn process_path(pid: u32) -> Option<std::path::PathBuf> {
     }
 }
 
+/// When a process started, when we may query it.
+pub fn process_started(pid: u32) -> Option<std::time::SystemTime> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        let ok = GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user);
+        CloseHandle(h);
+        if ok == 0 {
+            return None;
+        }
+        // 100 ns ticks since 1601.
+        let ticks = (created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64;
+        let secs = (ticks / 10_000_000).checked_sub(11_644_473_600)?;
+        Some(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(secs)
+                + std::time::Duration::from_nanos(ticks % 10_000_000 * 100),
+        )
+    }
+}
+
 /// Returns false if another instance already holds the mutex.
 pub fn single_instance() -> bool {
     unsafe {

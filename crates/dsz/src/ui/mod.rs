@@ -105,6 +105,11 @@ pub struct App {
     rename: Option<(String, String)>,
     new_profile: String,
     confirm_delete: Option<String>,
+    /// A checked backup waiting for "Restore" to be confirmed.
+    restore_pending: Option<(std::path::PathBuf, crate::backup::Backup)>,
+    /// "Backup & restore…" on Profiles: when it was clicked, and whether
+    /// Settings has scrolled to the card it lights up since.
+    pub(crate) focus_backup: Option<(Instant, bool)>,
     audio_devices: Option<(Instant, Vec<String>)>,
     log_level: log::Level,
     processes: Option<(Instant, Vec<String>)>,
@@ -197,6 +202,8 @@ impl App {
             rename: None,
             new_profile: String::new(),
             confirm_delete: None,
+            restore_pending: None,
+            focus_backup: None,
             audio_devices: None,
             log_level: log::Level::Info,
             processes: None,

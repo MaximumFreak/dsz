@@ -1,10 +1,12 @@
 //! One-click driver installs: download a pinned release from its official
 //! GitHub page, verify it, and run its installer (Windows asks for admin).
 //!
-//! - usbip-win2 0.9.7.7: checked against its published SHA-256. Not 0.9.7.8,
-//!   which can crash Windows (see `virt::usbip::blocked`). 0.9.8.0 and
-//!   0.9.8.1 attach when they are already installed; this pin stays on
-//!   0.9.7.7, the release exercised on the reference PC.
+//! - usbip-win2 0.9.8.1, the current release: checked against the SHA-256
+//!   GitHub publishes for it. Pinned rather than the newest: each release
+//!   has changed the attach request (`virt::usbip::PLUGIN_LAYOUTS`), so a
+//!   newer one may not attach until the app knows it. Not 0.9.7.8, which
+//!   can crash Windows (see `virt::usbip::blocked`). 0.9.7.7 and 0.9.8.0
+//!   attach when they are already installed.
 //! - HidHide 1.5.230: its release publishes no hash, so the installer must
 //!   carry a valid Authenticode signature from its author.
 
@@ -55,11 +57,11 @@ impl Package {
     fn release(self) -> Release {
         match self {
             Package::Usbip => Release {
-                name: "usbip-win2 0.9.7.7",
-                url: "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.7.7/USBip-0.9.7.7-x64.exe",
-                file: "USBip-0.9.7.7-x64.exe",
+                name: "usbip-win2 0.9.8.1",
+                url: "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-x64.exe",
+                file: "USBip-0.9.8.1-x64.exe",
                 check: Check::Sha256(hex32(
-                    "51620fa5f9f8be5932bc9d786deee557ce06d5407a99cab490dcfac71f185fea",
+                    "38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a",
                 )),
             },
             Package::HidHide => Release {

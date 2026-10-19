@@ -690,6 +690,8 @@ pub struct Pipeline {
     gyro_was_active: bool,
     /// Buttons last pressed on the helper Xbox pad.
     helper_sent: u32,
+    /// The parked Xbox pad had the whole pad, for Game Bar.
+    to_gamebar: bool,
     /// Touchpad zone held on the previous report, if the click was placed.
     touch_zone: Option<Button>,
 }
@@ -709,6 +711,7 @@ impl Pipeline {
             last_at: None,
             gyro_was_active: false,
             helper_sent: 0,
+            to_gamebar: false,
             touch_zone: None,
         }
     }
@@ -888,14 +891,48 @@ impl Pipeline {
         }
 
         // Mappings
-        let (suppress, inject) = self.mappings(engine, device, &profile, &s, &prev, now);
+        let (suppress, inject, helper) = self.mappings(engine, device, &profile, &s, &prev, now);
+
+        // Game Bar reads only Xbox pads. While its overlay is open, the
+        // parked Xbox pad (which games can't see) gets the whole pad, and
+        // the game gets an idle one, so a press meant for Game Bar does
+        // nothing in the game and Game Bar never sees it twice, should it
+        // read DualSense pads again.
+        let active = device.virt.active();
+        let to_gamebar = active != Some(VirtualKind::Xbox360)
+            && device.virt.has_parked()
+            && crate::virt::gamebar::open();
 
         // Virtual controller
-        if device.virt.active().is_some() {
+        if active.is_some() || to_gamebar {
             let pad = virtual_pad(&profile, &s, suppress, inject, lm, rm, touch_mode);
-            let touch = touch_mode != TouchMode::Mouse || profile.virtual_out.touch_passthrough;
-            device.virt.submit(&pad, raw, touch);
+            if active.is_some() {
+                let touch = touch_mode != TouchMode::Mouse || profile.virtual_out.touch_passthrough;
+                if to_gamebar {
+                    device.virt.submit(&Default::default(), still(raw).as_ref(), false);
+                } else {
+                    device.virt.submit(&pad, raw, touch);
+                }
+            }
+            if to_gamebar {
+                let mut p = pad;
+                let h = crate::virt::companion::pad(helper);
+                p.buttons.0 |= h.buttons.0;
+                p.l2 = p.l2.max(h.l2);
+                p.r2 = p.r2.max(h.r2);
+                device.virt.submit_parked(&p);
+            }
         }
+        // Otherwise Xbox buttons go to the parked Xbox pad, else to the
+        // helper pad; once after Game Bar closes, to let go of the rest.
+        if !to_gamebar
+            && (helper != 0 || self.helper_sent != 0 || self.to_gamebar)
+            && !device.virt.submit_parked(&crate::virt::companion::pad(helper))
+        {
+            engine.companion.set(device.id, helper);
+        }
+        self.helper_sent = helper;
+        self.to_gamebar = to_gamebar;
 
         // Publish for the UI and the haptics thread.
         let mut live = device.live.lock();
@@ -912,7 +949,8 @@ impl Pipeline {
     }
 
     /// Run the mappings. Returns the buttons to hide from the virtual
-    /// controller and the virtual buttons mappings are pressing.
+    /// controller, the virtual buttons mappings are pressing, and the Xbox
+    /// buttons they press with no virtual Xbox pad of this controller's own.
     fn mappings(
         &mut self,
         engine: &Engine,
@@ -921,7 +959,7 @@ impl Pipeline {
         s: &InputState,
         prev: &InputState,
         now: Instant,
-    ) -> (u32, u32) {
+    ) -> (u32, u32, u32) {
         let mut suppress = 0u32;
         // Buttons inside a combo that is held right now: their solo long
         // presses and double taps don't fire.
@@ -1099,7 +1137,7 @@ impl Pipeline {
         let mut inject = 0u32;
         let mut helper = 0u32;
         // Xbox buttons go to the virtual Xbox pad, else to the parked Xbox
-        // pad, else to the helper pad.
+        // pad or the helper pad (see `process`).
         let own_xbox = device.virt.active() == Some(VirtualKind::Xbox360);
         for (m, rt) in profile.mappings.iter().zip(self.maps.iter()) {
             if !m.enabled || !rt.out_down {
@@ -1112,14 +1150,20 @@ impl Pipeline {
                 _ => {}
             }
         }
-        if helper != 0 || self.helper_sent != 0 {
-            if !device.virt.submit_parked(helper) {
-                engine.companion.set(device.id, helper);
-            }
-            self.helper_sent = helper;
-        }
-        (suppress, inject)
+        (suppress, inject, helper)
     }
+}
+
+/// The physical report with the gyro still, for an idle virtual pad: the
+/// accelerometer stays, so the game keeps its sense of which way is down.
+fn still(
+    raw: Option<&[u8; ds_proto::virtual_pad::DS_USB_INPUT_LEN]>,
+) -> Option<[u8; ds_proto::virtual_pad::DS_USB_INPUT_LEN]> {
+    raw.map(|r| {
+        let mut r = *r;
+        r[16..22].fill(0);
+        r
+    })
 }
 
 /// The pad the game sees: mappings and mutes applied, sticks that drive the

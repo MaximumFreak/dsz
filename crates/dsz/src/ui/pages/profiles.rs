@@ -156,7 +156,7 @@ impl App {
                 self.edit_pin = Some(n);
                 self.page = crate::ui::Page::Lighting;
             }
-            if button(ui, "Import file…").clicked() {
+            if button(ui, "Import profile…").clicked() {
                 if let Some(f) = rfd::FileDialog::new()
                     .add_filter("Profile", &["json"])
                     .pick_file()
@@ -167,8 +167,15 @@ impl App {
                     }
                 }
             }
-            if button(ui, "Open folder").clicked() {
+            if button(ui, "Open profiles folder").clicked() {
                 crate::platform::open_in_explorer(engine.profiles.dir());
+            }
+            if button(ui, "Backup & restore…")
+                .on_hover_text("Back up or restore every profile and setting at once, on the Settings page")
+                .clicked()
+            {
+                self.page = crate::ui::Page::Settings;
+                self.focus_backup = Some((std::time::Instant::now(), false));
             }
         });
         ui.add_space(10.0);
@@ -336,7 +343,7 @@ impl App {
                                             ui.close();
                                         }
                                         ui.separator();
-                                        if ui.button("Export file…").clicked() {
+                                        if ui.button("Export profile…").clicked() {
                                             if let Some(f) = rfd::FileDialog::new()
                                                 .set_file_name(format!(
                                                     "{}.json",

@@ -122,7 +122,7 @@ impl Detector {
     pub fn check(&self, exe: &Path) -> Option<String> {
         let key = exe.to_string_lossy().to_ascii_lowercase();
         let name = exe.file_name()?.to_string_lossy().to_ascii_lowercase();
-        if NOT_GAMES.contains(&name.as_str()) || is_system(&key) {
+        if NOT_GAMES.contains(&name.as_str()) || is_system(&key) || key == *own_exe() {
             return None;
         }
         let meta = std::fs::metadata(exe).ok()?;
@@ -173,6 +173,17 @@ impl Detector {
             .filter_map(|(k, e)| e.found.clone().map(|f| (k.clone(), f)))
             .collect()
     }
+}
+
+/// This app's own exe, lower case. It holds the scan's needles, so under
+/// any name but dsz.exe it would count as a DualSense game.
+fn own_exe() -> &'static String {
+    static OWN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OWN.get_or_init(|| {
+        std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    })
 }
 
 fn is_system(path_lower: &str) -> bool {

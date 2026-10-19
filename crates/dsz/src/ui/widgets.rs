@@ -9,10 +9,22 @@ use super::theme::*;
 
 /// A rounded card with an optional title and subtitle.
 pub fn card<R>(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    card_glow(ui, title, subtitle, 0.0, add).0
+}
+
+/// [`card`] lit up in the accent color by `glow` (0 to 1), to point at it.
+/// Also returns the card's response, to scroll to it.
+pub fn card_glow<R>(
+    ui: &mut Ui,
+    title: &str,
+    subtitle: &str,
+    glow: f32,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> (R, Response) {
     let w = (ui.available_width() - 38.0).max(100.0);
-    egui::Frame::new()
-        .fill(CARD)
-        .stroke(Stroke::new(1.0_f32, BORDER))
+    let r = egui::Frame::new()
+        .fill(mix(CARD, ACCENT, glow * 0.12))
+        .stroke(Stroke::new(1.0 + glow, mix(BORDER, ACCENT, glow)))
         .corner_radius(CornerRadius::same(R_CARD))
         .inner_margin(egui::Margin::same(18))
         .show(ui, |ui| {
@@ -26,8 +38,8 @@ pub fn card<R>(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&mut U
                 ui.add_space(8.0);
             }
             add(ui)
-        })
-        .inner
+        });
+    (r.inner, r.response)
 }
 
 pub fn page_header(ui: &mut Ui, title: &str, subtitle: &str) {

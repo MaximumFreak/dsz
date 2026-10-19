@@ -312,7 +312,7 @@ fn refuse_release(version: Option<[u16; 4]>, date: Option<&str>) -> bool {
 pub fn blocked() -> Option<String> {
     refuse_release(driver_version(), driver_date().as_deref()).then(|| {
         "usbip-win2 0.9.7.8 is installed. That release can corrupt memory and crash Windows (its author's warning), \
-so DualSense mode stays off. Uninstall it, restart, and install 0.9.7.7."
+so DualSense mode stays off. Uninstall it, restart, and install 0.9.8.1."
             .to_string()
     })
 }
@@ -342,7 +342,7 @@ pub fn is_ours_instance(id: &str) -> bool {
 }
 
 /// Whether one instance id (no parents) carries one of our serials.
-fn has_our_serial(id: &str) -> bool {
+pub(crate) fn has_our_serial(id: &str) -> bool {
     let id = id.to_ascii_uppercase();
     id.contains(&format!("\\{SERIAL_PREFIX}")) || id.contains(&format!("\\{DS4_SERIAL_PREFIX}"))
 }
@@ -1227,14 +1227,21 @@ fn control(s: &Shared, u: &Submit) -> Option<Vec<u8>> {
             Some(vec![0x80, 0xBB, 0x00])
         }
         // ---- Xbox 360 vendor requests: the driver asks for the
-        // controller's capabilities and serial; a zeroed answer of the
-        // requested length is what a pad without those features returns.
+        // controller's capabilities and serial. The capabilities are a
+        // full pad's; anything else gets a zeroed answer of the requested
+        // length, which is what a pad without that feature returns.
         (2, _) if model == Model::Xbox360 && rt & 0x80 != 0 => {
             log::debug!(
                 "virtual Xbox 360: vendor request {rt:02X} {req:02X} {value:04X} {index:04X} len {}",
                 u.length
             );
-            Some(vec![0; u.length as usize])
+            let mut a = match (rt, req, value) {
+                (0xC1, 0x01, 0x0000) => d::x360::RUMBLE_CAPS.to_vec(),
+                (0xC1, 0x01, 0x0100) => d::x360::INPUT_CAPS.to_vec(),
+                _ => Vec::new(),
+            };
+            a.resize(u.length as usize, 0);
+            Some(a)
         }
         (2, _) if model == Model::Xbox360 => Some(Vec::new()),
         _ => {
@@ -1354,6 +1361,34 @@ fn audio_request(s: &Shared, req: u8, unit: u8, selector: u8, data: &[u8]) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn x360_input_caps_cover_every_field_we_send() {
+        use ds_proto::virtual_pad as vp;
+        let all = [
+            vp::XUSB_DPAD_UP, vp::XUSB_DPAD_DOWN, vp::XUSB_DPAD_LEFT, vp::XUSB_DPAD_RIGHT,
+            vp::XUSB_START, vp::XUSB_BACK, vp::XUSB_LEFT_THUMB, vp::XUSB_RIGHT_THUMB,
+            vp::XUSB_LEFT_SHOULDER, vp::XUSB_RIGHT_SHOULDER, vp::XUSB_GUIDE,
+            vp::XUSB_A, vp::XUSB_B, vp::XUSB_X, vp::XUSB_Y,
+        ];
+        let full = vp::x360_usb_input(&vp::XusbReport {
+            buttons: all.iter().fold(0, |m, b| m | b),
+            left_trigger: 0xFF,
+            right_trigger: 0xFF,
+            lx: -1,
+            ly: -1,
+            rx: -1,
+            ry: -1,
+        });
+        let caps = d::x360::INPUT_CAPS;
+        // Same header, and every button and trigger bit a report can set.
+        assert_eq!(caps[..6], full[..6]);
+        // Sticks: the top 10 bits of each axis.
+        for axis in caps[6..14].chunks(2) {
+            assert_eq!(u16::from_le_bytes([axis[0], axis[1]]), 0xFFC0);
+        }
+        assert_eq!(d::x360::RUMBLE_CAPS[3..5], [0xFF, 0xFF]);
+    }
 
     #[test]
     fn iso_windows_are_back_to_back_and_reanchor_after_a_gap() {

@@ -336,7 +336,7 @@ impl App {
                     if toggle_row(
                         ui,
                         "Keep the Xbox 360 controller as player 1",
-                        "While a DualSense or native profile is active it stays plugged in, idle and hidden from games, and presses Xbox buttons. Off: unplugged, with a helper pad for Xbox buttons",
+                        "While a DualSense or native profile is active it stays plugged in, idle and hidden from games, presses Xbox buttons, and drives Game Bar while it is open. Off: unplugged, with a helper pad for Xbox buttons",
                         &mut keep_xbox,
                     ) {
                         self.engine.settings.write().keep_xbox_pad = keep_xbox;

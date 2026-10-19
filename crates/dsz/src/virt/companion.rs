@@ -158,15 +158,19 @@ struct Live {
     hidden: Option<Hidden>,
 }
 
-pub(crate) fn report(buttons: u32) -> [u8; vp::X360_USB_INPUT_LEN] {
+/// `buttons` (DualSense layout) pressed on an otherwise idle pad.
+pub(crate) fn pad(buttons: u32) -> vp::PadState {
     let b = Buttons(buttons);
-    let p = vp::PadState {
+    vp::PadState {
         buttons: b,
         l2: if b.has(ds_proto::input::Button::L2) { 255 } else { 0 },
         r2: if b.has(ds_proto::input::Button::R2) { 255 } else { 0 },
         ..Default::default()
-    };
-    vp::x360_usb_input(&vp::xusb_report(&p))
+    }
+}
+
+fn report(buttons: u32) -> [u8; vp::X360_USB_INPUT_LEN] {
+    vp::x360_usb_input(&vp::xusb_report(&pad(buttons)))
 }
 
 pub(crate) fn usb_id(serial: &str) -> String {

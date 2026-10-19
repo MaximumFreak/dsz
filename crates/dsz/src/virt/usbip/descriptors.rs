@@ -172,6 +172,27 @@ pub mod x360 {
         v
     }
 
+    /// Answers to the driver's capability requests (`C1 01`, interface 0),
+    /// laid out as in Santroller's Xbox 360 notes
+    /// (santroller.github.io/guitar-configurator, "Controller Identification
+    /// and Capabilities"). XInputGetCapabilities passes them on to games and
+    /// to Windows' own gamepad readers, so they describe a full wired pad.
+    ///
+    /// `wValue 0x0000`: both rumble motors, full range.
+    pub const RUMBLE_CAPS: [u8; 8] = [0x00, 0x08, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00];
+    /// `wValue 0x0100`: a mask over the input report. Every button bit
+    /// (`0xF7FF`: all but the unused bit 11; Guide included), both
+    /// triggers, and four sticks with 10 bits of resolution (`0xFFC0`).
+    /// Reserved and flags stay 0.
+    pub const INPUT_CAPS: [u8; 20] = [
+        0x00, 0x14, // report 0, 20 bytes
+        0xFF, 0xF7, // buttons
+        0xFF, 0xFF, // triggers
+        0xC0, 0xFF, 0xC0, 0xFF, // left stick X, Y
+        0xC0, 0xFF, 0xC0, 0xFF, // right stick X, Y
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
     pub fn string(index: u8) -> Option<Vec<u8>> {
         match index {
             0 => Some(vec![0x04, 0x03, 0x09, 0x04]),
