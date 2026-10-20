@@ -132,11 +132,12 @@ pub struct DsSink {
 
 impl DsSink {
     /// Answer for a feature-report `GET_REPORT`; `None` declines it.
-    /// `devnum` is this pad's slot, so a DualShock 4's MAC matches its USB serial.
-    pub fn feature(&self, model: Model, id: u8, devnum: u32) -> Option<Vec<u8>> {
+    /// `tag` is this pad's identity tag, so a DualShock 4's MAC matches its
+    /// USB serial.
+    pub fn feature(&self, model: Model, id: u8, tag: u16) -> Option<Vec<u8>> {
         let m = self.mirror.lock();
         if model == Model::DualShock4 {
-            return d::ds4::feature(id, m.calibration.as_deref(), &ds4_mac(devnum));
+            return d::ds4::feature(id, m.calibration.as_deref(), &ds4_mac(tag));
         }
         m.answer(id)
     }
@@ -213,18 +214,30 @@ pub const SERIAL_PREFIX: &str = "DSZV";
 /// address, which no real pad has) and then "DSZ" in ASCII.
 pub const DS4_SERIAL_PREFIX: &str = "0244535A";
 
-/// USB serial of a virtual DualShock 4: [`DS4_SERIAL_PREFIX`] and the slot,
-/// 12 hex digits in all. Steam treats a pad as a DualShock 4 only when its
-/// serial is 12 hex digits and matches feature report `0x12`. `DSZV1` is not
-/// hex, so Steam takes the pad as a generic gamepad and the game shows Xbox
-/// prompts.
-pub fn ds4_serial(devnum: u32) -> String {
-    format!("{DS4_SERIAL_PREFIX}{:04X}", devnum & 0xFFFF)
+/// USB serial of a virtual DualShock 4: [`DS4_SERIAL_PREFIX`] and a 16-bit
+/// tag ([`ds4_tag`]), 12 hex digits in all. Steam treats a pad as a
+/// DualShock 4 only when its serial is 12 hex digits and matches feature
+/// report `0x12`. `DSZV1` is not hex, so Steam takes the pad as a generic
+/// gamepad and the game shows Xbox prompts.
+pub fn ds4_serial(tag: u16) -> String {
+    format!("{DS4_SERIAL_PREFIX}{tag:04X}")
+}
+
+/// The tag of the virtual DualShock 4 a controller drives: the last two
+/// bytes of its address, in any separator style. Steam keeps a DualShock 4's
+/// name, lightbar color and settings by its serial, so each controller
+/// needs its own whichever pad slot it gets. `None` for an unknown address.
+pub fn ds4_tag(mac: &str) -> Option<u16> {
+    let hex: String = mac.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if hex.len() != 12 {
+        return None;
+    }
+    u16::from_str_radix(&hex[8..], 16).ok()
 }
 
 /// The same identity as six MAC bytes, in transmission order.
-pub fn ds4_mac(devnum: u32) -> [u8; 6] {
-    let s = ds4_serial(devnum);
+pub fn ds4_mac(tag: u16) -> [u8; 6] {
+    let s = ds4_serial(tag);
     let mut m = [0u8; 6];
     for i in 0..6 {
         m[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
@@ -536,6 +549,8 @@ struct Shared {
     epoch: Instant,
     busid: String,
     devnum: u32,
+    /// A DualShock 4's identity tag ([`ds4_tag`]); the slot for other models.
+    tag: u16,
     ended: AtomicBool,
     urbs: AtomicU64,
     /// Last Xbox 360 ring-LED pattern the driver set (the XInput slot).
@@ -556,6 +571,9 @@ impl Shared {
 // ------------------------------------------------------------------ public handle
 
 static SLOTS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+/// Tags of the virtual DualShock 4s plugged in: two pads with one USB
+/// serial would clash in Windows.
+static DS4_TAGS: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
 
 /// Probes: start numbering pads at `first`, so a probe's pads don't share
 /// a serial (`DSZV<n>`) with the running app's.
@@ -581,6 +599,18 @@ impl UsbPad {
     /// [`UsbPad::create`], calling `before_attach` with the pad's USB serial
     /// once it is chosen and before Windows sees the device (to hide it).
     pub fn create_with(model: Model, sink: DsSink, before_attach: &dyn Fn(&str)) -> io::Result<UsbPad> {
+        Self::create_for(model, sink, "", before_attach)
+    }
+
+    /// [`UsbPad::create_with`] for the controller with address `mac`: a
+    /// virtual DualShock 4 takes that controller's identity ([`ds4_tag`]),
+    /// unless another pad has it already. Without one it goes by its slot.
+    pub fn create_for(
+        model: Model,
+        sink: DsSink,
+        mac: &str,
+        before_attach: &dyn Fn(&str),
+    ) -> io::Result<UsbPad> {
         let paths = win::interface_paths(&GUID_VHCI);
         let Some(vhci_path) = paths.first() else {
             return Err(io::Error::new(
@@ -596,6 +626,17 @@ impl UsbPad {
         };
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
+        let tag = if model == Model::DualShock4 {
+            let mut used = DS4_TAGS.lock();
+            let t = ds4_tag(mac)
+                .filter(|t| !used.contains(t))
+                .or_else(|| (slot as u16..=u16::MAX).find(|t| !used.contains(t)))
+                .unwrap_or(slot as u16);
+            used.insert(t);
+            t
+        } else {
+            slot as u16
+        };
         let idle = model.idle_input();
         let shared = Arc::new(Shared {
             model,
@@ -616,6 +657,7 @@ impl UsbPad {
             epoch: Instant::now(),
             busid: format!("1-{slot}"),
             devnum: slot,
+            tag,
             ended: AtomicBool::new(false),
             urbs: AtomicU64::new(0),
             led: Default::default(),
@@ -648,7 +690,7 @@ impl UsbPad {
             return Err(io::Error::new(io::ErrorKind::Unsupported, why));
         }
         let serial = match model {
-            Model::DualShock4 => ds4_serial(slot),
+            Model::DualShock4 => ds4_serial(tag),
             _ => format!("{SERIAL_PREFIX}{slot}"),
         };
         before_attach(&serial);
@@ -670,7 +712,7 @@ impl UsbPad {
     /// The USB serial number Windows sees (part of its instance id).
     pub fn serial(&self) -> String {
         match self.shared.model {
-            Model::DualShock4 => ds4_serial(self.slot),
+            Model::DualShock4 => ds4_serial(self.shared.tag),
             _ => format!("{SERIAL_PREFIX}{}", self.slot),
         }
     }
@@ -845,6 +887,9 @@ impl Drop for UsbPad {
             let _ = t.join();
         }
         SLOTS.lock().remove(&self.slot);
+        if self.shared.model == Model::DualShock4 {
+            DS4_TAGS.lock().remove(&self.shared.tag);
+        }
         log::info!("virtual {} removed", self.shared.model.name());
     }
 }
@@ -1162,7 +1207,7 @@ fn control(s: &Shared, u: &Submit) -> Option<Vec<u8>> {
                     Model::DualShock4 => d::ds4::configuration(),
                 }),
                 3 if idx == 3 => Some(d::utf16_string(&match model {
-                    Model::DualShock4 => ds4_serial(s.devnum),
+                    Model::DualShock4 => ds4_serial(s.tag),
                     _ => format!("{SERIAL_PREFIX}{}", s.devnum),
                 })),
                 3 => match model {
@@ -1279,7 +1324,7 @@ fn hid_request(s: &Shared, req: u8, value: u16, data: &[u8]) -> Option<Vec<u8>> 
                 Some(rep[..n].to_vec())
             }
             3 => {
-                let a = s.sink.feature(s.model, id, s.devnum);
+                let a = s.sink.feature(s.model, id, s.tag);
                 if a.is_none() {
                     log::debug!(
                         "virtual {}: unanswered feature report 0x{id:02X}",
@@ -1414,6 +1459,10 @@ mod tests {
         assert!(serial.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(serial.starts_with(DS4_SERIAL_PREFIX));
         assert_ne!(ds4_serial(1), ds4_serial(2));
+        // Each controller keeps its own: the last two address bytes.
+        assert_eq!(ds4_tag("A4-AE-12-34-9C-0F"), Some(0x9C0F));
+        assert_eq!(ds4_serial(ds4_tag("A4AE12349C0F").unwrap()), "0244535A9C0F");
+        assert_eq!(ds4_tag(""), None);
         // Physical-controller scans skip it by that prefix.
         assert!(has_our_serial(&format!(r"USB\VID_054C&PID_05C4\{serial}")));
         assert!(has_our_serial(r"USB\VID_054C&PID_0CE6\DSZV3"));

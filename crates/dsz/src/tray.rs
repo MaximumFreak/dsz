@@ -19,6 +19,7 @@ const ID_QUIT: usize = 2;
 const ID_PROFILE_BASE: usize = 100;
 
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 static ENGINE: OnceLock<Arc<Engine>> = OnceLock::new();
 static ON_SHOW: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
@@ -104,6 +105,28 @@ unsafe fn make_hicon() -> HICON {
     )
 }
 
+/// A notification from the tray icon; clicking it opens the window on
+/// Settings.
+pub fn notify(title: &str, text: &str) {
+    let hwnd = TRAY_HWND.load(Ordering::Acquire) as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = NIIF_INFO;
+        let t: Vec<u16> = title.encode_utf16().take(63).collect();
+        nid.szInfoTitle[..t.len()].copy_from_slice(&t);
+        let b: Vec<u16> = text.encode_utf16().take(255).collect();
+        nid.szInfo[..b.len()].copy_from_slice(&b);
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
 fn set_tip(nid: &mut NOTIFYICONDATAW, text: &str) {
     let w: Vec<u16> = text.encode_utf16().take(127).collect();
     nid.szTip = [0; 128];
@@ -115,6 +138,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_TRAY => {
             let ev = (lp & 0xFFFF) as u32;
             if ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK {
+                show_main_window();
+            } else if ev == NIN_BALLOONUSERCLICK {
+                crate::update::request_settings();
                 show_main_window();
             } else if ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU {
                 show_menu(hwnd);
@@ -243,6 +269,7 @@ pub fn start(engine: Arc<Engine>, on_show: impl Fn() + Send + Sync + 'static) {
                 log::warn!("tray window creation failed");
                 return;
             }
+            TRAY_HWND.store(hwnd as isize, Ordering::Release);
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;

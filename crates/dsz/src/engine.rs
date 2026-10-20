@@ -369,6 +369,11 @@ impl Engine {
             .name("gamebar".into())
             .spawn(move || crate::virt::gamebar::run(e))
             .unwrap();
+        let e = self.clone();
+        std::thread::Builder::new()
+            .name("updates".into())
+            .spawn(move || crate::update::run(e))
+            .unwrap();
     }
 
     fn hotplug_loop(self: Arc<Self>) {

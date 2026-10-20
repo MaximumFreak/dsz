@@ -137,6 +137,8 @@ pub struct Settings {
     /// DSZ keeps them there when one is plugged in, and keeps Windows from
     /// moving the others to it.
     pub audio_on_virtual: [bool; 6],
+    /// Ask GitHub once a day whether a newer release is out.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -168,6 +170,7 @@ impl Default for Settings {
             hide_nodes: BTreeMap::new(),
             helper_nodes: BTreeMap::new(),
             audio_on_virtual: [false; 6],
+            check_updates: true,
         }
     }
 }

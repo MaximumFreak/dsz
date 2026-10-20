@@ -25,6 +25,7 @@ mod settings;
 mod tray;
 mod udp;
 mod ui;
+mod update;
 mod virt;
 
 pub const APP_TITLE: &str = "DSZ - DualSense Zen";
@@ -37,10 +38,13 @@ fn main() {
         return;
     }
     let minimized_flag = args.iter().any(|a| a == "--minimized");
+    // Started by an update: the old version is still quitting.
+    let updated = args.iter().any(|a| a == "--updated");
 
     // Debug snapshots run beside the real app without touching controllers.
     let snapshot = cfg!(debug_assertions) && std::env::var_os("DSZ_SNAPSHOT").is_some();
-    if !snapshot && !platform::single_instance() {
+    let wait = if updated { std::time::Duration::from_secs(20) } else { Default::default() };
+    if !snapshot && !platform::single_instance(wait) {
         platform::activate_existing(APP_TITLE);
         return;
     }
@@ -56,14 +60,18 @@ fn main() {
         log::error!("panic: {info}");
     }));
 
+    update::clean_up();
     platform::opt_out_of_power_throttling();
     platform::timer_resolution_1ms();
     let engine = engine::Engine::new(data);
     if !snapshot {
         engine.start();
     }
+    if updated {
+        engine.toast(format!("Updated to DSZ {}", env!("CARGO_PKG_VERSION")));
+    }
 
-    let start_hidden = minimized_flag || engine.settings.read().start_minimized;
+    let start_hidden = !updated && (minimized_flag || engine.settings.read().start_minimized);
     if let Err(e) = ui::run(engine.clone(), start_hidden) {
         log::error!("UI failed: {e}");
     }

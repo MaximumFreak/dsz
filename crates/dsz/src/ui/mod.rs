@@ -270,8 +270,9 @@ impl App {
         ui.add_space(22.0);
         // Rows give up their spacing on short windows so the footer never
         // lands on them; past that the list scrolls.
-        const FOOTER: f32 = 44.0;
-        let room = (ui.available_height() - FOOTER).max(0.0);
+        let update = crate::update::available();
+        let footer = if update.is_some() { 84.0 } else { 44.0 };
+        let room = (ui.available_height() - footer).max(0.0);
         let row_h = (room / Page::ALL.len() as f32).clamp(34.0, 46.0);
         egui::ScrollArea::vertical()
             .id_salt("nav")
@@ -294,6 +295,25 @@ impl App {
                 ui.painter().circle_filled(r.center(), 4.0, col);
                 ui.label(RichText::new(txt).size(12.5).color(MUTED));
             });
+            if let Some(r) = &update {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    let b = egui::Button::new(
+                        RichText::new(format!("Update to {}", r.version)).size(12.5).color(ACCENT),
+                    )
+                    .fill(ACCENT_SOFT)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(CornerRadius::same(R_CTRL));
+                    if ui
+                        .add(b)
+                        .on_hover_text("A newer DSZ is out. Settings has the update and its notes.")
+                        .clicked()
+                    {
+                        self.page = Page::Settings;
+                    }
+                });
+            }
         });
     }
 
@@ -548,6 +568,9 @@ fn repaint_in(ctx: &egui::Context, ms: u64) {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frames += 1;
+        if crate::update::take_settings_request() {
+            self.page = Page::Settings;
+        }
         let t_frame = Instant::now();
         #[cfg(debug_assertions)]
         snapshot::tick(ctx, self.frames);

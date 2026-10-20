@@ -456,7 +456,9 @@ fn read_identity(dev: &HidDevice, conn: Connection, model: Model) -> (String, St
 
 /// MAC from feature `0x12`, firmware from `0xA3`, and one calibration read
 /// so a Bluetooth pad switches from the 10-byte report to `0x11`. The
-/// DualSense mirror stays empty: a DualShock 4 calibration block is not a
+/// DualSense mirror holds only a pairing address, the one the controller's
+/// virtual DualShock 4 has, so Steam tells two DualShock 4s apart on
+/// virtual DualSenses too. A DualShock 4 calibration block is not a
 /// DualSense one, and the virtual pad answers with its neutral calibration.
 fn read_ds4_identity(dev: &HidDevice, conn: Connection) -> (String, String, Mirror) {
     let mut mac = normalize_mac(&dev.info.serial);
@@ -491,7 +493,12 @@ fn read_ds4_identity(dev: &HidDevice, conn: Connection) -> (String, String, Mirr
         Err(e) => log::debug!("DualShock 4 calibration read failed: {e}"),
         _ => {}
     }
-    (mac, firmware, Mirror::default())
+    let mirror = Mirror {
+        pairing: crate::virt::usbip::ds4_tag(&mac)
+            .map(|t| crate::virt::mirror::pairing_report(&crate::virt::usbip::ds4_mac(t))),
+        ..Mirror::default()
+    };
+    (mac, firmware, mirror)
 }
 
 /// Stops every worker of a device when one of them panics.

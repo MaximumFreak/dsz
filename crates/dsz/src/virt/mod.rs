@@ -451,7 +451,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
 
     // Take over the pads this controller had before it went away, or the
     // one plugged in at startup.
-    let mut pad = engine.pads.claim(device);
+    let mut pad = engine.pads.claim(engine, device);
     if let Some(p) = &pad {
         attach(device, p);
         log::info!(

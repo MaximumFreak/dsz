@@ -192,7 +192,9 @@ fn is_system(path_lower: &str) -> bool {
         .to_ascii_lowercase();
     path_lower.starts_with(&windir)
         || (path_lower.contains(r"\steam\") && !path_lower.contains(r"\steamapps\"))
-        || path_lower.contains(r"\dualsense-rust\target\")
+        // DSZ's own builds (%TEMP%\cargo-target\dsz, dsz-pr13, ...): test
+        // binaries hold the scan's needles too.
+        || path_lower.contains(r"\cargo-target\dsz")
 }
 
 /// Look beside and inside `exe` for a DualSense library.
@@ -399,6 +401,12 @@ mod tests {
         assert!(is_system(r"c:\program files (x86)\steam\steam.exe"));
         assert!(!is_system(
             r"c:\program files (x86)\steam\steamapps\common\game\game.exe"
+        ));
+        assert!(is_system(
+            r"d:\build\cargo-target\dsz\release\deps\dsz-70018ed8bbf277c8.exe"
+        ));
+        assert!(is_system(
+            r"d:\build\cargo-target\dsz-pr13\debug\dsz.exe"
         ));
     }
 }

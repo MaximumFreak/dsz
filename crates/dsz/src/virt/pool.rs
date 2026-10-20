@@ -44,6 +44,14 @@ const RAW_SETTLE: Duration = Duration::from_secs(3);
 /// A game started this long before a pad was hidden may still have been
 /// starting up (looking for controllers) by then.
 const GAME_START_MARGIN: Duration = Duration::from_secs(30);
+/// The pad plugged in at startup sends idle again this long after Windows
+/// lit its ring LED, and at these times after it was plugged in.
+const STARTUP_RELEASE_AFTER_LED: Duration = Duration::from_millis(600);
+const STARTUP_RELEASES: [Duration; 3] = [
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+];
 
 /// When an Xbox pad's raw input check is next due, and its last replug.
 struct RawCheck {
@@ -193,9 +201,10 @@ impl Default for Pool {
     }
 }
 
-/// Plug in a pad of `kind`. Game feedback follows `route`.
-fn plug(kind: VirtualKind, route: &Arc<Route>) -> Result<Target, String> {
-    plug_with(kind, route, &|_| {})
+/// Plug in a pad of `kind` for the controller with address `mac` (a
+/// DualShock 4 takes its identity). Game feedback follows `route`.
+fn plug(kind: VirtualKind, route: &Arc<Route>, mac: &str) -> Result<Target, String> {
+    plug_with(kind, route, mac, &|_| {})
 }
 
 /// [`plug`], calling `before_attach` with the pad's serial before Windows
@@ -203,6 +212,7 @@ fn plug(kind: VirtualKind, route: &Arc<Route>) -> Result<Target, String> {
 fn plug_with(
     kind: VirtualKind,
     route: &Arc<Route>,
+    mac: &str,
     before_attach: &dyn Fn(&str),
 ) -> Result<Target, String> {
     use usbip::Model;
@@ -250,13 +260,36 @@ fn plug_with(
         on_output,
         mirror: route.mirror.clone(),
     };
-    usbip::UsbPad::create_with(model, sink, before_attach).map_err(|e| {
+    usbip::UsbPad::create_for(model, sink, mac, before_attach).map_err(|e| {
         log::warn!("usbip-win2: {e}");
         format!(
             "usbip-win2 couldn't attach the virtual {} controller ({e}). Games see the real controller instead.",
             kind.label()
         )
     })
+}
+
+/// Send the pad plugged in at startup's idle report again once Windows has
+/// it (ring LED lit), then at [`STARTUP_RELEASES`], while nobody drives it.
+/// An idle Xbox 360 pad otherwise sends one report in its life, and after
+/// some boots Explorer acted on a held Guide while XInput read the pad idle
+/// (research/STUCK-GUIDE-2026-10-14.md). A driven pad sends its own.
+fn startup_releases(pad: &Pad) {
+    let start = Instant::now();
+    while pad.target.xinput_slot().is_none() && start.elapsed() < STARTUP_RELEASES[0] {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(STARTUP_RELEASE_AFTER_LED);
+    let mut sent = 0;
+    for at in [start.elapsed()].into_iter().chain(STARTUP_RELEASES) {
+        std::thread::sleep(at.saturating_sub(start.elapsed()));
+        if !pad.alive() || pad.owner.lock().is_some() || pad.is_parked() {
+            break;
+        }
+        pad.submit_idle();
+        sent += 1;
+    }
+    log::info!("startup pad: sent idle {sent} more time(s)");
 }
 
 impl Pool {
@@ -271,12 +304,24 @@ impl Pool {
         mac: &str,
         device: Option<&Arc<Device>>,
     ) -> Result<Arc<Pad>, String> {
+        self.create_as(kind, mac, mac, device)
+    }
+
+    /// [`Pool::create`], with the identity of the controller with address
+    /// `like` (the one expected, for the pad made at startup).
+    fn create_as(
+        &self,
+        kind: VirtualKind,
+        mac: &str,
+        like: &str,
+        device: Option<&Arc<Device>>,
+    ) -> Result<Arc<Pad>, String> {
         let route = Arc::new(Route::default());
         if let Some(d) = device {
             *route.owner.lock() = Arc::downgrade(d);
             *route.mirror.lock() = d.mirror.lock().clone();
         }
-        let target = Arc::new(plug(kind, &route)?);
+        let target = Arc::new(plug(kind, &route, like)?);
         let pad = Arc::new(Pad {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             target,
@@ -292,8 +337,10 @@ impl Pool {
     }
 
     /// The pad a newly connected controller takes over: the one it had
-    /// before, else one that belongs to nobody yet.
-    pub fn claim(&self, device: &Arc<Device>) -> Option<Arc<Pad>> {
+    /// before, else one that belongs to nobody yet. A DualShock 4 made at
+    /// startup for another controller is unplugged instead, so the
+    /// controller gets a pad with its own identity.
+    pub fn claim(&self, engine: &Engine, device: &Arc<Device>) -> Option<Arc<Pad>> {
         let mac = device.mac.lock().clone();
         let pads = self.pads.lock();
         let free = |p: &&Arc<Pad>| p.owner.lock().is_none() && p.alive() && !p.is_parked();
@@ -303,6 +350,15 @@ impl Pool {
             .find(|p| !mac.is_empty() && *p.mac.lock() == mac)
             .or_else(|| pads.iter().filter(free).find(|p| p.mac.lock().is_empty()))
             .cloned()?;
+        if pick.kind() == VirtualKind::DualShock4
+            && pick.mac.lock().is_empty()
+            && usbip::ds4_tag(&mac).is_some_and(|t| pick.target.serial() != usbip::ds4_serial(t))
+        {
+            drop(pads);
+            log::info!("virtual DualShock 4 made for another controller; replacing it");
+            self.destroy(engine, &pick);
+            return None;
+        }
         *pick.owner.lock() = Some(device.id);
         if !mac.is_empty() {
             *pick.mac.lock() = mac;
@@ -457,7 +513,7 @@ impl Pool {
         let route = Arc::new(Route::default());
         let apps = super::companion::readers();
         let hidden: Mutex<Vec<String>> = Mutex::new(Vec::new());
-        let r = plug_with(VirtualKind::Xbox360, &route, &|serial| {
+        let r = plug_with(VirtualKind::Xbox360, &route, mac, &|serial| {
             // Not the HID child: Windows' raw input opens it only as it
             // arrives, and one hidden then stays out of raw input for good
             // (SDL games would never see the pad once it is back in use).
@@ -641,7 +697,7 @@ impl Pool {
         if kind == VirtualKind::Off {
             return;
         }
-        match self.create(kind, "", None) {
+        match self.create_as(kind, "", &last, None) {
             Ok(p) => {
                 p.submit_idle();
                 log::info!(
@@ -660,6 +716,9 @@ impl Pool {
                         Ok(_) => log::info!("HidHide: hid the last controller before it connected"),
                         Err(e) => log::warn!("HidHide at startup: {e}"),
                     }
+                }
+                if kind == VirtualKind::Xbox360 {
+                    std::thread::spawn(move || startup_releases(&p));
                 }
             }
             Err(e) => log::warn!("virtual {} at startup: {e}", kind.label()),

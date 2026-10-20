@@ -53,14 +53,11 @@ impl Mirror {
                     .clone()
                     .unwrap_or_else(|| neutral_calibration(0x05, CALIBRATION_LEN)),
             ),
-            0x09 => Some(self.pairing.clone().unwrap_or_else(|| {
-                let mut v = vec![0u8; PAIRING_LEN];
-                v[0] = 0x09;
-                for (i, b) in OWN_ADDRESS.iter().rev().enumerate() {
-                    v[1 + i] = *b;
-                }
-                v
-            })),
+            0x09 => Some(
+                self.pairing
+                    .clone()
+                    .unwrap_or_else(|| pairing_report(&OWN_ADDRESS)),
+            ),
             0x20 => self.firmware.clone().map(|mut v| {
                 let upd = u16::from_le_bytes([v[44], v[45]]);
                 if upd < MIN_UPDATE_VERSION {
@@ -71,6 +68,16 @@ impl Mirror {
             _ => None,
         }
     }
+}
+
+/// A pairing report `0x09` with `address` (in transmission order).
+pub fn pairing_report(address: &[u8; 6]) -> Vec<u8> {
+    let mut v = vec![0u8; PAIRING_LEN];
+    v[0] = 0x09;
+    for (i, b) in address.iter().rev().enumerate() {
+        v[1 + i] = *b;
+    }
+    v
 }
 
 /// A calibration report with no gyro bias, ±8192 counts for both the gyro

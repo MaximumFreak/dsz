@@ -274,6 +274,8 @@ impl App {
                         });
                 });
                 ui.add_space(12.0);
+                self.updates_card(ui);
+                ui.add_space(12.0);
                 card(ui, "About", "", |ui| {
                     ui.label(
                         RichText::new(format!(
@@ -292,6 +294,85 @@ impl App {
                         ),
                     );
                 });
+            }
+        });
+    }
+
+    /// Updates: the daily check, a check now, and the update itself.
+    fn updates_card(&mut self, ui: &mut egui::Ui) {
+        use crate::update::{self, Status};
+        let engine = self.engine.clone();
+        card(ui, "Updates", "", |ui| {
+            let mut on = engine.settings.read().check_updates;
+            if toggle_row(
+                ui,
+                "Check for updates",
+                "Asks GitHub once a day whether a newer DSZ is out",
+                &mut on,
+            ) {
+                engine.settings.write().check_updates = on;
+                engine.settings_changed();
+            }
+            ui.add_space(6.0);
+            let ctx = ui.ctx().clone();
+            let wake = move || ctx.request_repaint();
+            match update::status() {
+                Some(Status::Available(r)) => {
+                    note(
+                        ui,
+                        &format!(
+                            "DSZ {} is available (this is {}). Updating restarts DSZ, so the virtual controllers reconnect: best done outside a game.",
+                            r.version,
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                        ACCENT,
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if primary_button(ui, "Update and restart").clicked() {
+                            update::install(r.clone(), wake.clone());
+                        }
+                        if button(ui, "What's new").clicked() {
+                            crate::platform::open_url(&r.page);
+                        }
+                    });
+                }
+                Some(Status::Downloading(r)) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        muted(ui, &format!("Downloading DSZ {}…", r.version));
+                    });
+                }
+                Some(Status::Restarting) => muted(ui, "Restarting into the new version…"),
+                status => {
+                    let text = match &status {
+                        Some(Status::Checking) => "Checking…".to_string(),
+                        Some(Status::UpToDate) => {
+                            format!("DSZ {} is the latest version.", env!("CARGO_PKG_VERSION"))
+                        }
+                        Some(Status::Failed(e)) => e.clone(),
+                        _ => format!("This is DSZ {}.", env!("CARGO_PKG_VERSION")),
+                    };
+                    if let Some(Status::Failed(_)) = status {
+                        note(ui, &text, WARN);
+                    } else {
+                        muted(ui, &text);
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let busy = status == Some(Status::Checking);
+                        if ui
+                            .add_enabled_ui(!busy, |ui| button(ui, "Check now"))
+                            .inner
+                            .clicked()
+                        {
+                            update::check_in_background(wake.clone());
+                        }
+                        if button(ui, "All releases").clicked() {
+                            crate::platform::open_url(update::RELEASES);
+                        }
+                    });
+                }
             }
         });
     }

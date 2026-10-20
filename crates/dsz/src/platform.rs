@@ -293,16 +293,27 @@ pub fn process_started(pid: u32) -> Option<std::time::SystemTime> {
     }
 }
 
-/// Returns false if another instance already holds the mutex.
-pub fn single_instance() -> bool {
-    unsafe {
-        let name = wide("Local\\DSZ.SingleInstance");
-        let h = CreateMutexW(null(), 0, name.as_ptr());
-        if h.is_null() {
-            return true;
+/// Returns false if another instance still holds the mutex after `wait`
+/// (an update waits for the old version to quit).
+pub fn single_instance(wait: std::time::Duration) -> bool {
+    let until = std::time::Instant::now() + wait;
+    loop {
+        unsafe {
+            let name = wide("Local\\DSZ.SingleInstance");
+            let h = CreateMutexW(null(), 0, name.as_ptr());
+            if h.is_null() {
+                return true;
+            }
+            // Leak the handle: it lives as long as the process.
+            if GetLastError() != ERROR_ALREADY_EXISTS {
+                return true;
+            }
+            CloseHandle(h);
         }
-        // Leak the handle: it lives as long as the process.
-        GetLastError() != ERROR_ALREADY_EXISTS
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
@@ -573,6 +584,16 @@ pub fn data_dir() -> std::path::PathBuf {
 
 pub fn open_in_explorer(path: &std::path::Path) {
     let _ = std::process::Command::new("explorer").arg(path).spawn();
+}
+
+/// Open a web page in the default browser.
+pub fn open_url(url: &str) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let (verb, u) = (wide("open"), wide(url));
+    unsafe {
+        ShellExecuteW(null_mut(), verb.as_ptr(), u.as_ptr(), null(), null(), SW_SHOWNORMAL);
+    }
 }
 
 /// Reuse the parent console (release builds have none of their own), so
