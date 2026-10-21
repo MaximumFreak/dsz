@@ -210,7 +210,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         // Only opt-in capture may change the hardware-tuned media bytes.
         // Keep this latch for this physical connection, even after disabling.
         capture_used |= device.microphone.enabled();
-        let recording = device.microphone.recording() || device.mic_tap.lock().is_some();
+        let recording = capture_used && (device.microphone.recording() || device.mic_tap.lock().is_some());
         let microphone = capture_used.then_some(recording);
         let enabled = h.enabled && device.is_bluetooth();
         let game_src = device.game_audio.lock().clone();
