@@ -934,6 +934,8 @@ impl Pipeline {
         self.helper_sent = helper;
         self.to_gamebar = to_gamebar;
 
+        engine.dsu.publish(device, &s, dps);
+
         // Publish for the UI and the haptics thread.
         let mut live = device.live.lock();
         live.input = s;

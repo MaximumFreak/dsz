@@ -226,6 +226,8 @@ impl App {
                     },
                 );
                 ui.add_space(12.0);
+                self.motion_server_card(ui);
+                ui.add_space(12.0);
                 self.backup_card(ui);
                 ui.add_space(12.0);
                 card(ui, "Logs", "", |ui| {
@@ -298,6 +300,51 @@ impl App {
         });
     }
 
+    /// Emulator motion: the DSU (cemuhook) server.
+    fn motion_server_card(&mut self, ui: &mut egui::Ui) {
+        use crate::dsu::{Status, PORT};
+        let engine = self.engine.clone();
+        card(
+            ui,
+            "Emulator motion",
+            "Gyro and accelerometer for Dolphin, Cemu, Ryujinx and yuzu-family emulators",
+            |ui| {
+                let mut on = engine.settings.read().dsu_enabled;
+                if toggle_row(
+                    ui,
+                    "Motion server (DSU)",
+                    &format!("The cemuhook protocol, on 127.0.0.1:{PORT} only"),
+                    &mut on,
+                ) {
+                    engine.settings.write().dsu_enabled = on;
+                    engine.settings_changed();
+                }
+                ui.horizontal(|ui| match engine.dsu.status() {
+                    Status::Off => {
+                        pill(ui, "Off", FAINT);
+                    }
+                    Status::Listening { clients } => {
+                        pill(ui, "Listening", GOOD);
+                        muted(
+                            ui,
+                            &match clients {
+                                0 => "No emulator connected".to_string(),
+                                1 => "1 emulator connected".to_string(),
+                                n => format!("{n} emulators connected"),
+                            },
+                        );
+                    }
+                    Status::Failed(e) => {
+                        pill(ui, &e, BAD);
+                    }
+                });
+                ui.add_space(4.0);
+                muted(ui, &format!("Dolphin: Controllers > Alternate Input Sources > enable DSU Client (127.0.0.1, port {PORT}), then pick the DSUClient device in the Wii Remote's Motion Input tab. Cemu: Input settings > API DSUController. Ryujinx: Input > Motion > CemuHook compatible motion (127.0.0.1, port {PORT}). Yuzu-family emulators: Controls > Motion > CemuhookUDP."));
+                muted(ui, "Buttons and sticks still come from the virtual controller. Set the profile's gyro to Off while playing, or the gyro moves the mouse as well.");
+            },
+        );
+    }
+
     /// Updates: the daily check, a check now, and the update itself.
     fn updates_card(&mut self, ui: &mut egui::Ui) {
         use crate::update::{self, Status};
@@ -329,18 +376,65 @@ impl App {
                     );
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
-                        if primary_button(ui, "Update and restart").clicked() {
-                            update::install(r.clone(), wake.clone());
+                        if primary_button(ui, "Download").clicked() {
+                            update::download(r.clone(), wake.clone());
                         }
                         if button(ui, "What's new").clicked() {
                             crate::platform::open_url(&r.page);
                         }
                     });
+                    ui.add_space(4.0);
+                    muted(ui, "Your browser downloads the new dsz.exe; DSZ then checks it against GitHub's checksum and installs it when you say so.");
                 }
-                Some(Status::Downloading(r)) => {
+                Some(Status::Waiting(r)) => {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        muted(ui, &format!("Downloading DSZ {}…", r.version));
+                        muted(
+                            ui,
+                            &format!(
+                                "Waiting for your browser to download DSZ {} to the Downloads folder…",
+                                r.version
+                            ),
+                        );
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if button(ui, "I saved it somewhere else…").clicked() {
+                            if let Some(f) = rfd::FileDialog::new()
+                                .add_filter("DSZ", &["exe"])
+                                .pick_file()
+                            {
+                                if let Err(e) = update::use_file(r.clone(), f) {
+                                    engine.warn_toast(e);
+                                }
+                            }
+                        }
+                        if button(ui, "Download again").clicked() {
+                            update::open_download(&r);
+                        }
+                        if button(ui, "Cancel").clicked() {
+                            update::cancel();
+                        }
+                    });
+                }
+                Some(Status::Ready(r, file)) => {
+                    note(
+                        ui,
+                        &format!(
+                            "DSZ {} is downloaded and checked ({}). Installing restarts DSZ, so the virtual controllers reconnect.",
+                            r.version,
+                            file.display()
+                        ),
+                        GOOD,
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if primary_button(ui, "Install and restart").clicked() {
+                            update::install(r.clone(), file.clone(), wake.clone());
+                        }
+                        if button(ui, "Not now").clicked() {
+                            update::cancel();
+                        }
                     });
                 }
                 Some(Status::Restarting) => muted(ui, "Restarting into the new version…"),
@@ -466,6 +560,25 @@ impl App {
                     engine.data_dir.display()
                 ),
             );
+            if crate::portable::switchable() {
+                ui.add_space(6.0);
+                let was = crate::portable::is_portable(&engine.data_dir);
+                let mut on = was;
+                if toggle_row(
+                    ui,
+                    "Keep settings beside dsz.exe",
+                    &format!(
+                        "Portable: settings, profiles and the log go in a {} folder next to the app. Switching moves them and restarts DSZ",
+                        crate::portable::FOLDER
+                    ),
+                    &mut on,
+                ) && on != was
+                {
+                    if let Err(e) = crate::portable::switch(engine.clone(), on) {
+                        engine.warn_toast(e);
+                    }
+                }
+            }
         });
         match &mut self.focus_backup {
             Some((_, scrolled @ false)) => {

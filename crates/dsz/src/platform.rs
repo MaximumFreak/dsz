@@ -574,10 +574,11 @@ pub fn data_dir() -> std::path::PathBuf {
         let _ = std::fs::create_dir_all(&d);
         return d;
     }
-    let base = std::env::var_os("APPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let d = base.join("DSZ");
+    // Portable: a `dsz-data` folder beside the exe.
+    let d = match crate::portable::folder() {
+        Some(f) if f.is_dir() => f,
+        _ => crate::portable::roaming(),
+    };
     let _ = std::fs::create_dir_all(&d);
     d
 }

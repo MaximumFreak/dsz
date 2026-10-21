@@ -51,6 +51,7 @@ pub struct Engine {
     session_assigned: Mutex<std::collections::HashSet<String>>,
     pub audio: Arc<AudioHub>,
     pub udp: Mutex<UdpStatus>,
+    pub dsu: crate::dsu::Server,
     pub toasts: Mutex<Vec<Toast>>,
     pub shutdown: AtomicBool,
     next_id: AtomicU64,
@@ -107,6 +108,7 @@ impl Engine {
             session_assigned: Mutex::new(Default::default()),
             audio: AudioHub::new(),
             udp: Mutex::new(UdpStatus::default()),
+            dsu: Default::default(),
             toasts: Mutex::new(Vec::new()),
             shutdown: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
@@ -368,6 +370,11 @@ impl Engine {
         std::thread::Builder::new()
             .name("gamebar".into())
             .spawn(move || crate::virt::gamebar::run(e))
+            .unwrap();
+        let e = self.clone();
+        std::thread::Builder::new()
+            .name("dsu".into())
+            .spawn(move || crate::dsu::run(e))
             .unwrap();
         let e = self.clone();
         std::thread::Builder::new()

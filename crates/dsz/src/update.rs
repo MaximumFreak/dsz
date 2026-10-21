@@ -1,16 +1,21 @@
-//! Update check and one-click update from the GitHub releases.
+//! Update check and update from the GitHub releases.
 //!
 //! Once a day (setting `check_updates`, on by default) the app asks
 //! GitHub's API for the latest release. A newer one is announced in the
 //! window, in the tray, and on Settings. Nothing installs by itself: an
 //! update restarts the app, which unplugs the virtual controllers, so it
-//! waits for a click on "Update and restart".
+//! waits for a click.
 //!
-//! The update downloads the release's `dsz.exe`, checks it against the
-//! SHA-256 GitHub publishes for the file, renames the running exe to
-//! `dsz.exe.old` (Windows allows renaming a running exe, not overwriting
-//! it), puts the new one in its place, and starts it with `--updated`.
-//! The new process waits for this one to quit and deletes the old file.
+//! DSZ never downloads a program itself: an app that fetches an exe and
+//! starts it is what antivirus heuristics call a downloader (Kaspersky
+//! flagged 0.3.8, which did). "Download" opens the release's `dsz.exe` in
+//! the browser, which scans and saves it like any download. DSZ then finds
+//! it in the Downloads folder (or is shown where it is), checks it against
+//! the SHA-256 GitHub publishes for the file, and on "Install and restart"
+//! renames the running exe to `dsz.exe.old` (Windows allows renaming a
+//! running exe, not overwriting it), copies the new one into its place,
+//! and starts it with `--updated`. The new process waits for this one to
+//! quit and deletes the old file.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +34,9 @@ const ASSET: &str = "dsz.exe";
 /// connecting; then once a day.
 const FIRST_CHECK: Duration = Duration::from_secs(20);
 const EVERY: Duration = Duration::from_secs(24 * 3600);
+/// How long to watch the Downloads folder after "Download".
+const WATCH_FOR: Duration = Duration::from_secs(30 * 60);
+const NO_CHECKSUM: &str = "GitHub published no checksum for this download, so it can't be checked. Replace dsz.exe by hand instead.";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
@@ -37,6 +45,7 @@ pub struct Release {
     /// The release page, with its notes.
     pub page: String,
     url: String,
+    size: Option<u64>,
     sha256: Option<[u8; 32]>,
 }
 
@@ -45,7 +54,10 @@ pub enum Status {
     Checking,
     UpToDate,
     Available(Release),
-    Downloading(Release),
+    /// The browser is downloading it; watching the Downloads folder.
+    Waiting(Release),
+    /// Downloaded and checked, ready to install.
+    Ready(Release, PathBuf),
     /// The new exe is in place and starting; this one is quitting.
     Restarting,
     Failed(String),
@@ -64,13 +76,21 @@ pub fn status() -> Option<Status> {
 /// A newer release found by the last check, while not yet installing.
 pub fn available() -> Option<Release> {
     match status() {
-        Some(Status::Available(r)) => Some(r),
+        Some(Status::Available(r) | Status::Waiting(r) | Status::Ready(r, _)) => Some(r),
         _ => None,
     }
 }
 
 fn set(s: Status) {
     *state().lock() = Some(s);
+}
+
+/// Whether an update is under way (between "Download" and the restart).
+fn busy() -> bool {
+    matches!(
+        status(),
+        Some(Status::Waiting(_) | Status::Ready(..) | Status::Restarting)
+    )
 }
 
 static SHOW_SETTINGS: AtomicBool = AtomicBool::new(false);
@@ -96,7 +116,7 @@ pub fn run(engine: Arc<Engine>) {
             continue;
         }
         next = Instant::now() + EVERY;
-        if matches!(status(), Some(Status::Downloading(_) | Status::Restarting)) {
+        if busy() {
             continue;
         }
         check();
@@ -129,10 +149,7 @@ pub fn check() {
 
 /// [`check`] on its own thread; `wake` runs when it is done.
 pub fn check_in_background(wake: impl Fn() + Send + 'static) {
-    if matches!(
-        status(),
-        Some(Status::Checking | Status::Downloading(_) | Status::Restarting)
-    ) {
+    if busy() || status() == Some(Status::Checking) {
         return;
     }
     set(Status::Checking);
@@ -168,11 +185,12 @@ fn parse(json: &str) -> Option<Release> {
         .iter()
         .find(|a| a["name"].as_str() == Some(ASSET))?;
     let url = asset["browser_download_url"].as_str()?.to_string();
+    let size = asset["size"].as_u64();
     let sha256 = asset["digest"]
         .as_str()
         .and_then(|d| d.strip_prefix("sha256:"))
         .and_then(hex32);
-    Some(Release { version, page, url, sha256 })
+    Some(Release { version, page, url, size, sha256 })
 }
 
 fn hex32(s: &str) -> Option<[u8; 32]> {
@@ -198,16 +216,125 @@ fn newer(a: &str, b: &str) -> bool {
     parts(a) > parts(b)
 }
 
-/// Download `r`, swap it in for the running exe, start it, and quit.
-pub fn install(r: Release, wake: impl Fn() + Send + 'static) {
-    if matches!(status(), Some(Status::Downloading(_) | Status::Restarting)) {
+/// Where browsers save downloads: the user's Downloads folder.
+fn downloads() -> Option<PathBuf> {
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath};
+    let mut p = std::ptr::null_mut();
+    let hr = unsafe { SHGetKnownFolderPath(&FOLDERID_Downloads, 0, std::ptr::null_mut(), &mut p) };
+    let dir = if hr == 0 && !p.is_null() {
+        let len = (0..).take_while(|&i| unsafe { *p.add(i) } != 0).count();
+        let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) });
+        Some(PathBuf::from(s))
+    } else {
+        std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("Downloads"))
+    };
+    unsafe { CoTaskMemFree(p as _) };
+    dir
+}
+
+/// Whether `file` is `r`'s exe: an exe with GitHub's SHA-256 for it.
+fn verify(r: &Release, file: &Path) -> Result<(), String> {
+    let Some(want) = r.sha256 else {
+        return Err(NO_CHECKSUM.into());
+    };
+    let data = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    if !data.starts_with(b"MZ") || crate::install::sha256(&data)? != want {
+        return Err(format!(
+            "{} isn't DSZ {} (it doesn't match GitHub's checksum).",
+            file.display(),
+            r.version
+        ));
+    }
+    Ok(())
+}
+
+/// A finished download of `r` in the Downloads folder: a `dsz*.exe` of the
+/// right size and checksum (the browser may have named it `dsz (1).exe`).
+fn find_download(r: &Release) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(downloads()?).ok()?;
+    entries.flatten().map(|e| e.path()).find(|p| {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        name.starts_with("dsz")
+            && name.ends_with(".exe")
+            && std::fs::metadata(p).is_ok_and(|m| r.size.map_or(true, |s| m.len() == s))
+            && verify(r, p).is_ok()
+    })
+}
+
+/// Start getting `r`: the browser downloads it, and this watches the
+/// Downloads folder until the file is there and checks out. A copy
+/// downloaded earlier is used as it is.
+pub fn download(r: Release, wake: impl Fn() + Send + 'static) {
+    if busy() {
         return;
     }
-    set(Status::Downloading(r.clone()));
+    if r.sha256.is_none() {
+        set(Status::Failed(NO_CHECKSUM.into()));
+        return;
+    }
+    set(Status::Waiting(r.clone()));
     std::thread::spawn(move || {
-        match swap_in(&r) {
+        let waiting = || matches!(status(), Some(Status::Waiting(ref w)) if *w == r);
+        if let Some(f) = find_download(&r) {
+            set(Status::Ready(r, f));
+            wake();
+            return;
+        }
+        open_download(&r);
+        let until = Instant::now() + WATCH_FOR;
+        while Instant::now() < until {
+            std::thread::sleep(Duration::from_secs(2));
+            // Cancelled, or the file was picked by hand.
+            if !waiting() {
+                return;
+            }
+            if let Some(f) = find_download(&r) {
+                log::info!("DSZ {} downloaded to {}", r.version, f.display());
+                set(Status::Ready(r, f));
+                wake();
+                return;
+            }
+        }
+        if waiting() {
+            set(Status::Available(r));
+            wake();
+        }
+    });
+}
+
+/// Have the browser download `r`'s exe.
+pub fn open_download(r: &Release) {
+    crate::platform::open_url(&r.url);
+}
+
+/// The downloaded file, picked by hand (saved somewhere other than
+/// Downloads). Checked before it is offered.
+pub fn use_file(r: Release, file: PathBuf) -> Result<(), String> {
+    verify(&r, &file)?;
+    set(Status::Ready(r, file));
+    Ok(())
+}
+
+/// Stop waiting for the download.
+pub fn cancel() {
+    if let Some(Status::Waiting(r) | Status::Ready(r, _)) = status() {
+        set(Status::Available(r));
+    }
+}
+
+/// Swap the downloaded `file` in for the running exe, start it, and quit.
+pub fn install(r: Release, file: PathBuf, wake: impl Fn() + Send + 'static) {
+    if status() == Some(Status::Restarting) {
+        return;
+    }
+    set(Status::Restarting);
+    std::thread::spawn(move || {
+        match swap_in(&r, &file) {
             Ok(()) => {
-                set(Status::Restarting);
                 wake();
                 crate::tray::quit();
             }
@@ -220,48 +347,33 @@ pub fn install(r: Release, wake: impl Fn() + Send + 'static) {
     });
 }
 
-/// Download `r`'s exe to the temp folder and check it.
-fn fetch(r: &Release) -> Result<PathBuf, String> {
-    let Some(want) = r.sha256 else {
-        return Err("GitHub published no checksum for this download, so it can't be checked. Download it from the release page instead.".into());
-    };
-    let dir = std::env::temp_dir().join("DSZ");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file = dir.join(format!("dsz-{}.exe", r.version));
-    let _ = std::fs::remove_file(&file);
-    log::info!("downloading DSZ {} from {}", r.version, r.url);
-    crate::install::download(&r.url, &file)?;
-    let data = std::fs::read(&file).map_err(|e| e.to_string())?;
-    if crate::install::sha256(&data)? != want || !data.starts_with(b"MZ") {
-        let _ = std::fs::remove_file(&file);
-        return Err("The download didn't match GitHub's checksum, so it wasn't used.".into());
-    }
-    Ok(file)
-}
-
-fn swap_in(r: &Release) -> Result<(), String> {
-    let file = fetch(r)?;
+fn swap_in(r: &Release, file: &Path) -> Result<(), String> {
+    // Checked again: the file may have changed since it was found.
+    verify(r, file)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let old = old_path(&exe);
     let _ = std::fs::remove_file(&old);
     let cant = |e: std::io::Error| {
         format!(
-            "DSZ can't replace its own file in {} ({e}). Download the new version from the release page instead.",
-            exe.parent().unwrap_or(Path::new("")).display()
+            "DSZ can't replace its own file in {} ({e}). Replace dsz.exe there by hand with {}.",
+            exe.parent().unwrap_or(Path::new("")).display(),
+            file.display()
         )
     };
     std::fs::rename(&exe, &old).map_err(cant)?;
-    if let Err(e) = std::fs::copy(&file, &exe) {
+    if let Err(e) = std::fs::copy(file, &exe) {
         let _ = std::fs::remove_file(&exe);
         let _ = std::fs::rename(&old, &exe);
         return Err(cant(e));
     }
-    let _ = std::fs::remove_file(&file);
     if let Err(e) = std::process::Command::new(&exe).arg("--updated").spawn() {
         let _ = std::fs::remove_file(&exe);
         let _ = std::fs::rename(&old, &exe);
         return Err(format!("The new version didn't start ({e}); this one stays."));
     }
+    // Used up; left there, the next update's download would be saved as
+    // "dsz (1).exe".
+    let _ = std::fs::remove_file(file);
     log::info!("updated to DSZ {}; restarting", r.version);
     Ok(())
 }
@@ -309,10 +421,11 @@ mod tests {
         let json = r#"{"tag_name":"v0.3.8","html_url":"https://github.com/MaximumFreak/dsz/releases/tag/v0.3.8",
             "assets":[{"name":"other.zip","browser_download_url":"https://example.invalid/x"},
             {"name":"dsz.exe","browser_download_url":"https://github.com/MaximumFreak/dsz/releases/download/v0.3.8/dsz.exe",
-             "digest":"sha256:ef4fea4dcb25a386e63ebb4e50f55c89a36a79b4ee02d1652d425325fa4c26c2"}]}"#;
+             "size":9294336,"digest":"sha256:ef4fea4dcb25a386e63ebb4e50f55c89a36a79b4ee02d1652d425325fa4c26c2"}]}"#;
         let r = parse(json).unwrap();
         assert_eq!(r.version, "0.3.8");
         assert!(r.url.ends_with("/v0.3.8/dsz.exe"));
+        assert_eq!(r.size, Some(9294336));
         assert_eq!(r.sha256.unwrap()[..2], [0xef, 0x4f]);
         assert!(parse(r#"{"tag_name":"v1","assets":[]}"#).is_none(), "no exe, no update");
     }
@@ -322,13 +435,37 @@ mod tests {
     #[ignore]
     fn asks_github() {
         let r = latest().unwrap();
-        assert!(r.sha256.is_some(), "{r:?}");
+        assert!(r.sha256.is_some() && r.size.is_some(), "{r:?}");
         println!("latest {} at {}", r.version, r.url);
-        let f = fetch(&r).unwrap();
-        let _ = std::fs::remove_file(f);
-        let mut bad = r.clone();
-        bad.sha256 = Some([0; 32]);
-        assert!(fetch(&bad).is_err(), "a wrong checksum is refused");
+    }
+
+    #[test]
+    fn checks_the_file_against_the_release() {
+        let dir = std::env::temp_dir().join("dsz-update-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("dsz.exe");
+        std::fs::write(&f, b"MZ fake exe").unwrap();
+        let mut r = Release {
+            version: "9.9.9".into(),
+            page: RELEASES.into(),
+            url: String::new(),
+            size: Some(11),
+            sha256: Some(crate::install::sha256(b"MZ fake exe").unwrap()),
+        };
+        assert!(verify(&r, &f).is_ok());
+        r.sha256 = Some([0; 32]);
+        assert!(verify(&r, &f).is_err(), "a wrong checksum is refused");
+        r.sha256 = None;
+        assert!(verify(&r, &f).is_err(), "no checksum, no install");
+        std::fs::write(&f, b"not an exe").unwrap();
+        r.sha256 = Some(crate::install::sha256(b"not an exe").unwrap());
+        assert!(verify(&r, &f).is_err(), "only an exe");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finds_the_downloads_folder() {
+        assert!(downloads().is_some_and(|d| d.is_absolute()));
     }
 
     #[test]

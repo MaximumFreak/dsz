@@ -86,6 +86,13 @@ pub fn init(dir: &Path) {
     log::set_max_level(log::LevelFilter::Debug);
 }
 
+/// Stop writing the log file (its folder is about to move).
+pub fn close() {
+    if let Some(l) = LOGGER.get() {
+        *l.file.lock() = None;
+    }
+}
+
 /// Copy of the recent lines for the UI, newest last.
 pub fn recent(max: usize, min_level: log::Level) -> Vec<(log::Level, String, String)> {
     let Some(l) = LOGGER.get() else {

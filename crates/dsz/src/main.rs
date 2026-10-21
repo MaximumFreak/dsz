@@ -10,6 +10,7 @@ mod backup;
 mod composer;
 mod device;
 mod dsdetect;
+mod dsu;
 mod engine;
 mod flight;
 mod games;
@@ -20,6 +21,7 @@ mod install;
 mod inputsim;
 mod pipeline;
 mod platform;
+mod portable;
 mod profile;
 mod settings;
 mod tray;
@@ -40,10 +42,12 @@ fn main() {
     let minimized_flag = args.iter().any(|a| a == "--minimized");
     // Started by an update: the old version is still quitting.
     let updated = args.iter().any(|a| a == "--updated");
+    // Started after the settings moved (portable mode on or off): the same.
+    let moved = args.iter().any(|a| a == "--moved");
 
     // Debug snapshots run beside the real app without touching controllers.
     let snapshot = cfg!(debug_assertions) && std::env::var_os("DSZ_SNAPSHOT").is_some();
-    let wait = if updated { std::time::Duration::from_secs(20) } else { Default::default() };
+    let wait = if updated || moved { std::time::Duration::from_secs(20) } else { Default::default() };
     if !snapshot && !platform::single_instance(wait) {
         platform::activate_existing(APP_TITLE);
         return;
@@ -70,8 +74,11 @@ fn main() {
     if updated {
         engine.toast(format!("Updated to DSZ {}", env!("CARGO_PKG_VERSION")));
     }
+    if moved {
+        engine.toast(format!("Settings are in {}", engine.data_dir.display()));
+    }
 
-    let start_hidden = !updated && (minimized_flag || engine.settings.read().start_minimized);
+    let start_hidden = !updated && !moved && (minimized_flag || engine.settings.read().start_minimized);
     if let Err(e) = ui::run(engine.clone(), start_hidden) {
         log::error!("UI failed: {e}");
     }
