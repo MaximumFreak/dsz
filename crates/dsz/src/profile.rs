@@ -907,7 +907,11 @@ impl Profile {
             include_str!("../defaults/DualSense.json"),
         ]
         .iter()
-        .map(|t| serde_json::from_str(t).expect("shipped default profile"))
+        .map(|t| {
+            let mut p: Profile = serde_json::from_str(t).expect("shipped default profile");
+            p.haptics.migrate_pc_playback();
+            p
+        })
         .collect()
     }
 }
@@ -1267,6 +1271,7 @@ mod tests {
 
     #[test]
     fn legacy_pc_playback_migration_is_once_only() {
+        assert!(Profile::starter_set().iter().all(|p| p.haptics.pc_audio_independent));
         for source in [AudioSource::None, AudioSource::SystemAudio] {
             let mut h: Haptics = serde_json::from_value(serde_json::json!({
                 "source": source, "pc_audio_on_speaker": true
