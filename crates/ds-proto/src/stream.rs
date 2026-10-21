@@ -97,11 +97,25 @@ pub fn build<'a>(
     haptics: &[u8; HAPTIC_FRAME],
     out: &'a mut [u8],
 ) -> &'a [u8] {
+    build_with_microphone(counters, haptics, None, out)
+}
+
+/// Haptics plus optional microphone admission (`None` preserves capture bytes). Every media configuration
+/// carries bit0, so an ordinary haptics packet must preserve capture too.
+pub fn build_with_microphone<'a>(
+    counters: &mut StreamCounters,
+    haptics: &[u8; HAPTIC_FRAME],
+    microphone: Option<bool>,
+    out: &'a mut [u8],
+) -> &'a [u8] {
     let r = &mut out[..REPORT_LEN];
     r.fill(0);
     r[0] = REPORT_ID;
     r[1] = counters.seq << 4;
     r[2..COUNTER_AT].copy_from_slice(&CONFIG_PACKET);
+    if let Some(microphone) = microphone {
+        r[4] = (r[4] & !AUDIO_CONTROL_MIC) | u8::from(microphone);
+    }
     r[COUNTER_AT] = counters.counter;
     r[HAPTICS_AT] = 0x92;
     r[HAPTICS_AT + 1] = HAPTIC_FRAME as u8;
@@ -124,11 +138,26 @@ pub fn build_audio<'a>(
     headset: bool,
     out: &'a mut [u8],
 ) -> &'a [u8] {
+    // Preserve the captured configuration until capture is explicitly managed.
+    build_audio_with_microphone(counters, opus, haptics, headset, None, out)
+}
+
+pub fn build_audio_with_microphone<'a>(
+    counters: &mut StreamCounters,
+    opus: &[[u8; OPUS_FRAME]; BLOCKS],
+    haptics: &[[u8; HAPTIC_FRAME]; BLOCKS],
+    headset: bool,
+    microphone: Option<bool>,
+    out: &'a mut [u8],
+) -> &'a [u8] {
     let r = &mut out[..AUDIO_REPORT_LEN];
     r.fill(0);
     r[0] = AUDIO_REPORT_ID;
     r[1] = counters.seq << 4;
     r[2..AUDIO_COUNTER_AT].copy_from_slice(&AUDIO_CONFIG);
+    if let Some(microphone) = microphone {
+        r[4] = (r[4] & !AUDIO_CONTROL_MIC) | u8::from(microphone);
+    }
     r[AUDIO_COUNTER_AT] = counters.counter;
     r[OPUS_AT] = 0x80 | 0x40 | if headset { OPUS_HEADSET } else { OPUS_SPEAKER };
     r[OPUS_AT + 1] = OPUS_FRAME as u8;
@@ -278,6 +307,52 @@ mod tests {
         assert_eq!(&r[..5], &[0x32, 0x00, 0x91, 0x01, 0x02]);
         assert!(r[5..138].iter().all(|&b| b == 0));
         assert!(crc::verify(crc::PREFIX_OUTPUT, &r));
+    }
+
+    #[test]
+    fn microphone_enable_survives_every_stream_configuration() {
+        let mut buf = [0; MAX_REPORT];
+        let mut c = StreamCounters::new();
+        for microphone in [false, true] {
+            let r = build_with_microphone(&mut c, &[0; HAPTIC_FRAME], Some(microphone), &mut buf);
+            assert_eq!(r[4], if microphone { 0xff } else { 0xfe });
+            assert_eq!(r[4] & AUDIO_CONTROL_INPUT, AUDIO_CONTROL_INPUT);
+            assert!(crc::verify(crc::PREFIX_OUTPUT, r));
+            let r = build_audio_with_microphone(
+                &mut c,
+                &[[0; OPUS_FRAME]; BLOCKS],
+                &[[0; HAPTIC_FRAME]; BLOCKS],
+                true,
+                Some(microphone),
+                &mut buf,
+            );
+            assert_eq!(r[4], if microphone { 0x7f } else { 0x7e });
+            assert_eq!(r[10], 0xd6, "headphone playback unchanged");
+            assert!(crc::verify(crc::PREFIX_OUTPUT, r));
+        }
+        let r = build_audio_control(&mut c, AUDIO_CONTROL_INPUT | AUDIO_CONTROL_MIC, &mut buf);
+        assert_eq!(&r[2..5], &[0x91, 1, 3]);
+        assert!(
+            r[5..138].iter().all(|b| *b == 0),
+            "capture alone carries no speaker or haptics payload"
+        );
+        assert!(crc::verify(crc::PREFIX_OUTPUT, r));
+    }
+
+    #[test]
+    fn unmanaged_media_preserves_the_captured_configuration() {
+        let mut c = StreamCounters::new();
+        let mut buf = [0; MAX_REPORT];
+        for headset in [false, true] {
+            let r = build_audio_with_microphone(&mut c, &[[0x55; OPUS_FRAME]; BLOCKS],
+                &[[0x33; HAPTIC_FRAME]; BLOCKS], headset, None, &mut buf);
+            assert_eq!(&r[2..AUDIO_COUNTER_AT], &AUDIO_CONFIG);
+            assert_eq!(&r[2..5], &[0x91, 0x06, 0x7f]);
+            assert!(crc::verify(crc::PREFIX_OUTPUT, r));
+        }
+        let r = build_with_microphone(&mut c, &[0x33; HAPTIC_FRAME], None, &mut buf);
+        assert_eq!(&r[2..COUNTER_AT], &CONFIG_PACKET);
+        assert!(crc::verify(crc::PREFIX_OUTPUT, r));
     }
 
     #[test]

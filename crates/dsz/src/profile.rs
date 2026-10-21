@@ -282,6 +282,42 @@ impl Default for Haptics {
     }
 }
 
+// ---------------------------------------------------------------- microphone
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MicrophoneSource {
+    /// The controller selects a headset microphone when connected.
+    #[default]
+    Auto,
+    BuiltIn,
+    Headset,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Microphone {
+    /// Expose Bluetooth microphone audio through the virtual DualSense.
+    pub enabled: bool,
+    pub muted: bool,
+    pub source: MicrophoneSource,
+    /// Software gain; 100 is unity. Runtime clamps imported profiles.
+    pub gain_percent: u16,
+    /// Use the physical Mute button as a real capture mute.
+    pub mute_button: bool,
+}
+
+impl Default for Microphone {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            muted: false,
+            source: MicrophoneSource::Auto,
+            gain_percent: 100,
+            mute_button: true,
+        }
+    }
+}
+
 // ---------------------------------------------------------------- input modes
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -848,6 +884,7 @@ pub struct Profile {
     pub triggers: Triggers,
     pub rumble: Rumble,
     pub haptics: Haptics,
+    pub microphone: Microphone,
     pub touchpad: Touchpad,
     pub gyro: Gyro,
     pub sticks: Sticks,
@@ -864,6 +901,7 @@ impl Default for Profile {
             triggers: Triggers::default(),
             rumble: Rumble::default(),
             haptics: Haptics::default(),
+            microphone: Microphone::default(),
             touchpad: Touchpad::default(),
             gyro: Gyro::default(),
             sticks: Sticks::default(),
@@ -1242,6 +1280,23 @@ mod tests {
         assert_eq!(p.lighting.audio_loud, default_audio_loud());
         assert_eq!(p.lighting.audio_medium_at, default_audio_medium_at());
         assert_eq!(p.lighting.audio_loud_at, default_audio_loud_at());
+        // Existing profiles never start recording after this upgrade.
+        assert!(!p.microphone.enabled);
+        assert_eq!(p.microphone.gain_percent, 100);
+        assert_eq!(p.microphone.source, MicrophoneSource::Auto);
+    }
+
+    #[test]
+    fn microphone_settings_round_trip() {
+        let p: Profile = serde_json::from_str(
+            r#"{"microphone":{"enabled":true,"muted":true,"source":"Headset","gain_percent":150,"mute_button":false}}"#,
+        ).unwrap();
+        assert!(p.microphone.enabled && p.microphone.muted);
+        assert_eq!(p.microphone.source, MicrophoneSource::Headset);
+        assert_eq!(p.microphone.gain_percent, 150);
+        assert!(!p.microphone.mute_button);
+        let q: Profile = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(p, q);
     }
 
     #[test]

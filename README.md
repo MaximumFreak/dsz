@@ -2,6 +2,11 @@
 
 **DSZ - DualSense Zen** is a fast, native Windows companion for the PlayStation DualSense, DualSense Edge, and DualShock 4 controllers, written in Rust: lighting, adaptive triggers, Bluetooth haptics and speaker audio, gyro and touchpad mouse, button mapping, virtual Xbox 360 / DualSense / DualShock 4 controllers, and per-game profiles.
 
+An **experimental Bluetooth microphone** is available on the Haptics &
+audio page: built-in/headset source, recording mute, gain and a level meter,
+using the virtual DualSense's Windows recording endpoint. See
+[setup, design and validation limits](docs/BLUETOOTH_MICROPHONE.md).
+
 ## Why use it
 
 - **Game haptics and adaptive triggers over Bluetooth.** Games with native DualSense support normally only do this over a USB cable.

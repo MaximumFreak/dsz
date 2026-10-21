@@ -868,11 +868,24 @@ impl Pipeline {
         // Mute toggle
         if s.buttons.has(Button::Mute)
             && !prev.buttons.has(Button::Mute)
-            && profile.lighting.mute_led == MuteLed::Toggle
+            && (profile.lighting.mute_led == MuteLed::Toggle
+                || (profile.microphone.enabled && profile.microphone.mute_button))
         {
             let mut t = device.toggles.lock();
             t.mute_engaged = !t.mute_engaged;
+            let mic_muted =
+                profile.microphone.muted || (profile.microphone.mute_button && t.mute_engaged);
             drop(t);
+            // Gate capture immediately: the idle media clock can otherwise
+            // sleep for 100 ms after the Mute LED has already changed.
+            if profile.microphone.enabled {
+                device.set_microphone(
+                    device.virt.active() == Some(VirtualKind::DualSense),
+                    mic_muted,
+                    profile.microphone.gain_percent,
+                    profile.microphone.source,
+                );
+            }
             device.kick();
         }
 

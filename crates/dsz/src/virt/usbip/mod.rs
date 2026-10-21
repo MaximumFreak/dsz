@@ -22,7 +22,10 @@
 //! interrupt URB the moment the physical report is processed.
 
 pub mod descriptors;
+mod microphone;
 pub mod wire;
+
+pub use microphone::MicrophoneRing;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -443,6 +446,18 @@ impl Ctl {
             10f32.powf(self.speaker_volume as f32 / 256.0 / 20.0)
         }
     }
+
+    fn microphone_enabled(&self) -> bool {
+        self.alt[d::IF_CAPTURE as usize] == 1 && !self.mic_mute
+    }
+
+    fn microphone_gain(&self) -> f32 {
+        if self.microphone_enabled() {
+            10f32.powf(self.mic_volume as f32 / 256.0 / 20.0)
+        } else {
+            0.0
+        }
+    }
 }
 
 const SPEAKER_VOL: (i16, i16, i16) = (-100 * 256, 0, 256); // min, max, resolution
@@ -451,6 +466,7 @@ const MIC_VOL: (i16, i16, i16) = (0, 48 * 256, 0x7A);
 struct IsoJob {
     seq: u32,
     lens: Vec<u32>,
+    capture_offsets: Vec<u32>,
     due: Instant,
     frame: u32,
 }
@@ -474,6 +490,7 @@ impl IsoClock {
         self.q.push_back(IsoJob {
             seq,
             lens,
+            capture_offsets: Vec::new(),
             due,
             frame,
         });
@@ -545,6 +562,7 @@ struct Shared {
     input: Mutex<[u8; 64]>,
     fresh: AtomicBool,
     audio: Arc<AudioRing>,
+    microphone: Arc<MicrophoneRing>,
     ctl: Mutex<Ctl>,
     epoch: Instant,
     busid: String,
@@ -646,12 +664,13 @@ impl UsbPad {
             input: Mutex::new(idle),
             fresh: AtomicBool::new(false),
             audio: Arc::new(AudioRing::new()),
+            microphone: Arc::new(MicrophoneRing::new()),
             ctl: Mutex::new(Ctl {
                 alt: [0; 4],
                 speaker_mute: false,
                 speaker_volume: SPEAKER_VOL.1,
                 mic_mute: false,
-                mic_volume: MIC_VOL.1,
+                mic_volume: MIC_VOL.0, // 0 dB: decoded PCM already has its native level.
                 idle: 0,
             }),
             epoch: Instant::now(),
@@ -760,6 +779,11 @@ impl UsbPad {
         self.shared.audio.clone()
     }
 
+    /// Stereo 48 kHz microphone PCM sent to Windows through USB capture.
+    pub fn microphone(&self) -> Arc<MicrophoneRing> {
+        self.shared.microphone.clone()
+    }
+
     /// Still attached (false once Windows or the driver dropped it).
     pub fn alive(&self) -> bool {
         !self.shared.ended.load(Ordering::Acquire)
@@ -858,6 +882,8 @@ impl UsbPad {
     /// Unplug the device from Windows now, even while other handles to
     /// this pad remain; dropping the last one stops the server.
     pub fn detach_now(&self) {
+        self.shared.microphone.set_enabled(false);
+        self.shared.microphone.clear();
         let port = self.port.swap(0, Ordering::AcqRel);
         if port > 0 {
             if let Some(path) = win::interface_paths(&GUID_VHCI).first() {
@@ -1015,6 +1041,9 @@ fn session(s: &Arc<Shared>, listener: &TcpListener) -> bool {
     }
     *s.conn.lock() = None;
     s.audio.clear();
+    s.microphone.set_enabled(false);
+    s.microphone.clear();
+    s.ctl.lock().alt = [0; 4];
     if !s.stop.load(Ordering::Acquire) && s.replug.swap(false, Ordering::AcqRel) {
         return true;
     }
@@ -1096,6 +1125,7 @@ fn submit(s: &Shared, u: Submit) {
             let mut g = s.conn.lock();
             if let Some(c) = g.as_mut() {
                 c.capture.admit(u.seq, u.iso_lens, Instant::now(), s.epoch);
+                c.capture.q.back_mut().unwrap().capture_offsets = u.iso_offsets;
             }
         }
         _ => {
@@ -1119,7 +1149,7 @@ fn clock(s: &Arc<Shared>) {
     crate::platform::raise_thread_priority(false);
     let timer = crate::platform::PreciseTimer::new();
     let mut descs: Vec<(u32, u32, u32)> = Vec::with_capacity(64);
-    let mut zeros: Vec<u8> = Vec::new();
+    let mut capture: Vec<u8> = Vec::new();
     while !s.stop.load(Ordering::Acquire) && !s.ended.load(Ordering::Acquire) {
         let now = Instant::now();
         let mut next = now + Duration::from_millis(4);
@@ -1138,17 +1168,27 @@ fn clock(s: &Arc<Shared>) {
                 }
                 while c.capture.q.front().map(|j| j.due <= now).unwrap_or(false) {
                     let j = c.capture.q.pop_front().unwrap();
-                    descs.clear();
-                    let mut off = 0;
-                    let mut total = 0;
-                    for &l in &j.lens {
-                        let a = l.min(d::CAPTURE_PACKET as u32);
-                        descs.push((off, l, a));
-                        off += l;
-                        total += a;
-                    }
-                    zeros.resize(total as usize, 0);
-                    c.ret(j.seq, 0, total, j.frame, Some(&descs), &zeros);
+                    let ctl = s.ctl.lock();
+                    let gain = ctl.microphone_gain();
+                    let enabled = ctl.alt[d::IF_CAPTURE as usize] == 1;
+                    drop(ctl);
+                    capture_packets(
+                        &s.microphone,
+                        &j.lens,
+                        &j.capture_offsets,
+                        enabled,
+                        gain,
+                        &mut descs,
+                        &mut capture,
+                    );
+                    c.ret(
+                        j.seq,
+                        0,
+                        capture.len() as u32,
+                        j.frame,
+                        Some(&descs),
+                        &capture,
+                    );
                 }
                 if let Some(j) = c.render.q.front() {
                     next = next.min(j.due);
@@ -1171,6 +1211,33 @@ fn clock(s: &Arc<Shared>) {
             }
         }
         timer.sleep_until(next);
+    }
+}
+
+/// USB/IP packs actual IN payloads together; descriptor offsets still refer
+/// to the host's original (possibly larger) per-packet buffers.
+fn capture_packets(
+    microphone: &MicrophoneRing,
+    lens: &[u32],
+    offsets: &[u32],
+    enabled: bool,
+    gain: f32,
+    descs: &mut Vec<(u32, u32, u32)>,
+    data: &mut Vec<u8>,
+) {
+    descs.clear();
+    data.clear();
+    for (&length, &offset) in lens.iter().zip(offsets) {
+        // Only complete stereo i16 frames fit the advertised PCM format.
+        let actual = if enabled {
+            length.min(d::CAPTURE_PACKET as u32) / 4 * 4
+        } else {
+            0
+        };
+        descs.push((offset, length, actual));
+        let start = data.len();
+        data.resize(start + actual as usize, 0);
+        microphone.read_packet(&mut data[start..], gain);
     }
 }
 
@@ -1242,6 +1309,12 @@ fn control(s: &Shared, u: &Submit) -> Option<Vec<u8>> {
             if iface as usize >= 4 {
                 return None;
             }
+            if model == Model::DualSense
+                && matches!(iface, d::IF_RENDER | d::IF_CAPTURE)
+                && value > 1
+            {
+                return None;
+            }
             let was = std::mem::replace(&mut s.ctl.lock().alt[iface as usize], alt);
             if was != alt {
                 match iface {
@@ -1303,6 +1376,11 @@ fn reset_streams(s: &Shared, render: bool, capture: bool) {
     if render {
         s.audio.clear();
     }
+    if capture {
+        let enabled = s.ctl.lock().microphone_enabled();
+        s.microphone.set_enabled(enabled);
+        s.microphone.clear();
+    }
     let mut g = s.conn.lock();
     if let Some(c) = g.as_mut() {
         if render {
@@ -1310,6 +1388,17 @@ fn reset_streams(s: &Shared, render: bool, capture: bool) {
         }
         if capture {
             c.capture.cursor = None;
+            // Pending URBs belong to the old alternate setting; complete
+            // cancellation now instead of feeding them newly captured speech.
+            while let Some(j) = c.capture.q.pop_front() {
+                let descs: Vec<_> = j
+                    .lens
+                    .iter()
+                    .zip(&j.capture_offsets)
+                    .map(|(&length, &offset)| (offset, length, 0))
+                    .collect();
+                c.ret(j.seq, wire::ECONNRESET, 0, j.frame, Some(&descs), &[]);
+            }
         }
     }
 }
@@ -1369,7 +1458,8 @@ fn audio_request(s: &Shared, req: u8, unit: u8, selector: u8, data: &[u8]) -> Op
             if speaker {
                 c.speaker_mute = m
             } else {
-                c.mic_mute = m
+                c.mic_mute = m;
+                s.microphone.set_enabled(c.microphone_enabled());
             }
             Some(Vec::new())
         }
@@ -1406,6 +1496,249 @@ fn audio_request(s: &Shared, req: u8, unit: u8, selector: u8, data: &[u8]) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn microphone_test_pad() -> Shared {
+        Shared {
+            model: Model::DualSense,
+            stop: AtomicBool::new(false),
+            sink: DsSink {
+                on_output: Box::new(|_| {}),
+                mirror: Arc::new(Mutex::new(super::super::mirror::Mirror::default())),
+            },
+            conn: Mutex::new(None),
+            input: Mutex::new(Model::DualSense.idle_input()),
+            fresh: AtomicBool::new(false),
+            audio: Arc::new(AudioRing::new()),
+            microphone: Arc::new(MicrophoneRing::new()),
+            ctl: Mutex::new(Ctl {
+                alt: [0; 4],
+                speaker_mute: false,
+                speaker_volume: SPEAKER_VOL.1,
+                mic_mute: false,
+                mic_volume: MIC_VOL.0,
+                idle: 0,
+            }),
+            epoch: Instant::now(),
+            busid: "1-1".into(),
+            tag: 0,
+            devnum: 1,
+            ended: AtomicBool::new(false),
+            urbs: AtomicU64::new(0),
+            led: Default::default(),
+            replug: AtomicBool::new(false),
+            attached: Mutex::new(Instant::now()),
+        }
+    }
+
+    #[test]
+    fn capture_packets_pack_pcm_and_cap_each_iso_packet() {
+        let ring = MicrophoneRing::new();
+        ring.set_enabled(true);
+        ring.push(&[1, -2, 3, -4]);
+        let mut descs = Vec::new();
+        let mut data = Vec::new();
+        capture_packets(
+            &ring,
+            &[4, 5, 256],
+            &[0, 8, 16],
+            true,
+            1.0,
+            &mut descs,
+            &mut data,
+        );
+        assert_eq!(descs, [(0, 4, 4), (8, 5, 4), (16, 256, 192)]);
+        assert_eq!(data.len(), 200);
+        assert_eq!(&data[..8], &[1, 0, 0xFE, 0xFF, 3, 0, 0xFC, 0xFF]);
+        assert!(data[8..].iter().all(|&sample| sample == 0));
+        capture_packets(&ring, &[192], &[0], false, 1.0, &mut descs, &mut data);
+        assert_eq!(descs, [(0, 192, 0)]);
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn usb_microphone_controls_apply_mute_volume_and_clear_on_stream_reset() {
+        let s = microphone_test_pad();
+        assert_eq!(
+            audio_request(&s, 0x81, d::UNIT_MIC, 2, &[]),
+            Some(vec![0, 0])
+        );
+        s.ctl.lock().alt[d::IF_CAPTURE as usize] = 1;
+        reset_streams(&s, false, true);
+        assert_eq!(s.ctl.lock().microphone_gain(), 1.0);
+        s.microphone.push(&[1_000, -1_000]);
+        let volume = (6i16 * 256).to_le_bytes();
+        assert_eq!(
+            audio_request(&s, 0x01, d::UNIT_MIC, 2, &volume),
+            Some(vec![])
+        );
+        let gain = s.ctl.lock().microphone_gain();
+        assert!((gain - 1.9952623).abs() < 0.00001);
+        let mut data = [0; 4];
+        s.microphone.read_packet(&mut data, gain);
+        assert_eq!(i16::from_le_bytes([data[0], data[1]]), 1_995);
+        assert_eq!(i16::from_le_bytes([data[2], data[3]]), -1_995);
+
+        s.microphone.push(&[1_000, -1_000]);
+        audio_request(&s, 0x01, d::UNIT_MIC, 1, &[1]).unwrap();
+        assert_eq!(s.ctl.lock().microphone_gain(), 0.0);
+        s.microphone.push(&[7, 8]); // host mute discards incoming speech
+        audio_request(&s, 0x01, d::UNIT_MIC, 1, &[0]).unwrap();
+        s.microphone.read_packet(&mut data, 1.0);
+        assert_eq!(data, [0; 4]);
+
+        s.microphone.push(&[1, 2]);
+        s.ctl.lock().alt[d::IF_CAPTURE as usize] = 0;
+        reset_streams(&s, false, true);
+        s.microphone.push(&[3, 4]);
+        s.ctl.lock().alt[d::IF_CAPTURE as usize] = 1;
+        reset_streams(&s, false, true);
+        s.microphone.read_packet(&mut data, 1.0);
+        assert_eq!(data, [0; 4]);
+    }
+
+    #[test]
+    fn duplex_microphone_lifecycle_preserves_render_pcm_and_reserved_clock() {
+        let s = microphone_test_pad();
+        // A local socket pair exercises pending URB cancellation without a
+        // controller, driver, server thread, or wall-clock timing dependency.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (writer, _) = listener.accept().unwrap();
+        *s.conn.lock() = Some(Conn {
+            w: writer,
+            buf: Vec::new(),
+            int_in: VecDeque::new(),
+            last_input: s.epoch,
+            render: IsoClock::default(),
+            capture: IsoClock::default(),
+            broken: false,
+        });
+        let urb = |ep, dir, seq, data: Vec<u8>, iso_lens: Vec<u32>| {
+            let mut offset = 0;
+            let iso_offsets = iso_lens
+                .iter()
+                .map(|&length| {
+                    let at = offset;
+                    offset += length;
+                    at
+                })
+                .collect();
+            Submit {
+                seq,
+                dir,
+                ep,
+                length: (data.len() as u32).max(offset),
+                packets: (!iso_lens.is_empty()).then_some(iso_lens.len() as u32),
+                setup: [0; 8],
+                data,
+                iso_lens,
+                iso_offsets,
+            }
+        };
+        let capture_alt = |alt| {
+            let mut request = urb(0, wire::DIR_OUT, 0, vec![], vec![]);
+            request.setup = [1, 0x0B, alt, 0, d::IF_CAPTURE, 0, 0, 0];
+            assert_eq!(control(&s, &request), Some(vec![]));
+        };
+
+        // Distinct speaker L/R and actuator L/R samples detect channel
+        // mixing, truncation, gain changes, or accidental render clearing.
+        let render: [i16; 16] = [
+            1_000, -2_000, 3_000, -4_000, 1_001, -2_001, 3_001, -4_001, 1_002, -2_002, 3_002,
+            -4_002, 1_003, -2_003, 3_003, -4_003,
+        ];
+        let pcm: Vec<_> = render
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let mut render_open = urb(0, wire::DIR_OUT, 0, vec![], vec![]);
+        render_open.setup = [1, 0x0B, 1, 0, d::IF_RENDER, 0, 0, 0];
+        assert_eq!(control(&s, &render_open), Some(vec![]));
+        submit(&s, urb(d::EP_RENDER, wire::DIR_OUT, 41, pcm, vec![32]));
+        let (render_due, render_cursor) = {
+            let conn = s.conn.lock();
+            let conn = conn.as_ref().unwrap();
+            (conn.render.q[0].due, conn.render.cursor)
+        };
+        let assert_render_preserved = || {
+            assert_eq!(s.ctl.lock().alt[d::IF_RENDER as usize], 1);
+            assert_eq!(s.audio.filled_frames(), 4);
+            let conn = s.conn.lock();
+            let conn = conn.as_ref().unwrap();
+            assert_eq!(conn.render.q.len(), 1);
+            assert_eq!(conn.render.q[0].seq, 41);
+            assert_eq!(conn.render.q[0].lens, [32]);
+            assert_eq!(conn.render.q[0].due, render_due);
+            assert_eq!(conn.render.cursor, render_cursor);
+        };
+
+        capture_alt(1);
+        assert_render_preserved();
+        let microphone: [i16; 4] = [123, -456, 789, -1_023];
+        s.microphone.push(&microphone);
+        let mut descriptors = Vec::new();
+        let mut captured = Vec::new();
+        capture_packets(
+            &s.microphone,
+            &[8],
+            &[0],
+            true,
+            1.0,
+            &mut descriptors,
+            &mut captured,
+        );
+        let expected: Vec<_> = microphone
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        assert_eq!(captured, expected);
+        assert_eq!(descriptors, [(0, 8, 8)]);
+        assert_render_preserved();
+
+        audio_request(&s, 0x01, d::UNIT_MIC, 1, &[1]).unwrap();
+        s.microphone.push(&microphone);
+        capture_packets(
+            &s.microphone,
+            &[8],
+            &[0],
+            true,
+            0.0,
+            &mut descriptors,
+            &mut captured,
+        );
+        assert_eq!(captured, [0; 8]);
+        assert_render_preserved();
+        audio_request(&s, 0x01, d::UNIT_MIC, 1, &[0]).unwrap();
+        s.microphone.push(&microphone);
+        submit(&s, urb(d::EP_CAPTURE, wire::DIR_IN, 42, vec![], vec![192]));
+        assert_eq!(s.conn.lock().as_ref().unwrap().capture.q.len(), 1);
+
+        // Closing capture cancels its pending transfer and old microphone
+        // samples, while the already-reserved render transfer survives.
+        capture_alt(0);
+        assert!(s.conn.lock().as_ref().unwrap().capture.q.is_empty());
+        assert_render_preserved();
+        capture_alt(1);
+        capture_packets(
+            &s.microphone,
+            &[8],
+            &[0],
+            true,
+            1.0,
+            &mut descriptors,
+            &mut captured,
+        );
+        assert_eq!(captured, [0; 8], "reopening never replays old speech");
+        assert_render_preserved();
+
+        let mut played = [0; 16];
+        assert_eq!(s.audio.read(&mut played), 4);
+        assert_eq!(
+            played, render,
+            "both speaker and actuator channels are intact"
+        );
+        assert_eq!(s.audio.frames_in.load(Ordering::Relaxed), 4);
+    }
 
     #[test]
     fn x360_input_caps_cover_every_field_we_send() {

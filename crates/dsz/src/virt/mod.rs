@@ -43,6 +43,16 @@ use crate::profile::{Action, VirtualKind};
 pub use pool::{Pad, Pool};
 pub use probe::probe;
 
+impl crate::haptics::capture::PcmSink for usbip::MicrophoneRing {
+    fn push(&self, pcm: &[i16]) {
+        usbip::MicrophoneRing::push(self, pcm);
+    }
+
+    fn clear(&self) {
+        usbip::MicrophoneRing::clear(self);
+    }
+}
+
 /// One live virtual controller.
 pub type Target = usbip::UsbPad;
 
@@ -425,10 +435,16 @@ fn attach(device: &Device, pad: &Pad) {
     if let Some(a) = pad.target.game_audio() {
         *device.game_audio.lock() = Some(a);
     }
+    let mic = (pad.kind() == VirtualKind::DualSense)
+        .then(|| pad.target.microphone() as Arc<dyn crate::haptics::capture::PcmSink>);
+    device.microphone.set_sink(mic);
     device.virt.set(Some(pad.target.clone()));
+    device.kick();
 }
 
 fn detach(device: &Device) {
+    device.microphone.set_sink(None);
+    device.microphone.clear();
     device.virt.set(None);
     *device.game_audio.lock() = None;
     device.feedback.lock().clear_game();

@@ -259,6 +259,12 @@ impl Composer {
         if let Some(m) = overrides.mic_led {
             out.mute_led = m;
         }
+        // While microphone capture is enabled, the LED reports its actual
+        // profile/button mute, even if a game sends a cosmetic LED value.
+        if p.microphone.enabled {
+            out.mute_led =
+                (p.microphone.muted || (p.microphone.mute_button && toggles.mute_engaged)) as u8;
+        }
 
         // Triggers
         // Mod overrides, then what the game sent, then the profile.
@@ -312,6 +318,37 @@ impl Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_led_reports_real_mute_over_game_led() {
+        let mut c = Composer::new();
+        let mut p = Profile::default();
+        p.microphone.enabled = true;
+        p.virtual_out.game_leds = true;
+        let mut fb = crate::device::Feedback::default();
+        fb.game.mute_led = Some(2);
+        let mut toggles = crate::device::Toggles::default();
+        let mut led = |p: &Profile, t: &crate::device::Toggles| {
+            c.compose(
+                p,
+                &InputState::default(),
+                &crate::device::Overrides::default(),
+                &fb,
+                t,
+                false,
+                0.0,
+                Instant::now(),
+            )
+            .mute_led
+        };
+        assert_eq!(led(&p, &toggles), 0);
+        toggles.mute_engaged = true;
+        assert_eq!(led(&p, &toggles), 1);
+        p.microphone.mute_button = false;
+        assert_eq!(led(&p, &toggles), 0);
+        p.microphone.muted = true;
+        assert_eq!(led(&p, &toggles), 1);
+    }
 
     #[test]
     fn battery_gauge_rounds_to_the_nearest_light() {

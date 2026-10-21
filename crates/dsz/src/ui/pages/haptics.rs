@@ -274,6 +274,75 @@ impl App {
             }
         });
         ui.add_space(12.0);
+        card(
+            ui,
+            "Bluetooth microphone (experimental)",
+            "Controller or headset microphone as a Windows recording device",
+            |ui| {
+                let m = &mut p.microphone;
+                toggle_row(
+                    ui,
+                    "Enable microphone",
+                    "Requires Bluetooth and an active virtual DualSense controller",
+                    &mut m.enabled,
+                );
+                if m.enabled {
+                    row(
+                        ui,
+                        "Microphone source",
+                        "Auto prefers a headset with a microphone in the controller's 3.5 mm jack",
+                        |ui| {
+                            segmented(
+                                ui,
+                                &mut m.source,
+                                &[
+                                    (MicrophoneSource::Auto, "Auto"),
+                                    (MicrophoneSource::BuiltIn, "Built-in"),
+                                    (MicrophoneSource::Headset, "Headset"),
+                                ],
+                            );
+                        },
+                    );
+                    toggle_row(
+                        ui,
+                        "Mute microphone",
+                        "Send silence to recording apps",
+                        &mut m.muted,
+                    );
+                    toggle_row(ui, "Mute button", "The controller's Mute button mutes recording; its LED shows the mute state", &mut m.mute_button);
+                    slider_row(
+                        ui,
+                        "Microphone gain",
+                        "100% is the original level",
+                        &mut m.gain_percent,
+                        0..=200,
+                        "%",
+                    );
+                    if let Some(d) = dev {
+                        let ready = bt && d.virt.active() == Some(VirtualKind::DualSense);
+                        if !ready {
+                            note(ui, "Connect over Bluetooth and select DualSense on the Virtual controller page to expose the microphone to Windows.", WARN);
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Microphone level").color(MUTED));
+                                meter(ui, d.microphone.peak() as f32 / 255.0, VIOLET, 184.0);
+                                if d.microphone.muted() {
+                                    pill(ui, "muted", WARN);
+                                }
+                            });
+                            muted(ui, "In Windows, Discord or your game, select the virtual Wireless Controller microphone as the input device.");
+                            muted(ui, "Hardware validation is still required for each controller/firmware and headset. The level meter confirms Bluetooth packets; test a recording to confirm Windows audio.");
+                        }
+                    } else {
+                        muted(
+                            ui,
+                            "Connect a DualSense over Bluetooth to use its microphone.",
+                        );
+                    }
+                }
+            },
+        );
+        ui.add_space(12.0);
         two_columns(ui, |ui, col| {
             if col == 0 {
                 card(

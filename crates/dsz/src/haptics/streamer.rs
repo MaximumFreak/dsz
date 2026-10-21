@@ -24,13 +24,38 @@ use super::opus::{Encoder, Pcm};
 use super::synth::Synth;
 use crate::device::{Device, StreamPacket, MAX_REPORT, SPEAKER_HEADSET, SPEAKER_MUTED, SPEAKER_UNTOUCHED};
 use crate::engine::{Engine, ProfileCache};
-use crate::profile::AudioSource;
+use crate::profile::{AudioSource, VirtualKind};
 
 const PERIOD: Duration = Duration::from_nanos(stream::PERIOD_NS);
 /// Stop sending after this long with nothing to play.
 const IDLE_AFTER: Duration = Duration::from_millis(400);
 /// Speaker sound below this peak counts as silence.
 const SPEAKER_GATE: f32 = 1.0 / 2048.0;
+/// Keep microphone-only control packets out of the active media clock.
+/// Each media/haptic payload already carries the microphone enable bit.
+struct MicrophoneClock {
+    state: Option<bool>,
+    next_control: Instant,
+}
+
+impl MicrophoneClock {
+    fn new(now: Instant) -> Self {
+        Self {
+            state: None,
+            next_control: now,
+        }
+    }
+
+    fn due(&self, now: Instant, microphone: Option<bool>) -> bool {
+        microphone.is_some() && (self.state != microphone
+            || (microphone == Some(true) && now >= self.next_control))
+    }
+
+    fn sent(&mut self, now: Instant, microphone: Option<bool>) {
+        self.state = microphone;
+        self.next_control = now + Duration::from_secs(1);
+    }
+}
 /// Silent speaker reports sent at once when a speaker stream starts, so the
 /// controller has a cushion against radio jitter (about 64 ms). Without it
 /// the sound pops wherever a report arrives a little late.
@@ -140,20 +165,30 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     // needs it pushes the instant out by `IDLE_AFTER`.
     let mut stream_until = Instant::now();
 
-    // Stop the microphone stream a speaker stream starts (twice, in case
-    // the radio drops one).
-    let mic_off = |counters: &mut StreamCounters| {
+    // Capture needs no speaker/actuator PCM stream. Keep controller state
+    // reports enabled with bit1 and change only microphone admission bit0.
+    let mic_control = |counters: &mut StreamCounters, microphone: bool| {
         let mut b = [0u8; MAX_REPORT];
+        let mut queued = false;
         for _ in 0..2 {
-            let len = stream::build_mic_off(counters, &mut b).len();
+            let flags = stream::AUDIO_CONTROL_INPUT
+                | if microphone {
+                    stream::AUDIO_CONTROL_MIC
+                } else {
+                    0
+                };
+            let len = stream::build_audio_control(counters, flags, &mut b).len();
             let mut pkt = StreamPacket {
                 len,
                 data: [0u8; MAX_REPORT],
             };
             pkt.data[..len].copy_from_slice(&b[..len]);
-            let _ = device.stream_tx.try_send(pkt);
+            queued |= device.stream_tx.try_send(pkt).is_ok();
         }
+        queued
     };
+    let mut mic_clock = MicrophoneClock::new(Instant::now());
+    let mut capture_used = false;
 
     let set_route = |route: u8| {
         if device.speaker_route.swap(route, Ordering::AcqRel) != route {
@@ -165,6 +200,18 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let profile = cache.get(engine, device);
         let h = &profile.haptics;
         let vo = &profile.virtual_out;
+        let mic = &profile.microphone;
+        device.set_microphone(
+            mic.enabled && device.virt.active() == Some(VirtualKind::DualSense),
+            mic.muted || (mic.mute_button && device.toggles.lock().mute_engaged),
+            mic.gain_percent,
+            mic.source,
+        );
+        // Only opt-in capture may change the hardware-tuned media bytes.
+        // Keep this latch for this physical connection, even after disabling.
+        capture_used |= device.microphone.enabled();
+        let recording = device.microphone.recording() || device.mic_tap.lock().is_some();
+        let microphone = capture_used.then_some(recording);
         let enabled = h.enabled && device.is_bluetooth();
         let game_src = device.game_audio.lock().clone();
         let game_speaker = game_src.is_some() && vo.game_speaker;
@@ -208,11 +255,16 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let streaming = enabled && now < stream_until;
         device.pcm_mode.store(streaming, Ordering::Release);
         if !streaming {
+            if mic_clock.due(now, microphone) && mic_control(&mut counters, recording) {
+                mic_clock.sent(now, microphone);
+            }
             source = None;
             encoder = None;
             if was_media {
                 was_media = false;
-                mic_off(&mut counters);
+                if mic_control(&mut counters, recording) {
+                    mic_clock.sent(now, microphone);
+                }
                 log::info!("controller speaker stream off");
             }
             device.haptic_level[0].store(0, Ordering::Relaxed);
@@ -274,7 +326,9 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 lead = device.speaker_lead.load(Ordering::Relaxed).clamp(1, 12) as usize;
                 fade_in = true;
             } else {
-                mic_off(&mut counters);
+                if mic_control(&mut counters, recording) {
+                    mic_clock.sent(now, microphone);
+                }
             }
             // Start the new cadence from now.
             deadline = now;
@@ -294,14 +348,17 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 }
                 let headset = device.speaker_route.load(Ordering::Acquire) == SPEAKER_HEADSET;
                 let len =
-                    stream::build_audio(&mut counters, &opus, &[[0u8; HAPTIC_FRAME]; BLOCKS], headset, &mut buf)
+                    stream::build_audio_with_microphone(&mut counters, &opus, &[[0u8; HAPTIC_FRAME]; BLOCKS], headset,
+                    microphone, &mut buf)
                         .len();
                 let mut pkt = StreamPacket {
                     len,
                     data: [0u8; MAX_REPORT],
                 };
                 pkt.data[..len].copy_from_slice(&buf[..len]);
-                let _ = device.stream_tx.try_send(pkt);
+                if device.stream_tx.try_send(pkt).is_ok() {
+                    mic_clock.sent(Instant::now(), microphone);
+                }
             }
             continue;
         }
@@ -476,7 +533,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             last_sound = now;
         }
         if now.duration_since(last_sound) > IDLE_AFTER && !media {
-            // Nothing to play: keep the radio quiet.
+            // Nothing to play: keep the radio quiet unless recording needs refresh.
+            if mic_clock.due(now, microphone) && mic_control(&mut counters, recording) {
+                mic_clock.sent(now, microphone);
+            }
             continue;
         }
 
@@ -512,9 +572,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                     }
                 }
             }
-            stream::build_audio(&mut counters, &opus, &frames, headset, &mut buf).len()
+            stream::build_audio_with_microphone(&mut counters, &opus, &frames, headset,
+                microphone, &mut buf).len()
         } else {
-            stream::build(&mut counters, &frames[0], &mut buf).len()
+            stream::build_with_microphone(&mut counters, &frames[0], microphone, &mut buf).len()
         };
         let mut pkt = StreamPacket {
             len,
@@ -527,6 +588,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 .stats
                 .stream_underruns
                 .fetch_add(1, Ordering::Relaxed);
+        } else {
+            mic_clock.sent(Instant::now(), microphone);
         }
         if underruns > 0 {
             device
@@ -536,8 +599,9 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             underruns = 0;
         }
     }
-    if was_media {
-        mic_off(&mut counters);
+    device.microphone.configure(false, true, 100);
+    if was_media || capture_used {
+        mic_control(&mut counters, false);
     }
     device.pcm_mode.store(false, Ordering::Release);
     if device.speaker_route.load(Ordering::Acquire) != SPEAKER_UNTOUCHED {
@@ -549,6 +613,32 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_controls_are_opt_in_and_idle_stays_quiet() {
+        let start = Instant::now();
+        let mut clock = MicrophoneClock::new(start);
+        assert!(!clock.due(start, None));
+        assert!(!clock.due(start + Duration::from_secs(3600), None));
+        // Enabling capture while muted still stops the implicit media admission.
+        assert!(clock.due(start, Some(false)));
+        clock.sent(start, Some(false));
+        assert!(!clock.due(start + Duration::from_secs(3600), Some(false)));
+        assert!(clock.due(start, Some(true)));
+        clock.sent(start, Some(true));
+        assert!(!clock.due(start + Duration::from_millis(999), Some(true)));
+        assert!(clock.due(start + Duration::from_secs(1), Some(true)));
+        // Active media carries capture; it needs no standalone refresh.
+        for tick in 1..=300 {
+            let now = start + PERIOD * tick;
+            clock.sent(now, Some(true));
+            assert!(!clock.due(now, Some(true)));
+        }
+        let end = start + PERIOD * 300;
+        assert!(clock.due(end, Some(false)));
+        clock.sent(end, Some(false));
+        assert!(!clock.due(end + Duration::from_secs(3600), Some(false)));
+    }
 
     #[test]
     fn volume_spans_the_accepted_range() {
