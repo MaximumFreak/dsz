@@ -24,7 +24,7 @@ use super::opus::{Encoder, Pcm};
 use super::synth::Synth;
 use crate::device::{Device, StreamPacket, MAX_REPORT, SPEAKER_HEADSET, SPEAKER_MUTED, SPEAKER_UNTOUCHED};
 use crate::engine::{Engine, ProfileCache};
-use crate::profile::AudioSource;
+use crate::profile::{AudioSource, Haptics};
 
 const PERIOD: Duration = Duration::from_nanos(stream::PERIOD_NS);
 /// Stop sending after this long with nothing to play.
@@ -81,6 +81,63 @@ impl Source {
     }
 }
 
+/// Split one captured PC window into independently enabled destinations.
+struct PcAudio {
+    filter: HapticFilter,
+    prev_haptics: [f32; 2],
+    prev_speaker: [f32; 2],
+    filtered: Vec<[f32; 2]>,
+}
+
+impl PcAudio {
+    fn new() -> Self {
+        Self {
+            filter: HapticFilter::new(48_000.0, 650.0, 25.0),
+            prev_haptics: [0.0; 2],
+            prev_speaker: [0.0; 2],
+            filtered: Vec::with_capacity(1024),
+        }
+    }
+
+    fn render(
+        &mut self,
+        h: &Haptics,
+        chunk: &[[f32; 2]],
+        rate: u32,
+        haptics: &mut [[f32; 2]],
+        speaker: &mut Vec<[f32; 2]>,
+        frames: usize,
+    ) {
+        haptics.fill([0.0; 2]);
+        speaker.clear();
+        if h.source == AudioSource::SystemAudio {
+            self.filter.configure(
+                rate as f32,
+                h.low_pass_hz.clamp(60.0, 1400.0),
+                h.high_pass_hz.clamp(5.0, 300.0),
+            );
+            self.filtered.clear();
+            for fr in chunk {
+                let (l, r) = if h.stereo {
+                    (fr[0], fr[1])
+                } else {
+                    let m = 0.5 * (fr[0] + fr[1]);
+                    (m, m)
+                };
+                self.filtered.push([
+                    self.filter.run(0, l) * h.gain,
+                    self.filter.run(1, r) * h.gain,
+                ]);
+            }
+            resample_window(&mut self.prev_haptics, &self.filtered, haptics);
+        }
+        if h.pc_audio_on_speaker && !chunk.is_empty() {
+            speaker.resize(frames, [0.0; 2]);
+            resample_window(&mut self.prev_speaker, chunk, speaker);
+        }
+    }
+}
+
 /// Speaker volume 1..=100 as the output report's volume byte.
 fn volume_byte(v: u8) -> u8 {
     let span = (SPEAKER_VOLUME_MAX - SPEAKER_VOLUME_MIN) as u32;
@@ -103,9 +160,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     let mut cache = ProfileCache::default();
     let mut counters = StreamCounters::new();
     let mut source: Option<Source> = None;
-    let mut filter = HapticFilter::new(48_000.0, 650.0, 25.0);
+    let mut pc_audio = PcAudio::new();
     let mut synth = Synth::new();
-    let mut prev_h = [0f32; 2];
     let mut prev_buttons = Buttons::default();
     let mut deadline = Instant::now();
     let mut last_sound = Instant::now() - Duration::from_secs(10);
@@ -119,9 +175,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     let mut game = super::game::GameReader::new();
     let mut to_rumble = super::game::ActuatorRumble::new();
     let mut prev_g = [0f32; 2];
-    let mut prev_pc = [0f32; 2];
     let mut squeeze = Squeeze::new();
-    let mut filtered: Vec<[f32; 2]> = Vec::with_capacity(1024);
     let mut pc_spk: Vec<[f32; 2]> = Vec::with_capacity(WINDOW);
     // Speaker audio for one report, before and after fitting to 960 frames.
     let mut spk: Vec<[f32; 2]> = Vec::with_capacity(BLOCKS * WINDOW);
@@ -168,7 +222,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let enabled = h.enabled && device.is_bluetooth();
         let game_src = device.game_audio.lock().clone();
         let game_speaker = game_src.is_some() && vo.game_speaker;
-        let pc_speaker = h.pc_audio_on_speaker && h.source == AudioSource::SystemAudio;
+        let pc_speaker = h.pc_audio_on_speaker;
         let speaker_allowed = enabled && h.speaker_volume > 0 && (game_speaker || pc_speaker);
         // The speaker route goes on when the speaker is first needed and
         // stays on (silent between sounds) while the profile allows it:
@@ -195,6 +249,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         // Otherwise rumble goes to the controller's own rumble emulation,
         // which is what an Xbox game with no haptic modes on gets.
         let continuous = h.source == AudioSource::SystemAudio
+            || pc_speaker
             || h.buttons.enabled
             || h.triggers.enabled
             || h.rumble_as_haptics
@@ -312,8 +367,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         };
 
         // Audio source
-        match h.source {
-            AudioSource::SystemAudio => {
+        if h.source == AudioSource::SystemAudio || pc_speaker {
                 if source
                     .as_ref()
                     .map(|s| s.sub.device != h.device)
@@ -326,8 +380,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                         chunk: Vec::with_capacity(1024),
                     });
                 }
-            }
-            AudioSource::None => source = None,
+            } else {
+            source = None;
         }
         // Clock
         let now = Instant::now();
@@ -387,33 +441,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         for frame in frames.iter_mut().take(blocks) {
             // PC audio window
             pc_spk.clear();
+            hap.fill([0.0; 2]);
             if let Some(src) = source.as_mut() {
                 let (chunk, rate) = src.take(win, h.latency.prime_windows(), &mut underruns);
-                // Haptics: filter at the source rate, then decimate to 3 kHz.
-                filter.configure(
-                    rate as f32,
-                    h.low_pass_hz.clamp(60.0, 1400.0),
-                    h.high_pass_hz.clamp(5.0, 300.0),
-                );
-                filtered.clear();
-                for fr in chunk {
-                    let (l, r) = if h.stereo {
-                        (fr[0], fr[1])
-                    } else {
-                        let m = 0.5 * (fr[0] + fr[1]);
-                        (m, m)
-                    };
-                    let a = filter.run(0, l) * h.gain;
-                    let b = filter.run(1, r) * h.gain;
-                    filtered.push([a, b]);
-                }
-                resample_window(&mut prev_h, &filtered, &mut hap);
-                if pc_speaker && !chunk.is_empty() {
-                    pc_spk.resize(win, [0.0; 2]);
-                    resample_window(&mut prev_pc, chunk, &mut pc_spk);
-                }
-            } else {
-                hap.fill([0.0; 2]);
+                pc_audio.render(h, chunk, rate, &mut hap, &mut pc_spk, win);
             }
 
             // Game audio from the virtual DualSense: actuator channels into
@@ -549,6 +580,80 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pc_tone() -> Vec<[f32; 2]> {
+        (0..WINDOW)
+            .map(|i| {
+                let t = i as f32 / 48_000.0;
+                [
+                    (t * 300.0 * std::f32::consts::TAU).sin() * 0.25,
+                    (t * 600.0 * std::f32::consts::TAU).sin() * 0.5,
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pc_playback_keeps_stereo_without_driving_the_actuators() {
+        let mut route = PcAudio::new();
+        let mut h = Haptics::default();
+        h.source = AudioSource::None;
+        h.pc_audio_on_speaker = true;
+        let chunk = pc_tone();
+        let mut actuators = [[99.0; 2]; 32];
+        let mut speaker = Vec::new();
+        route.render(&h, &chunk, 48_000, &mut actuators, &mut speaker, WINDOW);
+        assert_eq!(actuators, [[0.0; 2]; 32]);
+        assert_eq!(speaker.len(), WINDOW);
+        assert!(speaker
+            .iter()
+            .any(|f| f[0].abs() > 0.1 && (f[0] - f[1]).abs() > 0.1));
+
+        // Selecting audio-derived haptics must not alter the audible PCM.
+        let mut with_haptics = PcAudio::new();
+        h.source = AudioSource::SystemAudio;
+        let mut second_speaker = Vec::new();
+        with_haptics.render(
+            &h,
+            &chunk,
+            48_000,
+            &mut actuators,
+            &mut second_speaker,
+            WINDOW,
+        );
+        assert!(actuators.iter().flatten().any(|v| v.abs() > 0.01));
+        assert_eq!(speaker, second_speaker);
+
+        // Switching back must clear the previous haptic window immediately.
+        h.source = AudioSource::None;
+        with_haptics.render(
+            &h,
+            &chunk,
+            48_000,
+            &mut actuators,
+            &mut second_speaker,
+            WINDOW,
+        );
+        assert_eq!(actuators, [[0.0; 2]; 32]);
+        assert!(second_speaker.iter().flatten().any(|v| v.abs() > 0.1));
+    }
+
+    #[test]
+    fn audio_haptics_and_playback_can_be_disabled_independently() {
+        let mut route = PcAudio::new();
+        let mut h = Haptics::default();
+        h.source = AudioSource::SystemAudio;
+        h.pc_audio_on_speaker = false;
+        let mut actuators = [[0.0; 2]; 32];
+        let mut speaker = vec![[99.0; 2]; WINDOW];
+        route.render(&h, &pc_tone(), 48_000, &mut actuators, &mut speaker, WINDOW);
+        assert!(actuators.iter().flatten().any(|v| v.abs() > 0.01));
+        assert!(speaker.is_empty());
+        h.source = AudioSource::None;
+        route.render(&h, &pc_tone(), 48_000, &mut actuators, &mut speaker, WINDOW);
+        assert_eq!(actuators, [[0.0; 2]; 32]);
+        assert!(speaker.is_empty());
+    }
 
     #[test]
     fn volume_spans_the_accepted_range() {

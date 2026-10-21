@@ -111,17 +111,17 @@ impl App {
                         return;
                     }
                     ui.add_space(6.0);
-                    row(ui, "Source", "", |ui| {
+                    row(ui, "Haptics source", "Native game haptics always play; Audio to vibration also turns PC sound into vibration", |ui| {
                         segmented(
                             ui,
                             &mut h.source,
                             &[
-                                (AudioSource::None, "Events only"),
-                                (AudioSource::SystemAudio, "System audio"),
+                                (AudioSource::None, "Game / events"),
+                                (AudioSource::SystemAudio, "Audio to vibration"),
                             ],
                         );
                     });
-                    if h.source == AudioSource::SystemAudio {
+                    if h.source == AudioSource::SystemAudio || h.pc_audio_on_speaker {
                         row(
                             ui,
                             "Capture from",
@@ -165,6 +165,8 @@ impl App {
                             }
                         });
                         ui.add_space(4.0);
+                    }
+                    if h.source == AudioSource::SystemAudio {
                         slider_row(ui, "Intensity", "", &mut h.gain, 0.1..=6.0, "×");
                         slider_row(
                             ui,
@@ -209,7 +211,7 @@ impl App {
             } else {
                 card(
                     ui,
-                    "Controller speaker",
+                    "Controller speaker / headset",
                     "Speaker sound over Bluetooth: a game's own speaker sounds through the virtual DualSense, and PC audio if you want it",
                     |ui| {
                         let h = &mut p.haptics;
@@ -224,13 +226,12 @@ impl App {
                         let mut pc = h.pc_audio_on_speaker;
                         if toggle_row(
                             ui,
-                            "PC audio on the speaker",
-                            "Plays the captured system audio (the haptics source) on the speaker too",
+                            "PC audio on speaker / headset",
+                            "Hear PC sound on the controller, independently of the haptics source",
                             &mut pc,
                         ) {
                             h.pc_audio_on_speaker = pc;
                             if pc {
-                                h.source = AudioSource::SystemAudio;
                                 h.enabled = true;
                             }
                         }

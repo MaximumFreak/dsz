@@ -255,6 +255,9 @@ pub struct Haptics {
     pub speaker_volume: u8,
     /// Also play the captured PC audio on the controller speaker.
     pub pc_audio_on_speaker: bool,
+    /// Persist the independent routing semantics; absent means a legacy profile.
+    #[serde(default)]
+    pc_audio_independent: bool,
     /// Send speaker audio to a headset in the controller's jack instead,
     /// while one is plugged in.
     pub headset_when_plugged: bool,
@@ -277,7 +280,20 @@ impl Default for Haptics {
             rumble_as_haptics: false,
             speaker_volume: 80,
             pc_audio_on_speaker: false,
+            pc_audio_independent: true,
             headset_when_plugged: true,
+        }
+    }
+}
+
+impl Haptics {
+    fn migrate_pc_playback(&mut self) {
+        if !self.pc_audio_independent {
+            // This flag previously did nothing without the SystemAudio source.
+            if self.source != AudioSource::SystemAudio {
+                self.pc_audio_on_speaker = false;
+            }
+            self.pc_audio_independent = true;
         }
     }
 }
@@ -939,6 +955,7 @@ impl ProfileStore {
                     serde_json::from_str::<Profile>(t.trim_start_matches(crate::settings::BOM))
                 }) {
                     Ok(Ok(mut prof)) => {
+                        prof.haptics.migrate_pc_playback();
                         if prof.name.trim().is_empty() {
                             prof.name = p
                                 .file_stem()
@@ -1041,6 +1058,7 @@ impl ProfileStore {
     }
 
     pub fn add(&self, mut p: Profile) -> String {
+        p.haptics.migrate_pc_playback();
         p.name = self.unique_name(&p.name);
         let name = p.name.clone();
         self.dirty.lock().insert(name.clone());
@@ -1102,7 +1120,10 @@ impl ProfileStore {
     pub fn replace_all(&self, profiles: Vec<Profile>) {
         let mut l = self.list.write();
         let old: Vec<String> = l.iter().map(|p| p.name.clone()).collect();
-        *l = profiles.into_iter().map(Arc::new).collect();
+        *l = profiles.into_iter().map(|mut p| {
+            p.haptics.migrate_pc_playback();
+            Arc::new(p)
+        }).collect();
         let mut dirty = self.dirty.lock();
         dirty.clear();
         dirty.extend(l.iter().map(|p| p.name.clone()));
@@ -1242,6 +1263,24 @@ mod tests {
         assert_eq!(p.lighting.audio_loud, default_audio_loud());
         assert_eq!(p.lighting.audio_medium_at, default_audio_medium_at());
         assert_eq!(p.lighting.audio_loud_at, default_audio_loud_at());
+    }
+
+    #[test]
+    fn legacy_pc_playback_migration_is_once_only() {
+        for source in [AudioSource::None, AudioSource::SystemAudio] {
+            let mut h: Haptics = serde_json::from_value(serde_json::json!({
+                "source": source, "pc_audio_on_speaker": true
+            })).unwrap();
+            assert!(!h.pc_audio_independent);
+            h.migrate_pc_playback();
+            assert_eq!(h.pc_audio_on_speaker, source == AudioSource::SystemAudio);
+            // After migration, explicitly enabling playback with None survives reload.
+            h.source = AudioSource::None;
+            h.pc_audio_on_speaker = true;
+            let mut loaded: Haptics = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
+            loaded.migrate_pc_playback();
+            assert!(loaded.pc_audio_on_speaker);
+        }
     }
 
     #[test]
