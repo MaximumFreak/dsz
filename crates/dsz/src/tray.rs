@@ -177,7 +177,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
 unsafe fn show_menu(hwnd: HWND) {
     let menu = CreatePopupMenu();
-    let show = wide("Open DSZ");
+    let show = wide(crate::i18n::tr("Open DSZ"));
     AppendMenuW(menu, MF_STRING, ID_SHOW, show.as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
     let mut current = String::new();
@@ -199,11 +199,11 @@ unsafe fn show_menu(hwnd: HWND) {
             AppendMenuW(sub, flags, ID_PROFILE_BASE + i, w.as_ptr());
             labels.push(w);
         }
-        let p = wide("Profile");
+        let p = wide(crate::i18n::tr("Profile"));
         AppendMenuW(menu, MF_POPUP, sub as usize, p.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
     }
-    let quit = wide("Quit");
+    let quit = wide(crate::i18n::tr("Quit"));
     AppendMenuW(menu, MF_STRING, ID_QUIT, quit.as_ptr());
     let mut pt = POINT { x: 0, y: 0 };
     GetCursorPos(&mut pt);

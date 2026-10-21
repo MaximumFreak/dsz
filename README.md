@@ -2,6 +2,11 @@
 
 **DSZ - DualSense Zen** is a fast, native Windows companion for the PlayStation DualSense, DualSense Edge, and DualShock 4 controllers, written in Rust: lighting, adaptive triggers, Bluetooth haptics and speaker audio, gyro and touchpad mouse, button mapping, virtual Xbox 360 / DualSense / DualShock 4 controllers, and per-game profiles.
 
+The interface supports **English** and **Português (Brasil)**. Choose the
+language on the Settings page; it applies immediately and is saved. English
+remains the default for existing and new installations. See
+[localization](docs/LOCALIZATION.md) to contribute translations.
+
 ## Why use it
 
 - **Game haptics and adaptive triggers over Bluetooth.** Games with native DualSense support normally only do this over a USB cable.

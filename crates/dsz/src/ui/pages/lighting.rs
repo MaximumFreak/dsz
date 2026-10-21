@@ -31,11 +31,11 @@ impl App {
         p: &mut Profile,
         dev: Option<&Arc<Device>>,
     ) {
-        page_header(ui, "Lighting", "Lightbar, player indicator, and mute light. Changes show on the controller as you make them.");
+        page_header(ui, crate::i18n::tr("Lighting"), crate::i18n::tr("Lightbar, player indicator, and mute light. Changes show on the controller as you make them."));
         if dev.map(|d| d.model.is_dualshock4()).unwrap_or(false) {
             note(
                 ui,
-                "The lightbar follows this page. Player indicators and the mute light are DualSense only, so those controls do nothing on a DualShock 4.",
+                crate::i18n::tr("The lightbar follows this page. Player indicators and the mute light are DualSense only, so those controls do nothing on a DualShock 4."),
                 WARN,
             );
             ui.add_space(10.0);
@@ -46,7 +46,7 @@ impl App {
 
         two_columns(ui, |ui, col| {
             if col == 0 {
-                card(ui, "Lightbar", "", |ui| {
+                card(ui, crate::i18n::tr("Lightbar"), "", |ui| {
                     // Live preview strip.
                     let color = self.preview.lightbar(p, &input, loud, now);
                     let (r, _) = ui.allocate_exact_size(
@@ -71,8 +71,8 @@ impl App {
                     let mut follow = l.mode == LightMode::Audio;
                     if toggle_row(
                         ui,
-                        "Follow system audio",
-                        "Green when quiet, yellow in the middle, red when loud",
+                        crate::i18n::tr("Follow system audio"),
+                        crate::i18n::tr("Green when quiet, yellow in the middle, red when loud"),
                         &mut follow,
                     ) {
                         if follow {
@@ -93,47 +93,47 @@ impl App {
                             ui,
                             &mut l.mode,
                             &[
-                                (LightMode::Static, "Static"),
-                                (LightMode::Rainbow, "Rainbow"),
-                                (LightMode::Breathing, "Breathing"),
-                                (LightMode::Strobe, "Strobe"),
-                                (LightMode::Battery, "Battery"),
-                                (LightMode::Off, "Off"),
+                                (LightMode::Static, crate::i18n::tr("Static")),
+                                (LightMode::Rainbow, crate::i18n::tr("Rainbow")),
+                                (LightMode::Breathing, crate::i18n::tr("Breathing")),
+                                (LightMode::Strobe, crate::i18n::tr("Strobe")),
+                                (LightMode::Battery, crate::i18n::tr("Battery")),
+                                (LightMode::Off, crate::i18n::tr("Off")),
                             ],
                         );
                         ui.add_space(8.0);
                     }
                     match l.mode {
                         LightMode::Static | LightMode::Breathing | LightMode::Strobe => {
-                            row(ui, if l.mode == LightMode::Static { "Color" } else { "Color A" }, "", |ui| {
+                            row(ui, if l.mode == LightMode::Static { crate::i18n::tr("Color") } else { crate::i18n::tr("Color A") }, "", |ui| {
                                 color_picker::color_edit_button_srgb(ui, &mut l.color);
                             });
                             if let Some(c) = swatches(ui, l.color, &SWATCHES) {
                                 l.color = c;
                             }
                             if l.mode != LightMode::Static {
-                                row(ui, "Color B", "Breathing fades to this, strobe flashes to it", |ui| {
+                                row(ui, crate::i18n::tr("Color B"), crate::i18n::tr("Breathing fades to this, strobe flashes to it"), |ui| {
                                     color_picker::color_edit_button_srgb(ui, &mut l.color2);
                                 });
                             }
                         }
-                        LightMode::Rainbow => muted(ui, "Cycles the full hue wheel."),
-                        LightMode::Battery => muted(ui, "Red when low, amber in the middle, green when full. Pulses while charging."),
-                        LightMode::Off => muted(ui, "Lightbar off."),
+                        LightMode::Rainbow => muted(ui, crate::i18n::tr("Cycles the full hue wheel.")),
+                        LightMode::Battery => muted(ui, crate::i18n::tr("Red when low, amber in the middle, green when full. Pulses while charging.")),
+                        LightMode::Off => muted(ui, crate::i18n::tr("Lightbar off.")),
                         LightMode::Audio => {
-                            row(ui, "Quiet", "", |ui| {
+                            row(ui, crate::i18n::tr("Quiet"), "", |ui| {
                                 color_picker::color_edit_button_srgb(ui, &mut l.audio_quiet);
                             });
-                            row(ui, "Medium", "", |ui| {
+                            row(ui, crate::i18n::tr("Medium"), "", |ui| {
                                 color_picker::color_edit_button_srgb(ui, &mut l.audio_medium);
                             });
-                            row(ui, "Loud", "", |ui| {
+                            row(ui, crate::i18n::tr("Loud"), "", |ui| {
                                 color_picker::color_edit_button_srgb(ui, &mut l.audio_loud);
                             });
                             if slider_row(
                                 ui,
-                                "Yellow from",
-                                "Percent of full scale",
+                                crate::i18n::tr("Yellow from"),
+                                crate::i18n::tr("Percent of full scale"),
                                 &mut l.audio_medium_at,
                                 0..=100,
                                 "%",
@@ -143,8 +143,8 @@ impl App {
                             }
                             if slider_row(
                                 ui,
-                                "Red from",
-                                "Loud color at this level and above",
+                                crate::i18n::tr("Red from"),
+                                crate::i18n::tr("Loud color at this level and above"),
                                 &mut l.audio_loud_at,
                                 0..=100,
                                 "%",
@@ -154,19 +154,19 @@ impl App {
                             }
                             muted(
                                 ui,
-                                "Uses the output chosen on Haptics & audio, or the Windows default. A game's light still wins.",
+                                crate::i18n::tr("Uses the output chosen on Haptics & audio, or the Windows default. A game's light still wins."),
                             );
                         }
                     }
                     if l.mode != LightMode::Off {
-                        slider_row(ui, "Brightness", "", &mut l.brightness, 0..=100, "%");
+                        slider_row(ui, crate::i18n::tr("Brightness"), "", &mut l.brightness, 0..=100, "%");
                     }
                     if matches!(
                         l.mode,
                         LightMode::Rainbow | LightMode::Breathing | LightMode::Strobe
                     ) {
                         let mut sp = (l.speed * 100.0).round();
-                        if slider_row(ui, "Speed", "", &mut sp, 0.0..=100.0, "%") {
+                        if slider_row(ui, crate::i18n::tr("Speed"), "", &mut sp, 0.0..=100.0, "%") {
                             l.speed = sp / 100.0;
                         }
                     }
@@ -174,26 +174,26 @@ impl App {
                 ui.add_space(12.0);
                 card(
                     ui,
-                    "Low battery warning",
-                    "Blinks the lightbar twice every few seconds when the battery runs low",
+                    crate::i18n::tr("Low battery warning"),
+                    crate::i18n::tr("Blinks the lightbar twice every few seconds when the battery runs low"),
                     |ui| {
                         let l = &mut p.lighting;
                         toggle_row(
                             ui,
-                            "Blink when low",
-                            "Not while charging",
+                            crate::i18n::tr("Blink when low"),
+                            crate::i18n::tr("Not while charging"),
                             &mut l.low_battery_flash,
                         );
                         if l.low_battery_flash {
                             slider_row(
                                 ui,
-                                "Threshold",
+                                crate::i18n::tr("Threshold"),
                                 "",
                                 &mut l.low_battery_threshold,
                                 5..=50,
                                 "%",
                             );
-                            row(ui, "Warning color", "", |ui| {
+                            row(ui, crate::i18n::tr("Warning color"), "", |ui| {
                                 color_picker::color_edit_button_srgb(ui, &mut l.low_battery_color);
                             });
                         }
@@ -202,8 +202,8 @@ impl App {
             } else {
                 card(
                     ui,
-                    "Player indicator",
-                    "The five LEDs under the touchpad",
+                    crate::i18n::tr("Player indicator"),
+                    crate::i18n::tr("The five LEDs under the touchpad"),
                     |ui| {
                         let l = &mut p.lighting;
                         // LED preview / custom editor.
@@ -243,7 +243,7 @@ impl App {
                                 }
                             }
                         });
-                        muted(ui, "Click an LED to make a custom pattern.");
+                        muted(ui, crate::i18n::tr("Click an LED to make a custom pattern."));
                         ui.add_space(4.0);
                         let mut kind = match l.player_leds {
                             PlayerLeds::Player(n) => n as i32,
@@ -260,9 +260,9 @@ impl App {
                                 (3, "P3"),
                                 (4, "P4"),
                                 (5, "P5"),
-                                (10, "Custom"),
-                                (11, "Battery"),
-                                (0, "Off"),
+                                (10, crate::i18n::tr("Custom")),
+                                (11, crate::i18n::tr("Battery")),
+                                (0, crate::i18n::tr("Off")),
                             ],
                         ) {
                             l.player_leds = match kind {
@@ -273,35 +273,35 @@ impl App {
                             };
                         }
                         ui.add_space(6.0);
-                        row(ui, "LED brightness", "Player and mute LEDs", |ui| {
+                        row(ui, crate::i18n::tr("LED brightness"), crate::i18n::tr("Player and mute LEDs"), |ui| {
                             segmented(
                                 ui,
                                 &mut l.led_brightness,
                                 &[
-                                    (LedBrightness::Low, "Low"),
-                                    (LedBrightness::Medium, "Medium"),
-                                    (LedBrightness::High, "High"),
+                                    (LedBrightness::Low, crate::i18n::tr("Low")),
+                                    (LedBrightness::Medium, crate::i18n::tr("Medium")),
+                                    (LedBrightness::High, crate::i18n::tr("High")),
                                 ],
                             );
                         });
                     },
                 );
                 ui.add_space(12.0);
-                card(ui, "Mute button light", "", |ui| {
+                card(ui, crate::i18n::tr("Mute button light"), "", |ui| {
                     let l = &mut p.lighting;
                     segmented(
                         ui,
                         &mut l.mute_led,
                         &[
-                            (MuteLed::Off, "Off"),
-                            (MuteLed::On, "On"),
-                            (MuteLed::Pulse, "Pulse"),
-                            (MuteLed::Toggle, "Toggle with button"),
+                            (MuteLed::Off, crate::i18n::tr("Off")),
+                            (MuteLed::On, crate::i18n::tr("On")),
+                            (MuteLed::Pulse, crate::i18n::tr("Pulse")),
+                            (MuteLed::Toggle, crate::i18n::tr("Toggle with button")),
                         ],
                     );
                     if l.mute_led == MuteLed::Toggle {
                         ui.add_space(4.0);
-                        muted(ui, "Press the mute button to switch the light on and off.");
+                        muted(ui, crate::i18n::tr("Press the mute button to switch the light on and off."));
                     }
                 });
             }

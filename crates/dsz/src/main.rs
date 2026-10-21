@@ -16,6 +16,7 @@ mod flight;
 mod games;
 mod haptics;
 mod hid;
+mod i18n;
 mod icon_art;
 mod install;
 mod inputsim;

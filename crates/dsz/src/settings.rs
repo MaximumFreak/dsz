@@ -79,6 +79,7 @@ impl Default for GameRule {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub language: crate::i18n::Language,
     pub start_with_windows: bool,
     pub start_minimized: bool,
     pub close_to_tray: bool,
@@ -146,6 +147,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            language: crate::i18n::Language::English,
             start_with_windows: false,
             start_minimized: false,
             close_to_tray: true,

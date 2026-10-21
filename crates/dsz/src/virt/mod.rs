@@ -521,7 +521,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 } else {
                     detach(device);
                     engine.pads.destroy(engine, &p);
-                    engine.toast("Virtual controller disconnected");
+                    engine.toast(crate::i18n::tr("Virtual controller disconnected"));
                 }
             }
             if let Some(want) = want_some {
@@ -547,8 +547,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                         match engine.pads.create(want, &mac, Some(device)) {
                             Ok(p) => {
                                 attach(device, &p);
-                                engine.toast(format!(
-                                    "Virtual {} controller connected ({})",
+                                engine.toast(crate::localized_format!(
+                                    "Virtual {} controller connected ({})", "Controle virtual {} conectado ({})",
                                     p.kind().label(),
                                     p.target.backend()
                                 ));

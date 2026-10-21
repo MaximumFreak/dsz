@@ -14,16 +14,16 @@ use crate::ui::App;
 fn button_combo(ui: &mut egui::Ui, id: &str, b: &mut Button, edge: bool) {
     egui::ComboBox::from_id_salt(id)
         .width(150.0)
-        .selected_text(b.short_name())
+        .selected_text(crate::i18n::tr(b.short_name()))
         .show_ui(ui, |ui| {
             for c in button_choices(edge) {
-                ui.selectable_value(b, c, c.short_name());
+                ui.selectable_value(b, c, crate::i18n::tr(c.short_name()));
             }
         });
 }
 
 fn gyro_bars(ui: &mut egui::Ui, dps: [f32; 3]) {
-    for (label, v) in [("Pitch", dps[0]), ("Yaw", dps[1]), ("Roll", dps[2])] {
+    for (label, v) in [(crate::i18n::tr("Pitch"), dps[0]), (crate::i18n::tr("Yaw"), dps[1]), (crate::i18n::tr("Roll"), dps[2])] {
         ui.horizontal(|ui| {
             ui.label(RichText::new(label).size(12.5).color(MUTED));
             let (r, _) = ui.allocate_exact_size(
@@ -118,8 +118,8 @@ impl App {
     ) {
         page_header(
             ui,
-            "Motion & touch",
-            "Aim with the gyro, drive the cursor with the touchpad, or turn a stick into a mouse, scroll wheel, or keys.",
+            crate::i18n::tr("Motion & touch"),
+            crate::i18n::tr("Aim with the gyro, drive the cursor with the touchpad, or turn a stick into a mouse, scroll wheel, or keys."),
         );
         let mut live = dev.map(|d| d.snapshot()).unwrap_or_default();
         if dev.is_none() {
@@ -132,12 +132,12 @@ impl App {
             if col == 0 {
                 card(
                     ui,
-                    "Gyro mouse",
-                    "Tilt and turn the controller to move the cursor or aim",
+                    crate::i18n::tr("Gyro mouse"),
+                    crate::i18n::tr("Tilt and turn the controller to move the cursor or aim"),
                     |ui| {
                         let g = &mut p.gyro;
                         let mut on = g.mode == GyroMode::Mouse;
-                        if toggle_row(ui, "Enabled", "", &mut on) {
+                        if toggle_row(ui, crate::i18n::tr("Enabled"), "", &mut on) {
                             g.mode = if on { GyroMode::Mouse } else { GyroMode::Off };
                         }
                         if g.mode == GyroMode::Mouse {
@@ -147,7 +147,7 @@ impl App {
                                 GyroActivation::WhileNotHeld(b) => (2, b),
                                 GyroActivation::Toggle(b) => (3, b),
                             };
-                            row(ui, "Active", "", |ui| {
+                            row(ui, crate::i18n::tr("Active"), "", |ui| {
                                 if kind != 0 {
                                     button_combo(ui, "gyro-btn", &mut b, edge);
                                 }
@@ -155,18 +155,18 @@ impl App {
                                     .width(150.0)
                                     .selected_text(
                                         [
-                                            "Always",
-                                            "While holding",
-                                            "Unless holding",
-                                            "Toggle with",
+                                            crate::i18n::tr("Always"),
+                                            crate::i18n::tr("While holding"),
+                                            crate::i18n::tr("Unless holding"),
+                                            crate::i18n::tr("Toggle with"),
                                         ][kind],
                                     )
                                     .show_ui(ui, |ui| {
                                         for (i, l) in [
-                                            "Always",
-                                            "While holding",
-                                            "Unless holding",
-                                            "Toggle with",
+                                            crate::i18n::tr("Always"),
+                                            crate::i18n::tr("While holding"),
+                                            crate::i18n::tr("Unless holding"),
+                                            crate::i18n::tr("Toggle with"),
                                         ]
                                         .iter()
                                         .enumerate()
@@ -183,45 +183,45 @@ impl App {
                             };
                             slider_row(
                                 ui,
-                                "Sensitivity",
-                                "Pixels per degree",
+                                crate::i18n::tr("Sensitivity"),
+                                crate::i18n::tr("Pixels per degree"),
                                 &mut g.sensitivity,
                                 1.0..=80.0,
                                 "",
                             );
                             slider_row(
                                 ui,
-                                "Vertical ratio",
+                                crate::i18n::tr("Vertical ratio"),
                                 "",
                                 &mut g.vertical_ratio,
                                 0.2..=2.0,
                                 "×",
                             );
-                            row(ui, "Horizontal from", "", |ui| {
+                            row(ui, crate::i18n::tr("Horizontal from"), "", |ui| {
                                 segmented(
                                     ui,
                                     &mut g.axis,
                                     &[
-                                        (GyroAxis::Yaw, "Turn"),
-                                        (GyroAxis::Roll, "Lean"),
-                                        (GyroAxis::Combined, "Both"),
+                                        (GyroAxis::Yaw, crate::i18n::tr("Turn")),
+                                        (GyroAxis::Roll, crate::i18n::tr("Lean")),
+                                        (GyroAxis::Combined, crate::i18n::tr("Both")),
                                     ],
                                 );
                             });
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("Invert").color(TEXT));
+                                ui.label(RichText::new(crate::i18n::tr("Invert")).color(TEXT));
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        ui.checkbox(&mut g.invert_y, "Vertical");
-                                        ui.checkbox(&mut g.invert_x, "Horizontal");
+                                        ui.checkbox(&mut g.invert_y, crate::i18n::tr("Vertical"));
+                                        ui.checkbox(&mut g.invert_x, crate::i18n::tr("Horizontal"));
                                     },
                                 );
                             });
                             slider_row(
                                 ui,
-                                "Steadiness",
-                                "Softens tiny hand tremor",
+                                crate::i18n::tr("Steadiness"),
+                                crate::i18n::tr("Softens tiny hand tremor"),
                                 &mut g.deadzone,
                                 0.0..=8.0,
                                 " °/s",
@@ -229,8 +229,8 @@ impl App {
                             let mut sm = (g.smoothing * 100.0).round();
                             if slider_row(
                                 ui,
-                                "Smoothing",
-                                "Only slow motion is smoothed",
+                                crate::i18n::tr("Smoothing"),
+                                crate::i18n::tr("Only slow motion is smoothed"),
                                 &mut sm,
                                 0.0..=100.0,
                                 "%",
@@ -240,8 +240,8 @@ impl App {
                             let mut ac = (g.acceleration * 100.0).round();
                             if slider_row(
                                 ui,
-                                "Acceleration",
-                                "Extra speed for fast flicks",
+                                crate::i18n::tr("Acceleration"),
+                                crate::i18n::tr("Extra speed for fast flicks"),
                                 &mut ac,
                                 0.0..=200.0,
                                 "%",
@@ -252,20 +252,20 @@ impl App {
                         ui.separator();
                         ui.horizontal(|ui| {
                             let (t, c) = if live.calibrating {
-                                ("Calibrating — keep still", WARN)
+                                (crate::i18n::tr("Calibrating — keep still"), WARN)
                             } else if live.gyro_active {
-                                ("Moving the cursor", ACCENT)
+                                (crate::i18n::tr("Moving the cursor"), ACCENT)
                             } else {
-                                ("Live gyro", MUTED)
+                                (crate::i18n::tr("Live gyro"), MUTED)
                             };
                             pill(ui, t, c);
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if let Some(d) = dev {
-                                        if button(ui, "Calibrate")
+                                        if button(ui, crate::i18n::tr("Calibrate"))
                                             .on_hover_text(
-                                                "Lay the controller flat and still for 2 seconds",
+                                                crate::i18n::tr("Lay the controller flat and still for 2 seconds"),
                                             )
                                             .clicked()
                                         {
@@ -276,17 +276,17 @@ impl App {
                             );
                         });
                         gyro_bars(ui, live.gyro_dps);
-                        muted(ui, "Calibration also happens on its own whenever the controller rests still for a moment.");
+                        muted(ui, crate::i18n::tr("Calibration also happens on its own whenever the controller rests still for a moment."));
                     },
                 );
             } else {
-                card(ui, "Touchpad", "", |ui| {
+                card(ui, crate::i18n::tr("Touchpad"), "", |ui| {
                     let t = &mut p.touchpad;
                     let mut on = t.mode == TouchMode::Mouse;
                     if toggle_row(
                         ui,
-                        "Touchpad as mouse",
-                        "Off leaves the touchpad to the game",
+                        crate::i18n::tr("Touchpad as mouse"),
+                        crate::i18n::tr("Off leaves the touchpad to the game"),
                         &mut on,
                     ) {
                         t.mode = if on {
@@ -297,42 +297,42 @@ impl App {
                     }
                     touch_preview(ui, &live.input);
                     if t.mode == TouchMode::Mouse {
-                        slider_row(ui, "Speed", "", &mut t.sensitivity, 0.1..=4.0, "×");
-                        slider_row(ui, "Acceleration", "Faster swipes move further; 0 is steady", &mut t.acceleration, 0.0..=2.0, "");
+                        slider_row(ui, crate::i18n::tr("Speed"), "", &mut t.sensitivity, 0.1..=4.0, "×");
+                        slider_row(ui, crate::i18n::tr("Acceleration"), crate::i18n::tr("Faster swipes move further; 0 is steady"), &mut t.acceleration, 0.0..=2.0, "");
                         toggle_row(
                             ui,
-                            "Tap to click",
-                            "One finger is a left click, two a right click",
+                            crate::i18n::tr("Tap to click"),
+                            crate::i18n::tr("One finger is a left click, two a right click"),
                             &mut t.tap_to_click,
                         );
                         toggle_row(
                             ui,
-                            "Press to click",
-                            "Press with two fingers for a right click; hold the press and slide to drag",
+                            crate::i18n::tr("Press to click"),
+                            crate::i18n::tr("Press with two fingers for a right click; hold the press and slide to drag"),
                             &mut t.click_to_click,
                         );
                         if t.click_to_click {
                             toggle_row(
                                 ui,
-                                "Right side is right click",
-                                "Off: a press anywhere is a left click",
+                                crate::i18n::tr("Right side is right click"),
+                                crate::i18n::tr("Off: a press anywhere is a left click"),
                                 &mut t.right_half_right_click,
                             );
                         }
-                        toggle_row(ui, "Two-finger scroll", "", &mut t.two_finger_scroll);
+                        toggle_row(ui, crate::i18n::tr("Two-finger scroll"), "", &mut t.two_finger_scroll);
                         if t.two_finger_scroll {
-                            slider_row(ui, "Scroll speed", "", &mut t.scroll_speed, 0.1..=4.0, "×");
-                            toggle_row(ui, "Natural scrolling", "The page follows your fingers", &mut t.natural_scroll);
+                            slider_row(ui, crate::i18n::tr("Scroll speed"), "", &mut t.scroll_speed, 0.1..=4.0, "×");
+                            toggle_row(ui, crate::i18n::tr("Natural scrolling"), crate::i18n::tr("The page follows your fingers"), &mut t.natural_scroll);
                         }
                     }
                 });
                 ui.add_space(12.0);
                 card(
                     ui,
-                    "Sticks",
-                    "Without a virtual controller the game still sees the stick; with one, a stick set to mouse, scroll, or keys reads centered",
+                    crate::i18n::tr("Sticks"),
+                    crate::i18n::tr("Without a virtual controller the game still sees the stick; with one, a stick set to mouse, scroll, or keys reads centered"),
                     |ui| {
-                        for (left, label) in [(true, "Left stick"), (false, "Right stick")] {
+                        for (left, label) in [(true, crate::i18n::tr("Left stick")), (false, crate::i18n::tr("Right stick"))] {
                             let (x, y) = if left {
                                 (live.input.lx, live.input.ly)
                             } else {
@@ -356,27 +356,27 @@ impl App {
                                     egui::ComboBox::from_id_salt(format!("stick-{left}"))
                                         .width(170.0)
                                         .selected_text(match s.mode {
-                                            StickMode::Passthrough => "Game only",
-                                            StickMode::Mouse => "Mouse",
-                                            StickMode::Scroll => "Scroll wheel",
+                                            StickMode::Passthrough => crate::i18n::tr("Game only"),
+                                            StickMode::Mouse => crate::i18n::tr("Mouse"),
+                                            StickMode::Scroll => crate::i18n::tr("Scroll wheel"),
                                             StickMode::Wasd => "W A S D",
-                                            StickMode::Arrows => "Arrow keys",
+                                            StickMode::Arrows => crate::i18n::tr("Arrow keys"),
                                         })
                                         .show_ui(ui, |ui| {
                                             ui.selectable_value(
                                                 &mut s.mode,
                                                 StickMode::Passthrough,
-                                                "Game only",
+                                                crate::i18n::tr("Game only"),
                                             );
                                             ui.selectable_value(
                                                 &mut s.mode,
                                                 StickMode::Mouse,
-                                                "Mouse",
+                                                crate::i18n::tr("Mouse"),
                                             );
                                             ui.selectable_value(
                                                 &mut s.mode,
                                                 StickMode::Scroll,
-                                                "Scroll wheel",
+                                                crate::i18n::tr("Scroll wheel"),
                                             );
                                             ui.selectable_value(
                                                 &mut s.mode,
@@ -386,21 +386,21 @@ impl App {
                                             ui.selectable_value(
                                                 &mut s.mode,
                                                 StickMode::Arrows,
-                                                "Arrow keys",
+                                                crate::i18n::tr("Arrow keys"),
                                             );
                                         });
                                 });
                             });
                             if s.mode != StickMode::Passthrough {
                                 let mut dz = (s.deadzone * 100.0).round();
-                                if slider_row(ui, "Deadzone", "", &mut dz, 0.0..=60.0, "%") {
+                                if slider_row(ui, crate::i18n::tr("Deadzone"), "", &mut dz, 0.0..=60.0, "%") {
                                     s.deadzone = dz / 100.0;
                                 }
                                 match s.mode {
                                     StickMode::Mouse => {
                                         slider_row(
                                             ui,
-                                            "Speed",
+                                            crate::i18n::tr("Speed"),
                                             "",
                                             &mut s.mouse_speed,
                                             200.0..=4000.0,
@@ -408,8 +408,8 @@ impl App {
                                         );
                                         slider_row(
                                             ui,
-                                            "Curve",
-                                            "Higher is finer near the center",
+                                            crate::i18n::tr("Curve"),
+                                            crate::i18n::tr("Higher is finer near the center"),
                                             &mut s.curve,
                                             1.0..=3.5,
                                             "",
@@ -418,7 +418,7 @@ impl App {
                                     StickMode::Scroll => {
                                         slider_row(
                                             ui,
-                                            "Scroll speed",
+                                            crate::i18n::tr("Scroll speed"),
                                             "",
                                             &mut s.scroll_speed,
                                             0.1..=4.0,
@@ -429,7 +429,7 @@ impl App {
                                         let mut th = (s.key_threshold * 100.0).round();
                                         if slider_row(
                                             ui,
-                                            "Press point",
+                                            crate::i18n::tr("Press point"),
                                             "",
                                             &mut th,
                                             10.0..=95.0,

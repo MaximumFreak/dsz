@@ -51,7 +51,7 @@ impl Page {
         Page::Profiles,
         Page::Settings,
     ];
-    fn label(self) -> &'static str {
+    fn key(self) -> &'static str {
         match self {
             Page::Overview => "Overview",
             Page::Lighting => "Lighting",
@@ -64,6 +64,7 @@ impl Page {
             Page::Settings => "Settings",
         }
     }
+    fn label(self) -> &'static str { crate::i18n::tr(self.key()) }
     fn icon(self) -> &'static str {
         match self {
             Page::Overview => "◉",
@@ -181,7 +182,7 @@ impl App {
                 let n = name.to_ascii_lowercase();
                 Page::ALL
                     .into_iter()
-                    .find(|p| p.label().to_ascii_lowercase().starts_with(&n))
+                    .find(|p| p.key().to_ascii_lowercase().starts_with(&n))
             })
             .unwrap_or(Page::Overview);
         let edit_pin = args
@@ -287,9 +288,9 @@ impl App {
             ui.horizontal(|ui| {
                 ui.add_space(18.0);
                 let (txt, col) = if devs.is_empty() {
-                    ("No controller".to_string(), FAINT)
+                    (crate::i18n::tr("No controller").to_string(), FAINT)
                 } else {
-                    (format!("{} connected", devs.len()), GOOD)
+                    (crate::localized_format!("{} connected", "{} conectado(s)", devs.len()), GOOD)
                 };
                 let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
                 ui.painter().circle_filled(r.center(), 4.0, col);
@@ -300,14 +301,14 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
                     let b = egui::Button::new(
-                        RichText::new(format!("Update to {}", r.version)).size(12.5).color(ACCENT),
+                        RichText::new(crate::localized_format!("Update to {}", "Atualizar para {}", r.version)).size(12.5).color(ACCENT),
                     )
                     .fill(ACCENT_SOFT)
                     .stroke(egui::Stroke::NONE)
                     .corner_radius(CornerRadius::same(R_CTRL));
                     if ui
                         .add(b)
-                        .on_hover_text("A newer DSZ is out. Settings has the update and its notes.")
+                        .on_hover_text(crate::i18n::tr("A newer DSZ is out. Settings has the update and its notes."))
                         .clicked()
                     {
                         self.page = Page::Settings;
@@ -369,7 +370,7 @@ impl App {
             ui.set_min_height(40.0);
             let devs = self.engine.device_list();
             if devs.is_empty() {
-                widgets::pill(ui, "Waiting for a controller…", FAINT);
+                widgets::pill(ui, crate::i18n::tr("Waiting for a controller…"), FAINT);
             }
             for d in &devs {
                 let sel = dev.map(|x| x.id == d.id).unwrap_or(false);
@@ -379,7 +380,7 @@ impl App {
                 let conn = if d.is_bluetooth() { "BT" } else { "USB" };
                 let mut text = format!("{name}  ·  {conn}  ·  {}%", live.battery_percent);
                 if let Some(k) = d.virt.active() {
-                    text.push_str(&format!("  ·  as {}", k.label()));
+                    text.push_str(&crate::localized_format!("  ·  as {}", "  ·  como {}", k.label()));
                 }
                 let font = egui::FontId::proportional(13.0);
                 let w = ui.fonts(|f| f.layout_no_wrap(text.clone(), font.clone(), TEXT).size().x);
@@ -416,10 +417,10 @@ impl App {
                     self.edit_pin = None;
                 }
                 resp.on_hover_text(match link {
-                    Link::Live => "Connected",
-                    Link::Quiet => "No input recently (asleep, out of range, or interference)",
-                    Link::Opening => "Connecting…",
-                    Link::Error(_) => "Error",
+                    Link::Live => crate::i18n::tr("Connected"),
+                    Link::Quiet => crate::i18n::tr("No input recently (asleep, out of range, or interference)"),
+                    Link::Opening => crate::i18n::tr("Connecting…"),
+                    Link::Error(_) => crate::i18n::tr("Error"),
                 });
             }
 
@@ -450,11 +451,11 @@ impl App {
                     }
                     self.edit_pin = None;
                 }
-                ui.label(RichText::new("Profile").color(MUTED));
+                ui.label(RichText::new(crate::i18n::tr("Profile")).color(MUTED));
                 if let Some((p, exe)) = &*self.engine.game_override.read() {
                     if self.engine.settings.read().auto_profiles {
                         widgets::pill(ui, &format!("{exe} → {p}"), VIOLET).on_hover_text(
-                            "A game rule is active. Its profile is in use until the game closes.",
+                            crate::i18n::tr("A game rule is active. Its profile is in use until the game closes."),
                         );
                     }
                 }
@@ -475,14 +476,14 @@ impl App {
             ui.horizontal(|ui| {
                 widgets::pill(
                     ui,
-                    &format!("Editing \"{editing}\" — not active on this controller"),
+                    &crate::localized_format!("Editing \"{editing}\" — not active on this controller", "Editando \"{editing}\" — inativo neste controle"),
                     WARN,
                 );
-                if widgets::button(ui, "Edit active profile").clicked() {
+                if widgets::button(ui, crate::i18n::tr("Edit active profile")).clicked() {
                     self.edit_pin = None;
                 }
                 if let Some(d) = dev {
-                    if widgets::button(ui, "Activate").clicked() {
+                    if widgets::button(ui, crate::i18n::tr("Activate")).clicked() {
                         self.engine.set_device_profile(d, editing);
                         self.edit_pin = None;
                     }
@@ -494,8 +495,8 @@ impl App {
             let o = d.overrides.lock().clone();
             if o.any() {
                 ui.horizontal(|ui| {
-                    widgets::pill(ui, "A game mod is overriding some settings (UDP)", VIOLET);
-                    if widgets::button(ui, "Clear overrides").clicked() {
+                    widgets::pill(ui, crate::i18n::tr("A game mod is overriding some settings (UDP)"), VIOLET);
+                    if widgets::button(ui, crate::i18n::tr("Clear overrides")).clicked() {
                         *d.overrides.lock() = Default::default();
                         d.kick();
                     }
@@ -567,6 +568,7 @@ fn repaint_in(ctx: &egui::Context, ms: u64) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::i18n::set_language(self.engine.settings.read().language);
         self.frames += 1;
         if crate::update::take_settings_request() {
             self.page = Page::Settings;

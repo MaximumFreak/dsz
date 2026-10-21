@@ -35,14 +35,14 @@ impl App {
     ) {
         page_header(
             ui,
-            "Haptics & audio",
-            "Wireless haptic feedback over Bluetooth: feel game audio, button clicks, and rumble through the voice-coil actuators.",
+            crate::i18n::tr("Haptics & audio"),
+            crate::i18n::tr("Wireless haptic feedback over Bluetooth: feel game audio, button clicks, and rumble through the voice-coil actuators."),
         );
         let ds4 = dev.map(|d| d.model.is_dualshock4()).unwrap_or(false);
         if ds4 {
             note(
                 ui,
-                "A DualShock 4 has rumble motors, not the DualSense voice coils. Rumble and button clicks use classic rumble. The haptic stream and the speaker are DualSense only.",
+                crate::i18n::tr("A DualShock 4 has rumble motors, not the DualSense voice coils. Rumble and button clicks use classic rumble. The haptic stream and the speaker are DualSense only."),
                 WARN,
             );
             ui.add_space(10.0);
@@ -51,7 +51,7 @@ impl App {
         if !bt && !ds4 {
             note(
                 ui,
-                "This controller is on USB. PCM haptics stream over Bluetooth only, so rumble and button clicks use classic rumble here.",
+                crate::i18n::tr("This controller is on USB. PCM haptics stream over Bluetooth only, so rumble and button clicks use classic rumble here."),
                 WARN,
             );
             ui.add_space(10.0);
@@ -61,12 +61,12 @@ impl App {
 
         two_columns(ui, |ui, col| {
             if col == 0 {
-                card(ui, "Wireless haptics", "", |ui| {
+                card(ui, crate::i18n::tr("Wireless haptics"), "", |ui| {
                     let h = &mut p.haptics;
                     toggle_row(
                         ui,
-                        "Stream haptics",
-                        "Over Bluetooth, while there is something to play: system audio, clicks, trigger texture, or game haptics",
+                        crate::i18n::tr("Stream haptics"),
+                        crate::i18n::tr("Over Bluetooth, while there is something to play: system audio, clicks, trigger texture, or game haptics"),
                         &mut h.enabled,
                     );
                     if let Some(d) = dev {
@@ -78,22 +78,22 @@ impl App {
                         ui.horizontal(|ui| {
                             // Room for the two labels and the status pill.
                             let mw = ((ui.available_width() - 170.0) / 2.0).clamp(30.0, 120.0);
-                            ui.label(RichText::new("Left").color(MUTED));
+                            ui.label(RichText::new(crate::i18n::tr("Left")).color(MUTED));
                             meter(ui, lv[0], ACCENT, mw);
                             ui.add_space(8.0);
-                            ui.label(RichText::new("Right").color(MUTED));
+                            ui.label(RichText::new(crate::i18n::tr("Right")).color(MUTED));
                             meter(ui, lv[1], ACCENT, mw);
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     let (t, c) = if !h.enabled || !bt {
-                                        ("off".to_string(), FAINT)
+                                        (crate::i18n::tr("off").to_string(), FAINT)
                                     } else if streaming > 0 {
-                                        (format!("{streaming} pkt/s"), GOOD)
+                                        (crate::localized_format!("{streaming} pkt/s", "{streaming} pac/s"), GOOD)
                                     } else if d.pcm_mode.load(Ordering::Relaxed) {
-                                        ("idle".to_string(), MUTED)
+                                        (crate::i18n::tr("idle").to_string(), MUTED)
                                     } else {
-                                        ("standby".to_string(), MUTED)
+                                        (crate::i18n::tr("standby").to_string(), MUTED)
                                     };
                                     pill(ui, &t, c);
                                 },
@@ -103,7 +103,7 @@ impl App {
                         if under > 0 {
                             muted(
                                 ui,
-                                &format!("{under} audio gap(s) smoothed over since connect"),
+                                &crate::localized_format!("{under} audio gap(s) smoothed over since connect", "{under} falha(s) de áudio suavizada(s) desde a conexão"),
                             );
                         }
                     }
@@ -111,24 +111,24 @@ impl App {
                         return;
                     }
                     ui.add_space(6.0);
-                    row(ui, "Source", "", |ui| {
+                    row(ui, crate::i18n::tr("Source"), "", |ui| {
                         segmented(
                             ui,
                             &mut h.source,
                             &[
-                                (AudioSource::None, "Events only"),
-                                (AudioSource::SystemAudio, "System audio"),
+                                (AudioSource::None, crate::i18n::tr("Events only")),
+                                (AudioSource::SystemAudio, crate::i18n::tr("System audio")),
                             ],
                         );
                     });
                     if h.source == AudioSource::SystemAudio {
                         row(
                             ui,
-                            "Capture from",
-                            "What the PC plays on this output",
+                            crate::i18n::tr("Capture from"),
+                            crate::i18n::tr("What the PC plays on this output"),
                             |ui| {
                                 let label = if h.device.is_empty() {
-                                    "Windows default".to_string()
+                                    crate::i18n::tr("Windows default").to_string()
                                 } else {
                                     h.device.clone()
                                 };
@@ -139,7 +139,7 @@ impl App {
                                         ui.selectable_value(
                                             &mut h.device,
                                             String::new(),
-                                            "Windows default",
+                                            crate::i18n::tr("Windows default"),
                                         );
                                         for d in &devices {
                                             ui.selectable_value(&mut h.device, d.clone(), d);
@@ -149,12 +149,12 @@ impl App {
                         );
                         let peak = self.engine.audio.peak();
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new("Input").color(MUTED));
+                            ui.label(RichText::new(crate::i18n::tr("Input")).color(MUTED));
                             meter(ui, peak, VIOLET, 160.0);
                             if capture.running {
                                 ui.label(
-                                    RichText::new(format!(
-                                        "{} · {} Hz · {} ch",
+                                    RichText::new(crate::localized_format!(
+                                        "{} · {} Hz · {} ch", "{} · {} Hz · {} canais",
                                         capture.device, capture.rate, capture.channels
                                     ))
                                     .size(12.0)
@@ -165,42 +165,42 @@ impl App {
                             }
                         });
                         ui.add_space(4.0);
-                        slider_row(ui, "Intensity", "", &mut h.gain, 0.1..=6.0, "×");
+                        slider_row(ui, crate::i18n::tr("Intensity"), "", &mut h.gain, 0.1..=6.0, "×");
                         slider_row(
                             ui,
-                            "Low-pass",
-                            "Higher keeps more detail; lower is punchier",
+                            crate::i18n::tr("Low-pass"),
+                            crate::i18n::tr("Higher keeps more detail; lower is punchier"),
                             &mut h.low_pass_hz,
                             100.0..=1400.0,
                             " Hz",
                         );
                         slider_row(
                             ui,
-                            "High-pass",
-                            "Removes sub-bass rumble the actuators can't play",
+                            crate::i18n::tr("High-pass"),
+                            crate::i18n::tr("Removes sub-bass rumble the actuators can't play"),
                             &mut h.high_pass_hz,
                             5.0..=200.0,
                             " Hz",
                         );
                         toggle_row(
                             ui,
-                            "Stereo",
-                            "Left audio on the left grip, right on the right",
+                            crate::i18n::tr("Stereo"),
+                            crate::i18n::tr("Left audio on the left grip, right on the right"),
                             &mut h.stereo,
                         );
                     }
                     row(
                         ui,
-                        "Latency",
-                        "Buffer length: shorter is snappier, longer rides out radio hiccups",
+                        crate::i18n::tr("Latency"),
+                        crate::i18n::tr("Buffer length: shorter is snappier, longer rides out radio hiccups"),
                         |ui| {
                             segmented(
                                 ui,
                                 &mut h.latency,
                                 &[
-                                    (Latency::Short, "Short"),
-                                    (Latency::Medium, "Medium"),
-                                    (Latency::Long, "Long"),
+                                    (Latency::Short, crate::i18n::tr("Short")),
+                                    (Latency::Medium, crate::i18n::tr("Medium")),
+                                    (Latency::Long, crate::i18n::tr("Long")),
                                 ],
                             );
                         },
@@ -209,14 +209,14 @@ impl App {
             } else {
                 card(
                     ui,
-                    "Controller speaker",
-                    "Speaker sound over Bluetooth: a game's own speaker sounds through the virtual DualSense, and PC audio if you want it",
+                    crate::i18n::tr("Controller speaker"),
+                    crate::i18n::tr("Speaker sound over Bluetooth: a game's own speaker sounds through the virtual DualSense, and PC audio if you want it"),
                     |ui| {
                         let h = &mut p.haptics;
                         slider_row(
                             ui,
-                            "Volume",
-                            "0 keeps the speaker off",
+                            crate::i18n::tr("Volume"),
+                            crate::i18n::tr("0 keeps the speaker off"),
                             &mut h.speaker_volume,
                             0..=100,
                             "%",
@@ -224,8 +224,8 @@ impl App {
                         let mut pc = h.pc_audio_on_speaker;
                         if toggle_row(
                             ui,
-                            "PC audio on the speaker",
-                            "Plays the captured system audio (the haptics source) on the speaker too",
+                            crate::i18n::tr("PC audio on the speaker"),
+                            crate::i18n::tr("Plays the captured system audio (the haptics source) on the speaker too"),
                             &mut pc,
                         ) {
                             h.pc_audio_on_speaker = pc;
@@ -236,14 +236,14 @@ impl App {
                         }
                         toggle_row(
                             ui,
-                            "Headset when plugged in",
-                            "Sends speaker sound to a headset in the controller's jack instead",
+                            crate::i18n::tr("Headset when plugged in"),
+                            crate::i18n::tr("Sends speaker sound to a headset in the controller's jack instead"),
                             &mut h.headset_when_plugged,
                         );
                         if let Some(d) = dev {
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("Speaker sound").color(MUTED));
+                                ui.label(RichText::new(crate::i18n::tr("Speaker sound")).color(MUTED));
                                 meter(
                                     ui,
                                     d.speaker_level.load(Ordering::Relaxed) as f32 / 255.0,
@@ -254,20 +254,20 @@ impl App {
                             if bt && h.enabled && h.speaker_volume > 0 {
                                 ui.add_space(6.0);
                                 let busy = d.game_audio.lock().is_some();
-                                if button(ui, "Test speaker").clicked() && !busy {
+                                if button(ui, crate::i18n::tr("Test speaker")).clicked() && !busy {
                                     d.start_speaker_test();
                                 }
-                                muted(ui, "Four rising notes, then a steady tone. The controller's microphone listens for clicks.");
+                                muted(ui, crate::i18n::tr("Four rising notes, then a steady tone. The controller's microphone listens for clicks."));
                                 if let Some(r) = d.speaker_test_result.lock().as_ref() {
                                     muted(ui, r);
                                 }
                                 if busy && d.mic_tap.lock().is_none() {
-                                    muted(ui, "A game is using the virtual DualSense; its speaker sound plays here.");
+                                    muted(ui, crate::i18n::tr("A game is using the virtual DualSense; its speaker sound plays here."));
                                 }
                             }
                         }
                         if !bt || !p.haptics.enabled {
-                            muted(ui, "Needs Bluetooth and haptics streaming on.");
+                            muted(ui, crate::i18n::tr("Needs Bluetooth and haptics streaming on."));
                         }
                     },
                 );
@@ -278,24 +278,24 @@ impl App {
             if col == 0 {
                 card(
                     ui,
-                    "Event haptics",
-                    "Generated feedback that does not depend on game audio",
+                    crate::i18n::tr("Event haptics"),
+                    crate::i18n::tr("Generated feedback that does not depend on game audio"),
                     |ui| {
                         let h = &mut p.haptics;
                         toggle_row(
                             ui,
-                            "Button clicks",
-                            "A crisp tap under the grip you pressed",
+                            crate::i18n::tr("Button clicks"),
+                            crate::i18n::tr("A crisp tap under the grip you pressed"),
                             &mut h.buttons.enabled,
                         );
                         if h.buttons.enabled {
                             let mut pct = (h.buttons.intensity * 100.0).round();
-                            if slider_row(ui, "Strength", "", &mut pct, 5.0..=100.0, "%") {
+                            if slider_row(ui, crate::i18n::tr("Strength"), "", &mut pct, 5.0..=100.0, "%") {
                                 h.buttons.intensity = pct / 100.0;
                             }
                             slider_row(
                                 ui,
-                                "Pitch",
+                                crate::i18n::tr("Pitch"),
                                 "",
                                 &mut h.buttons.frequency,
                                 60.0..=400.0,
@@ -303,14 +303,14 @@ impl App {
                             );
                             slider_row(
                                 ui,
-                                "Length",
+                                crate::i18n::tr("Length"),
                                 "",
                                 &mut h.buttons.duration_ms,
                                 15.0..=150.0,
                                 " ms",
                             );
                             if let Some(d) = dev {
-                                if button(ui, "Try it").clicked() {
+                                if button(ui, crate::i18n::tr("Try it")).clicked() {
                                     d.pulse(HapticPulse {
                                         left: h.buttons.intensity,
                                         right: h.buttons.intensity,
@@ -323,18 +323,18 @@ impl App {
                         ui.separator();
                         toggle_row(
                             ui,
-                            "Trigger texture",
-                            "A hum that grows as you pull L2 / R2",
+                            crate::i18n::tr("Trigger texture"),
+                            crate::i18n::tr("A hum that grows as you pull L2 / R2"),
                             &mut h.triggers.enabled,
                         );
                         if h.triggers.enabled {
                             let mut pct = (h.triggers.intensity * 100.0).round();
-                            if slider_row(ui, "Strength", "", &mut pct, 5.0..=100.0, "%") {
+                            if slider_row(ui, crate::i18n::tr("Strength"), "", &mut pct, 5.0..=100.0, "%") {
                                 h.triggers.intensity = pct / 100.0;
                             }
                             slider_row(
                                 ui,
-                                "Pitch",
+                                crate::i18n::tr("Pitch"),
                                 "",
                                 &mut h.triggers.frequency,
                                 20.0..=300.0,
@@ -343,20 +343,20 @@ impl App {
                         }
                         if !bt || !h.enabled {
                             ui.add_space(4.0);
-                            muted(ui, "Without streaming, button clicks fall back to a short classic rumble.");
+                            muted(ui, crate::i18n::tr("Without streaming, button clicks fall back to a short classic rumble."));
                         }
                     },
                 );
             } else {
                 card(
                     ui,
-                    "Rumble",
-                    "Game and test rumble. The controller's own rumble emulation plays it, unless haptics are streaming",
+                    crate::i18n::tr("Rumble"),
+                    crate::i18n::tr("Game and test rumble. The controller's own rumble emulation plays it, unless haptics are streaming"),
                     |ui| {
                     let r = &mut p.rumble;
                     // Eight hardware steps of 12.5 %, shown as the power left.
                     let mut pct = 100.0 - 12.5 * r.power_reduction.min(7) as f32;
-                    let moved = row(ui, "Power", "Controller rumble power", |ui| {
+                    let moved = row(ui, crate::i18n::tr("Power"), crate::i18n::tr("Controller rumble power"), |ui| {
                         ui.add(
                             egui::Slider::new(&mut pct, 12.5..=100.0)
                                 .step_by(12.5)
@@ -371,23 +371,23 @@ impl App {
                     }
                     toggle_row(
                         ui,
-                        "Improved rumble",
-                        "Smoother rumble emulation (firmware 2.24 and later)",
+                        crate::i18n::tr("Improved rumble"),
+                        crate::i18n::tr("Smoother rumble emulation (firmware 2.24 and later)"),
                         &mut r.enhanced,
                     );
                     if bt && p.haptics.enabled {
                         let h = &mut p.haptics;
                         toggle_row(
                             ui,
-                            "Rumble as haptics",
-                            "Always play rumble on the haptic stream. Off: only while system audio, clicks, trigger texture, or game haptics are streaming",
+                            crate::i18n::tr("Rumble as haptics"),
+                            crate::i18n::tr("Always play rumble on the haptic stream. Off: only while system audio, clicks, trigger texture, or game haptics are streaming"),
                             &mut h.rumble_as_haptics,
                         );
                         let mut pct = (h.rumble_intensity * 100.0).round();
                         if slider_row(
                             ui,
-                            "Haptic rumble strength",
-                            "When rumble plays on the haptic stream",
+                            crate::i18n::tr("Haptic rumble strength"),
+                            crate::i18n::tr("When rumble plays on the haptic stream"),
                             &mut pct,
                             0.0..=200.0,
                             "%",
@@ -397,13 +397,13 @@ impl App {
                     }
                     if let Some(d) = dev {
                         ui.horizontal(|ui| {
-                            if button(ui, "Heavy").clicked() {
+                            if button(ui, crate::i18n::tr("Heavy")).clicked() {
                                 d.test_rumble(255, 0, 450);
                             }
-                            if button(ui, "Light").clicked() {
+                            if button(ui, crate::i18n::tr("Light")).clicked() {
                                 d.test_rumble(0, 255, 450);
                             }
-                            if button(ui, "Both").clicked() {
+                            if button(ui, crate::i18n::tr("Both")).clicked() {
                                 d.test_rumble(200, 200, 450);
                             }
                         });

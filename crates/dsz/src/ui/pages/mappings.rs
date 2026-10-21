@@ -68,11 +68,11 @@ const KINDS: [(AKind, &str); 15] = [
 
 fn mouse_label(b: MouseButton) -> &'static str {
     match b {
-        MouseButton::Left => "Left",
-        MouseButton::Right => "Right",
-        MouseButton::Middle => "Middle",
-        MouseButton::Back => "Back",
-        MouseButton::Forward => "Forward",
+        MouseButton::Left => crate::i18n::tr("Left"),
+        MouseButton::Right => crate::i18n::tr("Right"),
+        MouseButton::Middle => crate::i18n::tr("Middle"),
+        MouseButton::Back => crate::i18n::tr("Back"),
+        MouseButton::Forward => crate::i18n::tr("Forward"),
     }
 }
 
@@ -85,8 +85,8 @@ impl App {
     ) {
         page_header(
             ui,
-            "Button mapping",
-            "Send keys, mouse buttons, media keys, or app actions from any button or combo, including turning a Bluetooth controller off. Touchpad Left, Center, and Right are the click in each third of the pad. Touchpad is still the whole click. With a virtual controller on, a mapping can also hide its button from the game or press a different controller button. Xbox buttons work on any profile, so the Xbox button can open Game Bar (tap) or Task View (hold).",
+            crate::i18n::tr("Button mapping"),
+            crate::i18n::tr("Send keys, mouse buttons, media keys, or app actions from any button or combo, including turning a Bluetooth controller off. Touchpad Left, Center, and Right are the click in each third of the pad. Touchpad is still the whole click. With a virtual controller on, a mapping can also hide its button from the game or press a different controller button. Xbox buttons work on any profile, so the Xbox button can open Game Bar (tap) or Task View (hold)."),
         );
         let edge = self
             .engine
@@ -132,10 +132,10 @@ impl App {
             card(ui, "", "", |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(10.0);
-                    ui.label(RichText::new("No mappings yet").font(heading(16.0)));
+                    ui.label(RichText::new(crate::i18n::tr("No mappings yet")).font(heading(16.0)));
                     muted(
                         ui,
-                        "Add one to turn a button into a key press, a click, or a shortcut.",
+                        crate::i18n::tr("Add one to turn a button into a key press, a click, or a shortcut."),
                     );
                     ui.add_space(10.0);
                 });
@@ -160,7 +160,7 @@ impl App {
                         egui::pos2(top.x + row_w - 20.0, top.y),
                         egui::vec2(20.0, 28.0),
                     );
-                    let xr = ui.interact(x, ui.id().with(("map-x", i)), egui::Sense::click()).on_hover_text("Remove");
+                    let xr = ui.interact(x, ui.id().with(("map-x", i)), egui::Sense::click()).on_hover_text(crate::i18n::tr("Remove"));
                     ui.painter().text(
                         x.center(),
                         egui::Align2::CENTER_CENTER,
@@ -178,24 +178,24 @@ impl App {
                         fit(ui, 130.0);
                         egui::ComboBox::from_id_salt(("map-btn", i))
                             .width(130.0)
-                            .selected_text(RichText::new(m.button.short_name()).strong())
+                            .selected_text(RichText::new(crate::i18n::tr(m.button.short_name())).strong())
                             .show_ui(ui, |ui| {
                                 for b in button_choices(edge) {
-                                    ui.selectable_value(&mut m.button, b, b.short_name());
+                                    ui.selectable_value(&mut m.button, b, crate::i18n::tr(b.short_name()));
                                 }
                             });
                         fit(ui, 120.0);
                         egui::ComboBox::from_id_salt(("map-act", i))
                             .width(120.0)
                             .selected_text(match m.gesture {
-                                Gesture::Press => "Press",
-                                Gesture::LongPress => "Long press",
-                                Gesture::DoubleTap => "Double tap",
+                                Gesture::Press => crate::i18n::tr("Press"),
+                                Gesture::LongPress => crate::i18n::tr("Long press"),
+                                Gesture::DoubleTap => crate::i18n::tr("Double tap"),
                             })
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut m.gesture, Gesture::Press, "Press");
-                                ui.selectable_value(&mut m.gesture, Gesture::LongPress, "Long press");
-                                ui.selectable_value(&mut m.gesture, Gesture::DoubleTap, "Double tap");
+                                ui.selectable_value(&mut m.gesture, Gesture::Press, crate::i18n::tr("Press"));
+                                ui.selectable_value(&mut m.gesture, Gesture::LongPress, crate::i18n::tr("Long press"));
+                                ui.selectable_value(&mut m.gesture, Gesture::DoubleTap, crate::i18n::tr("Double tap"));
                             });
                         ui.label(RichText::new("→").color(MUTED).size(16.0));
                         let mut k = akind(&m.action);
@@ -203,10 +203,10 @@ impl App {
                         fit(ui, 170.0);
                         egui::ComboBox::from_id_salt(("map-kind", i))
                             .width(170.0)
-                            .selected_text(KINDS.iter().find(|x| x.0 == k).map(|x| x.1).unwrap_or(""))
+                            .selected_text(crate::i18n::tr(KINDS.iter().find(|x| x.0 == k).map(|x| x.1).unwrap_or("")))
                             .show_ui(ui, |ui| {
                                 for (kk, l) in KINDS {
-                                    ui.selectable_value(&mut k, kk, l);
+                                    ui.selectable_value(&mut k, kk, crate::i18n::tr(l));
                                 }
                             });
                         if k != before {
@@ -249,7 +249,7 @@ impl App {
                                     });
                                 let rec = self.capture_key == Some(i);
                                 if ui
-                                    .add(egui::Button::new(if rec { "Press a key…" } else { "Record" }).fill(if rec { ACCENT } else { CARD_HI }))
+                                    .add(egui::Button::new(if rec { crate::i18n::tr("Press a key…") } else { crate::i18n::tr("Record") }).fill(if rec { ACCENT } else { CARD_HI }))
                                     .clicked()
                                 {
                                     capture = Some(if rec { None } else { Some(i) });
@@ -274,10 +274,10 @@ impl App {
                                 fit(ui, 150.0);
                                 egui::ComboBox::from_id_salt(("map-media", i))
                                     .width(150.0)
-                                    .selected_text(key.label())
+                                    .selected_text(crate::i18n::tr(key.label()))
                                     .show_ui(ui, |ui| {
                                         for k in MediaKey::ALL {
-                                            ui.selectable_value(key, k, k.label());
+                                            ui.selectable_value(key, k, crate::i18n::tr(k.label()));
                                         }
                                     });
                             }
@@ -285,7 +285,7 @@ impl App {
                                 fit(ui, 170.0);
                                 egui::ComboBox::from_id_salt(("map-prof", i))
                                     .width(170.0)
-                                    .selected_text(if name.is_empty() { "Choose…" } else { name.as_str() })
+                                    .selected_text(if name.is_empty() { crate::i18n::tr("Choose…") } else { name.as_str() })
                                     .show_ui(ui, |ui| {
                                         for n in &profile_names {
                                             ui.selectable_value(name, n.clone(), n);
@@ -296,60 +296,60 @@ impl App {
                                 fit(ui, 130.0);
                                 egui::ComboBox::from_id_salt(("map-pad", i))
                                     .width(130.0)
-                                    .selected_text(button.short_name())
+                                    .selected_text(crate::i18n::tr(button.short_name()))
                                     .show_ui(ui, |ui| {
                                         for b in button_choices(false) {
                                             if b.is_touchpad_zone() {
                                                 continue;
                                             }
-                                            ui.selectable_value(button, b, b.short_name());
+                                            ui.selectable_value(button, b, crate::i18n::tr(b.short_name()));
                                         }
                                     });
                                 if !virtual_on {
-                                    ui.label(RichText::new("needs a virtual controller").size(12.0).color(WARN));
+                                    ui.label(RichText::new(crate::i18n::tr("needs a virtual controller")).size(12.0).color(WARN));
                                 }
                             }
                             Action::Xbox { button } => {
                                 fit(ui, 130.0);
                                 egui::ComboBox::from_id_salt(("map-xbox", i))
                                     .width(130.0)
-                                    .selected_text(button.label())
+                                    .selected_text(crate::i18n::tr(button.label()))
                                     .show_ui(ui, |ui| {
                                         for b in XboxPadButton::ALL {
-                                            ui.selectable_value(button, b, b.label());
+                                            ui.selectable_value(button, b, crate::i18n::tr(b.label()));
                                         }
                                     });
                                 if !xbox_on && can_hide {
-                                    ui.label(RichText::new("hidden helper Xbox controller").size(12.0).color(MUTED))
-                                        .on_hover_text("This profile has no virtual Xbox controller, so DSZ keeps a helper one plugged in, hidden from games with HidHide. Only Windows (Task View, Game Bar) sees it. Needs usbip-win2.");
+                                    ui.label(RichText::new(crate::i18n::tr("hidden helper Xbox controller")).size(12.0).color(MUTED))
+                                        .on_hover_text(crate::i18n::tr("This profile has no virtual Xbox controller, so DSZ keeps a helper one plugged in, hidden from games with HidHide. Only Windows (Task View, Game Bar) sees it. Needs usbip-win2."));
                                 } else if !xbox_on {
-                                    ui.label(RichText::new("games see a helper controller").size(12.0).color(WARN))
-                                        .on_hover_text("Without HidHide, DSZ plugs in a helper Xbox controller for the press, which games can see, and unplugs it 30 seconds after the last press. Windows needs about a second to see it, so the first press arrives late. Install HidHide on the Virtual controller page to hide it.");
+                                    ui.label(RichText::new(crate::i18n::tr("games see a helper controller")).size(12.0).color(WARN))
+                                        .on_hover_text(crate::i18n::tr("Without HidHide, DSZ plugs in a helper Xbox controller for the press, which games can see, and unplugs it 30 seconds after the last press. Windows needs about a second to see it, so the first press arrives late. Install HidHide on the Virtual controller page to hide it."));
                                 }
                             }
                             Action::Run { path } => {
                                 ui.add(egui::TextEdit::singleline(path).hint_text("C:\\path\\to\\app.exe").desired_width(220.0));
-                                if button(ui, "Browse…").clicked() {
+                                if button(ui, crate::i18n::tr("Browse…")).clicked() {
                                     if let Some(f) = rfd::FileDialog::new().pick_file() {
                                         *path = f.display().to_string();
                                     }
                                 }
                             }
                             Action::TurnOffController => {
-                                ui.label(RichText::new("powers off over Bluetooth").size(12.0).color(MUTED))
-                                    .on_hover_text("Drops the Bluetooth link, which turns the controller off. Plugged in over USB, it stays on.");
+                                ui.label(RichText::new(crate::i18n::tr("powers off over Bluetooth")).size(12.0).color(MUTED))
+                                    .on_hover_text(crate::i18n::tr("Drops the Bluetooth link, which turns the controller off. Plugged in over USB, it stays on."));
                             }
                             _ => {}
                         }
                     });
                     });
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("Together with").size(12.5).color(MUTED));
+                        ui.label(RichText::new(crate::i18n::tr("Together with")).size(12.5).color(MUTED));
                         let mut chosen: Vec<Button> = m.with.iter().copied().filter(|b| *b != m.button).collect();
                         let label = if chosen.is_empty() {
-                            "nothing (single button)".to_string()
+                            crate::i18n::tr("nothing (single button)").to_string()
                         } else {
-                            chosen.iter().map(|b| b.short_name()).collect::<Vec<_>>().join(" + ")
+                            chosen.iter().map(|b| crate::i18n::tr(b.short_name())).collect::<Vec<_>>().join(" + ")
                         };
                         fit(ui, 170.0);
                         egui::ComboBox::from_id_salt(("map-with", i)).width(170.0).selected_text(label).show_ui(ui, |ui| {
@@ -358,7 +358,7 @@ impl App {
                                     continue;
                                 }
                                 let mut on = chosen.contains(&b);
-                                if ui.checkbox(&mut on, b.short_name()).changed() {
+                                if ui.checkbox(&mut on, crate::i18n::tr(b.short_name())).changed() {
                                     if on {
                                         chosen.push(b);
                                     } else {
@@ -370,34 +370,34 @@ impl App {
                         chosen.sort();
                         m.with = chosen;
                         ui.add_space(10.0);
-                        ui.checkbox(&mut m.mute, "Hide from game")
+                        ui.checkbox(&mut m.mute, crate::i18n::tr("Hide from game"))
                             .on_hover_text(if m.is_combo() {
-                                "While the combo is held, the virtual controller doesn't see these buttons."
+                                crate::i18n::tr("While the combo is held, the virtual controller doesn't see these buttons.")
                             } else {
-                                "The virtual controller never sees this button. Needs a virtual controller."
+                                crate::i18n::tr("The virtual controller never sees this button. Needs a virtual controller.")
                             });
                     });
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("Behavior").size(12.5).color(MUTED));
+                        ui.label(RichText::new(crate::i18n::tr("Behavior")).size(12.5).color(MUTED));
                         fit(ui, 290.0);
                         segmented(
                             ui,
                             &mut m.mode,
                             &[
-                                (HoldStyle::Hold, "Hold"),
-                                (HoldStyle::Tap, "Tap"),
+                                (HoldStyle::Hold, crate::i18n::tr("Hold")),
+                                (HoldStyle::Tap, crate::i18n::tr("Tap")),
                                 (HoldStyle::Turbo, "Turbo"),
-                                (HoldStyle::Toggle, "Toggle"),
+                                (HoldStyle::Toggle, crate::i18n::tr("Toggle")),
                             ],
                         );
                         if m.mode == HoldStyle::Turbo {
                             fit(ui, 260.0);
-                            ui.add(egui::Slider::new(&mut m.turbo_ms, 30..=1000).suffix(" ms").text("interval"));
+                            ui.add(egui::Slider::new(&mut m.turbo_ms, 30..=1000).suffix(" ms").text(crate::i18n::tr("interval")));
                         }
                         match m.gesture {
                             Gesture::LongPress => {
                                 fit(ui, 260.0);
-                                ui.add(egui::Slider::new(&mut m.long_ms, 150..=2000).suffix(" ms").text("hold for"));
+                                ui.add(egui::Slider::new(&mut m.long_ms, 150..=2000).suffix(" ms").text(crate::i18n::tr("hold for")));
                             }
                             Gesture::DoubleTap => {
                                 fit(ui, 260.0);
@@ -417,7 +417,7 @@ impl App {
             self.capture_key = c;
         }
         ui.horizontal(|ui| {
-            if primary_button(ui, "+ Add mapping").clicked() {
+            if primary_button(ui, crate::i18n::tr("+ Add mapping")).clicked() {
                 p.mappings.push(Mapping {
                     action: Action::Key {
                         vk: 0x20,
@@ -429,14 +429,14 @@ impl App {
                     ..Default::default()
                 });
             }
-            if !p.mappings.is_empty() && button(ui, "Remove all").clicked() {
+            if !p.mappings.is_empty() && button(ui, crate::i18n::tr("Remove all")).clicked() {
                 p.mappings.clear();
             }
         });
         ui.add_space(12.0);
         note(
             ui,
-            "Hold sends the output while held, Tap sends one click, Turbo repeats, Toggle latches on and off. Long press and double tap fire only when the gesture completes. Touchpad Left, Center, and Right follow the finger when the pad clicks: left of 640, the middle, and 1280 or further, on the 1920-wide pad. A click with no finger is Touchpad only. Hiding a zone from the game hides that click.",
+            crate::i18n::tr("Hold sends the output while held, Tap sends one click, Turbo repeats, Toggle latches on and off. Long press and double tap fire only when the gesture completes. Touchpad Left, Center, and Right follow the finger when the pad clicks: left of 640, the middle, and 1280 or further, on the 1920-wide pad. A click with no finger is Touchpad only. Hiding a zone from the game hides that click."),
             ACCENT,
         );
     }
