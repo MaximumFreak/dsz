@@ -803,11 +803,26 @@ impl Default for CurveDeadzone {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct StickReach {
+    pub enabled: bool,
+    /// Percent, clockwise from up, one point every 22.5 degrees.
+    pub gains: [f32; 16],
+}
+
+impl Default for StickReach {
+    fn default() -> Self {
+        StickReach { enabled: false, gains: [100.0; 16] }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StickDeadzone {
     pub shape: DeadzoneShape,
     /// Percent of full deflection, for radial and axial.
     pub size: u8,
     pub curve: CurveDeadzone,
+    pub reach: StickReach,
 }
 
 impl Default for StickDeadzone {
@@ -816,6 +831,7 @@ impl Default for StickDeadzone {
             shape: DeadzoneShape::Radial,
             size: 8,
             curve: CurveDeadzone::default(),
+            reach: StickReach::default(),
         }
     }
 }
@@ -1284,6 +1300,22 @@ mod tests {
         assert!(!p.microphone.enabled);
         assert_eq!(p.microphone.gain_percent, 100);
         assert_eq!(p.microphone.source, MicrophoneSource::Auto);
+        assert_eq!(p.virtual_out.left_deadzone.reach, StickReach::default());
+        assert_eq!(p.virtual_out.right_deadzone.reach, StickReach::default());
+    }
+
+    #[test]
+    fn stick_reach_defaults_and_round_trips() {
+        let old: StickDeadzone = serde_json::from_str(r#"{"shape":"Curve","size":12,"curve":{"outer":91.0}}"#).unwrap();
+        assert_eq!(old.shape, DeadzoneShape::Curve);
+        assert_eq!(old.curve.outer, 91.0);
+        assert_eq!(old.reach, StickReach::default());
+        let mut p = Profile::default();
+        p.virtual_out.left_deadzone.reach.enabled = true;
+        p.virtual_out.left_deadzone.reach.gains[8] = 116.0;
+        p.virtual_out.right_deadzone.reach.gains[0] = 75.5;
+        let q: Profile = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(p, q);
     }
 
     #[test]
