@@ -572,7 +572,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                             Ok(p) => {
                                 attach(device, &p);
                                 engine.toast(crate::localized_format!(
-                                    "Virtual {} controller connected ({})", "Controle virtual {} conectado ({})",
+                                    "Virtual {} controller connected ({})", "Controle virtual {} conectado ({})", "Mando virtual {} conectado ({})",
                                     p.kind().label(),
                                     p.target.backend()
                                 ));

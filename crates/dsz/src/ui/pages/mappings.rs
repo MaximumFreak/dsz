@@ -76,6 +76,10 @@ fn mouse_label(b: MouseButton) -> &'static str {
     }
 }
 
+fn key_label(vk: u16) -> String {
+    crate::i18n::tr(&key_name(vk)).to_string()
+}
+
 impl App {
     pub(crate) fn page_mappings(
         &mut self,
@@ -240,11 +244,11 @@ impl App {
                                 fit(ui, 110.0);
                                 egui::ComboBox::from_id_salt(("map-key", i))
                                     .width(110.0)
-                                    .selected_text(key_name(*vk))
+                                    .selected_text(key_label(*vk))
                                     .height(320.0)
                                     .show_ui(ui, |ui| {
                                         for c in key_catalog() {
-                                            ui.selectable_value(vk, c, key_name(c));
+                                            ui.selectable_value(vk, c, key_label(c));
                                         }
                                     });
                                 let rec = self.capture_key == Some(i);
@@ -255,7 +259,7 @@ impl App {
                                     capture = Some(if rec { None } else { Some(i) });
                                 }
                                 ui.checkbox(ctrl, "Ctrl");
-                                ui.checkbox(shift, "Shift");
+                                ui.checkbox(shift, crate::i18n::tr("Shift"));
                                 ui.checkbox(alt, "Alt");
                                 ui.checkbox(win, "Win");
                             }

@@ -1153,7 +1153,7 @@ impl ProfileStore {
     pub fn import(&self, path: &Path) -> Result<String, String> {
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut p: Profile = serde_json::from_str(text.trim_start_matches(crate::settings::BOM))
-            .map_err(|e| format!("Not a profile: {e}"))?;
+            .map_err(|e| crate::localized_format!("Not a profile: {e}", "Não é um perfil: {e}", "No es un perfil: {e}"))?;
         if p.name.trim().is_empty() {
             p.name = path
                 .file_stem()
