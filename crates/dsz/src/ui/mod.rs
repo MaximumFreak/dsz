@@ -290,7 +290,7 @@ impl App {
                 let (txt, col) = if devs.is_empty() {
                     (crate::i18n::tr("No controller").to_string(), FAINT)
                 } else {
-                    (crate::localized_format!("{} connected", "{} conectado(s)", devs.len()), GOOD)
+                    (crate::localized_format!("{} connected", "{} conectado(s)", "{} conectado(s)", devs.len()), GOOD)
                 };
                 let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
                 ui.painter().circle_filled(r.center(), 4.0, col);
@@ -301,7 +301,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
                     let b = egui::Button::new(
-                        RichText::new(crate::localized_format!("Update to {}", "Atualizar para {}", r.version)).size(12.5).color(ACCENT),
+                        RichText::new(crate::localized_format!("Update to {}", "Atualizar para {}", "Actualizar a {}", r.version)).size(12.5).color(ACCENT),
                     )
                     .fill(ACCENT_SOFT)
                     .stroke(egui::Stroke::NONE)
@@ -380,7 +380,7 @@ impl App {
                 let conn = if d.is_bluetooth() { "BT" } else { "USB" };
                 let mut text = format!("{name}  ·  {conn}  ·  {}%", live.battery_percent);
                 if let Some(k) = d.virt.active() {
-                    text.push_str(&crate::localized_format!("  ·  as {}", "  ·  como {}", k.label()));
+                    text.push_str(&crate::localized_format!("  ·  as {}", "  ·  como {}", "  ·  como {}", k.label()));
                 }
                 let font = egui::FontId::proportional(13.0);
                 let w = ui.fonts(|f| f.layout_no_wrap(text.clone(), font.clone(), TEXT).size().x);
@@ -476,7 +476,7 @@ impl App {
             ui.horizontal(|ui| {
                 widgets::pill(
                     ui,
-                    &crate::localized_format!("Editing \"{editing}\" — not active on this controller", "Editando \"{editing}\" — inativo neste controle"),
+                    &crate::localized_format!("Editing \"{editing}\" — not active on this controller", "Editando \"{editing}\" — inativo neste controle", "Editando \"{editing}\" — no está activo en este mando"),
                     WARN,
                 );
                 if widgets::button(ui, crate::i18n::tr("Edit active profile")).clicked() {

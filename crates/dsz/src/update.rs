@@ -123,10 +123,10 @@ pub fn run(engine: Arc<Engine>) {
         if let Some(r) = available() {
             if told.as_deref() != Some(r.version.as_str()) {
                 log::info!("DSZ {} is available", r.version);
-                engine.toast(format!("DSZ {} is available: Settings > Updates", r.version));
+                engine.toast(crate::localized_format!("DSZ {} is available: Settings > Updates", "DSZ {} está disponível: Configurações > Atualizações", "DSZ {} está disponible: Configuración > Actualizaciones", r.version));
                 crate::tray::notify(
-                    &format!("DSZ {} is available", r.version),
-                    "Open DSZ and go to Settings to update.",
+                    &crate::localized_format!("DSZ {} is available", "DSZ {} está disponível", "DSZ {} está disponible", r.version),
+                    crate::i18n::tr("Open DSZ and go to Settings to update."),
                 );
                 told = Some(r.version);
             }

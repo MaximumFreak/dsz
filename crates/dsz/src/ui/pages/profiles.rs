@@ -147,7 +147,7 @@ impl App {
             );
             if primary_button(ui, crate::i18n::tr("+ Create")).clicked() {
                 let name = if self.new_profile.trim().is_empty() {
-                    crate::i18n::tr("New profile")
+                    "New profile"
                 } else {
                     self.new_profile.trim()
                 };
@@ -162,8 +162,8 @@ impl App {
                     .pick_file()
                 {
                     match engine.profiles.import(&f) {
-                        Ok(n) => engine.toast(crate::localized_format!("Imported \"{n}\"", "\"{n}\" importado")),
-                        Err(e) => engine.warn_toast(e),
+                        Ok(n) => engine.toast(crate::localized_format!("Imported \"{n}\"", "\"{n}\" importado", "\"{n}\" importado")),
+                        Err(e) => engine.warn_toast(crate::i18n::tr(&e)),
                     }
                 }
             }
@@ -240,7 +240,7 @@ impl App {
                                                     }
                                                     self.rename = None;
                                                 }
-                                                Err(e) => engine.warn_toast(e),
+                                                Err(e) => engine.warn_toast(crate::i18n::tr(&e)),
                                             }
                                         }
                                         if cancel {
@@ -269,7 +269,7 @@ impl App {
                                                 pill(
                                                     ui,
                                                     &crate::localized_format!(
-                                                        "{n} game{}", "{n} jogo{}",
+                                                        "{n} game{}", "{n} jogo{}", "{n} juego{}",
                                                         if n == 1 { "" } else { "s" }
                                                     ),
                                                     VIOLET,
@@ -354,7 +354,7 @@ impl App {
                                             {
                                                 match engine.profiles.export(&prof.name, &f) {
                                                     Ok(()) => engine.toast(crate::i18n::tr("Profile exported")),
-                                                    Err(e) => engine.warn_toast(e),
+                                                    Err(e) => engine.warn_toast(crate::i18n::tr(&e)),
                                                 }
                                             }
                                             ui.close();
@@ -414,7 +414,7 @@ impl App {
                 let mut changed = false;
                 changed |= toggle_row(ui, crate::i18n::tr("Switch automatically"), "", &mut s.auto_profiles);
                 if let Some((p, exe)) = &*engine.game_override.read() {
-                    note(ui, &crate::localized_format!("{exe} is running → \"{p}\"", "{exe} em execução → \"{p}\""), VIOLET);
+                    note(ui, &crate::localized_format!("{exe} is running → \"{p}\"", "{exe} em execução → \"{p}\"", "{exe} en ejecución → \"{p}\""), VIOLET);
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {

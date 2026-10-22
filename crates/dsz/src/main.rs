@@ -73,10 +73,10 @@ fn main() {
         engine.start();
     }
     if updated {
-        engine.toast(format!("Updated to DSZ {}", env!("CARGO_PKG_VERSION")));
+        engine.toast(crate::localized_format!("Updated to DSZ {}", "Atualizado para DSZ {}", "Actualizado a DSZ {}", env!("CARGO_PKG_VERSION")));
     }
     if moved {
-        engine.toast(format!("Settings are in {}", engine.data_dir.display()));
+        engine.toast(crate::localized_format!("Settings are in {}", "As configurações estão em {}", "La configuración está en {}", engine.data_dir.display()));
     }
 
     let start_hidden = !updated && !moved && (minimized_flag || engine.settings.read().start_minimized);

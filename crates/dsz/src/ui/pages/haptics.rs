@@ -89,7 +89,7 @@ impl App {
                                     let (t, c) = if !h.enabled || !bt {
                                         (crate::i18n::tr("off").to_string(), FAINT)
                                     } else if streaming > 0 {
-                                        (crate::localized_format!("{streaming} pkt/s", "{streaming} pac/s"), GOOD)
+                                        (crate::localized_format!("{streaming} pkt/s", "{streaming} pac/s", "{streaming} paq/s"), GOOD)
                                     } else if d.pcm_mode.load(Ordering::Relaxed) {
                                         (crate::i18n::tr("idle").to_string(), MUTED)
                                     } else {
@@ -103,7 +103,7 @@ impl App {
                         if under > 0 {
                             muted(
                                 ui,
-                                &crate::localized_format!("{under} audio gap(s) smoothed over since connect", "{under} falha(s) de áudio suavizada(s) desde a conexão"),
+                                &crate::localized_format!("{under} audio gap(s) smoothed over since connect", "{under} falha(s) de áudio suavizada(s) desde a conexão", "{under} corte(s) de audio suavizado(s) desde la conexión"),
                             );
                         }
                     }
@@ -154,7 +154,7 @@ impl App {
                             if capture.running {
                                 ui.label(
                                     RichText::new(crate::localized_format!(
-                                        "{} · {} Hz · {} ch", "{} · {} Hz · {} canais",
+                                        "{} · {} Hz · {} ch", "{} · {} Hz · {} canais", "{} · {} Hz · {} canales",
                                         capture.device, capture.rate, capture.channels
                                     ))
                                     .size(12.0)
@@ -367,7 +367,7 @@ impl App {
                             }
                             slider_row(
                                 ui,
-                                crate::i18n::tr("Pitch"),
+                                crate::i18n::tr("Tone"),
                                 "",
                                 &mut h.buttons.frequency,
                                 60.0..=400.0,
@@ -406,7 +406,7 @@ impl App {
                             }
                             slider_row(
                                 ui,
-                                crate::i18n::tr("Pitch"),
+                                crate::i18n::tr("Tone"),
                                 "",
                                 &mut h.triggers.frequency,
                                 20.0..=300.0,

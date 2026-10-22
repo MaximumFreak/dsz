@@ -115,7 +115,7 @@ fn driver_row(
                     | install::Status::Installing
             )
         );
-        if !busy && primary_button(ui, &crate::localized_format!("Install {}", "Instalar {}", pkg.name())).clicked() {
+        if !busy && primary_button(ui, &crate::localized_format!("Install {}", "Instalar {}", "Instalar {}", pkg.name())).clicked() {
             let ctx = ui.ctx().clone();
             install::start(pkg, move || ctx.request_repaint());
         }
@@ -143,7 +143,7 @@ fn driver_row(
             Some(install::Status::Finished { ok: false }) => {
                 note(ui, crate::i18n::tr("The installer was closed before it finished."), WARN)
             }
-            Some(install::Status::Failed(e)) => note(ui, &e, BAD),
+            Some(install::Status::Failed(e)) => note(ui, crate::i18n::tr(&e), BAD),
             None => {}
         }
     });
@@ -240,14 +240,14 @@ impl App {
                         match (st.active, &st.error) {
                             (Some(k), _) => {
                                 ui.horizontal(|ui| {
-                                    pill(ui, &crate::localized_format!("{} connected", "{} conectado(s)", crate::i18n::tr(k.label())), GOOD);
-                                    muted(ui, &crate::localized_format!("via {}", "via {}", st.backend));
+                                    pill(ui, &crate::localized_format!("{} connected", "{} conectado(s)", "{} conectado(s)", crate::i18n::tr(k.label())), GOOD);
+                                    muted(ui, &crate::localized_format!("via {}", "via {}", "mediante {}", st.backend));
                                     if let Some(slot) = st.xinput_slot {
-                                        muted(ui, &crate::localized_format!("· XInput player {}", "· jogador XInput {}", slot + 1));
+                                        muted(ui, &crate::localized_format!("· XInput player {}", "· jogador XInput {}", "· jugador XInput {}", slot + 1));
                                     }
                                 });
                                 let n = d.virt.reports.load(Ordering::Relaxed);
-                                muted(ui, &crate::localized_format!("{n} reports sent", "{n} relatórios enviados"));
+                                muted(ui, &crate::localized_format!("{n} reports sent", "{n} relatórios enviados", "{n} informes enviados"));
                                 if st.game_audio_open {
                                     ui.horizontal(|ui| {
                                         pill(ui, crate::i18n::tr("Game audio open"), VIOLET);
@@ -266,12 +266,12 @@ impl App {
                             ui.horizontal(|ui| {
                                 pill(ui, crate::i18n::tr("Xbox 360 kept"), FAINT);
                                 let player = slot
-                                    .map(|s| crate::localized_format!("XInput player {}", "Jogador XInput {}", s + 1))
+                                    .map(|s| crate::localized_format!("XInput player {}", "Jogador XInput {}", "Jugador XInput {}", s + 1))
                                     .unwrap_or_else(|| crate::i18n::tr("its XInput slot").into());
                                 muted(
                                     ui,
                                     &crate::localized_format!(
-                                        "idle, holding {player}{}; presses Xbox buttons", "ocioso, mantendo {player}{}; envia botões Xbox",
+                                        "idle, holding {player}{}; presses Xbox buttons", "ocioso, mantendo {player}{}; envia botões Xbox", "inactivo, conserva {player}{}; pulsa botones Xbox",
                                         if hidden { crate::i18n::tr(", hidden from games") } else { "" }
                                     ),
                                 );
@@ -292,7 +292,7 @@ impl App {
                             note(
                                 ui,
                                 &crate::localized_format!(
-                                    "{exe} has no DualSense support, so games see the fallback controller from Profiles & games.", "{exe} não tem suporte a DualSense; será usado o controle alternativo de Perfis e jogos."
+                                    "{exe} has no DualSense support, so games see the fallback controller from Profiles & games.", "{exe} não tem suporte a DualSense; será usado o controle alternativo de Perfis e jogos.", "{exe} no es compatible con DualSense, así que los juegos reciben el mando alternativo de Perfiles y juegos."
                                 ),
                                 VIOLET,
                             );
@@ -304,11 +304,11 @@ impl App {
                         }
                         for pad in idle {
                             ui.horizontal(|ui| {
-                                pill(ui, &crate::localized_format!("{} connected", "{} conectado(s)", pad.kind().label()), GOOD);
+                                pill(ui, &crate::localized_format!("{} connected", "{} conectado(s)", "{} conectado(s)", pad.kind().label()), GOOD);
                                 muted(
                                     ui,
                                     &crate::localized_format!(
-                                        "via {} · waiting for your controller", "via {} · aguardando seu controle",
+                                        "via {} · waiting for your controller", "via {} · aguardando seu controle", "mediante {} · esperando tu mando",
                                         pad.target.backend()
                                     ),
                                 );
@@ -469,7 +469,7 @@ impl App {
                                 meter(ui, l as f32 / 255.0, VIOLET, 90.0);
                             });
                             if g.reports > 0 {
-                                muted(ui, &crate::localized_format!("{} output report(s) from the game", "{} relatório(s) de saída do jogo", g.reports));
+                                muted(ui, &crate::localized_format!("{} output report(s) from the game", "{} relatório(s) de saída do jogo", "{} informe(s) de salida del juego", g.reports));
                             }
                             ui.add_space(6.0);
                             let testing = self.game_test.is_some();
