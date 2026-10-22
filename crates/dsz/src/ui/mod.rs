@@ -182,7 +182,8 @@ impl App {
                 let n = name.to_ascii_lowercase();
                 Page::ALL
                     .into_iter()
-                    .find(|p| p.key().to_ascii_lowercase().starts_with(&n))
+                    .find(|p| p.key().to_ascii_lowercase().starts_with(&n)
+                        || (*p == Page::Input && n == "input"))
             })
             .unwrap_or(Page::Overview);
         let edit_pin = args
