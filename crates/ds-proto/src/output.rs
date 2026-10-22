@@ -32,6 +32,25 @@ pub struct OutputState {
     pub enhanced_rumble: bool,
     /// Where the controller plays the audio stream.
     pub audio: AudioRoute,
+    /// Explicit microphone input path and mute, independent of speaker output.
+    pub microphone: Option<Microphone>,
+}
+
+/// Audio-control bits 1:0: auto prefers an attached headset microphone.
+/// From stealth-alex's DualSense output report notes; the enable flags,
+/// volume and mute bit are Linux hid-playstation's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MicrophoneSource {
+    #[default]
+    Auto,
+    BuiltIn,
+    Headset,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Microphone {
+    pub source: MicrophoneSource,
+    pub muted: bool,
 }
 
 /// Where the controller plays its audio stream. The fields are Linux
@@ -79,6 +98,7 @@ impl Default for OutputState {
             rumble_reduction: 0,
             enhanced_rumble: true,
             audio: AudioRoute::Untouched,
+            microphone: None,
         }
     }
 }
@@ -120,6 +140,18 @@ impl OutputState {
                 b[7] = 0;
             }
         }
+        if let Some(mic) = self.microphone {
+            // flag0 bit6 microphone volume, bit7 audio control;
+            // flag1 bit1 audio/microphone mute. Keep output path bits intact.
+            flag0 |= 0x40 | 0x80;
+            flag1 |= 0x02;
+            b[6] = 0x40;
+            b[7] |= match mic.source {
+                MicrophoneSource::Auto => 0,
+                MicrophoneSource::BuiltIn => 1,
+                MicrophoneSource::Headset => 2,
+            };
+        }
         b[0] = flag0;
         b[1] = flag1;
         b[2] = self.rumble_right;
@@ -128,7 +160,11 @@ impl OutputState {
         // Power-save byte stays 0 and its enable flag unset. Tested on an
         // Edge over Bluetooth: the motion bit does not stop the sensors, so
         // there is no battery to gain here.
-        b[9] = 0;
+        b[9] = if self.microphone.is_some_and(|m| m.muted) {
+            0x10
+        } else {
+            0
+        };
         b[10..21].copy_from_slice(&self.right_trigger);
         b[21..32].copy_from_slice(&self.left_trigger);
         // Motor power: low nibble haptics/rumble reduction, high nibble
@@ -215,6 +251,35 @@ mod tests {
         assert_eq!(r[45], 0x15);
         assert_eq!(&r[46..49], &[1, 2, 3]);
         assert!(crc::verify(crc::PREFIX_OUTPUT, &r));
+    }
+
+    #[test]
+    fn microphone_source_and_mute_preserve_speaker_output_and_triggers() {
+        for (source, bits) in [
+            (MicrophoneSource::Auto, 0),
+            (MicrophoneSource::BuiltIn, 1),
+            (MicrophoneSource::Headset, 2),
+        ] {
+            for muted in [false, true] {
+                let s = OutputState {
+                    audio: AudioRoute::Speaker { volume: 0x50 },
+                    microphone: Some(Microphone { source, muted }),
+                    rumble_left: 87,
+                    right_trigger: [1; 11],
+                    ..Default::default()
+                };
+                let mut buf = [0; 100];
+                let r = s.build(Connection::Bluetooth, &mut buf);
+                assert_eq!(r[2] & 0xc0, 0xc0);
+                assert_eq!(r[3] & 2, 2);
+                assert_eq!(r[8], 0x40, "microphone gain");
+                assert_eq!(r[9], 0x30 | bits, "output and input path coexist");
+                assert_eq!(r[11], if muted { 0x10 } else { 0 });
+                assert_eq!(r[5], 87);
+                assert_eq!(&r[12..23], &[1; 11]);
+                assert!(crc::verify(crc::PREFIX_OUTPUT, r));
+            }
+        }
     }
 
     #[test]

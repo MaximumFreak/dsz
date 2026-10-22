@@ -43,6 +43,16 @@ use crate::profile::{Action, VirtualKind};
 pub use pool::{Pad, Pool};
 pub use probe::probe;
 
+impl crate::haptics::capture::PcmSink for usbip::MicrophoneRing {
+    fn push(&self, pcm: &[i16]) {
+        usbip::MicrophoneRing::push(self, pcm);
+    }
+
+    fn clear(&self) {
+        usbip::MicrophoneRing::clear(self);
+    }
+}
+
 /// One live virtual controller.
 pub type Target = usbip::UsbPad;
 
@@ -100,6 +110,14 @@ pub struct Slot {
 impl Slot {
     pub fn active(&self) -> Option<VirtualKind> {
         self.target.read().as_ref().map(|t| t.kind())
+    }
+
+    /// An app is recording from this controller's virtual DualSense.
+    pub fn microphone_open(&self) -> bool {
+        self.target
+            .read()
+            .as_ref()
+            .is_some_and(|t| t.kind() == VirtualKind::DualSense && t.recording())
     }
 
     pub fn has_parked(&self) -> bool {
@@ -425,10 +443,16 @@ fn attach(device: &Device, pad: &Pad) {
     if let Some(a) = pad.target.game_audio() {
         *device.game_audio.lock() = Some(a);
     }
+    let mic = (pad.kind() == VirtualKind::DualSense)
+        .then(|| pad.target.microphone() as Arc<dyn crate::haptics::capture::PcmSink>);
+    device.microphone.set_sink(mic);
     device.virt.set(Some(pad.target.clone()));
+    device.kick();
 }
 
 fn detach(device: &Device) {
+    device.microphone.set_sink(None);
+    device.microphone.clear();
     device.virt.set(None);
     *device.game_audio.lock() = None;
     device.feedback.lock().clear_game();
@@ -521,7 +545,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 } else {
                     detach(device);
                     engine.pads.destroy(engine, &p);
-                    engine.toast("Virtual controller disconnected");
+                    engine.toast(crate::i18n::tr("Virtual controller disconnected"));
                 }
             }
             if let Some(want) = want_some {
@@ -547,8 +571,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                         match engine.pads.create(want, &mac, Some(device)) {
                             Ok(p) => {
                                 attach(device, &p);
-                                engine.toast(format!(
-                                    "Virtual {} controller connected ({})",
+                                engine.toast(crate::localized_format!(
+                                    "Virtual {} controller connected ({})", "Controle virtual {} conectado ({})",
                                     p.kind().label(),
                                     p.target.backend()
                                 ));

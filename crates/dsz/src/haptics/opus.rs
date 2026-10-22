@@ -140,6 +140,21 @@ impl Decoder {
         };
         n.max(0) as usize
     }
+
+    /// One 10 ms missing microphone frame, using Opus packet-loss concealment.
+    pub fn conceal(&mut self, out: &mut [i16]) -> usize {
+        let n = unsafe {
+            opus_decode(
+                self.st,
+                std::ptr::null(),
+                0,
+                out.as_mut_ptr(),
+                (out.len() / 2).min(OPUS_SAMPLES) as c_int,
+                0,
+            )
+        };
+        n.max(0) as usize
+    }
 }
 
 impl Drop for Decoder {

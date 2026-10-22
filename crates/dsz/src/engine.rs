@@ -89,6 +89,7 @@ impl Engine {
     pub fn new(data_dir: PathBuf) -> Arc<Engine> {
         let profiles = ProfileStore::load(&data_dir.join("profiles"));
         let mut settings = Settings::load(&data_dir);
+        crate::i18n::set_language(settings.language);
         if !profiles.exists(&settings.default_profile) {
             settings.default_profile = profiles.names().first().cloned().unwrap_or_default();
         }
@@ -242,7 +243,7 @@ impl Engine {
         let n = names.len() as i32;
         let next = names[((i + delta).rem_euclid(n)) as usize].clone();
         self.set_device_profile(device, &next);
-        self.toast(format!("Profile: {next}"));
+        self.toast(crate::localized_format!("Profile: {next}", "Perfil: {next}"));
         device.identify_light();
     }
 
@@ -272,8 +273,8 @@ impl Engine {
             self.settings_dirty.store(true, Ordering::Release);
         }
         self.devices.write().push(d.clone());
-        self.toast(format!(
-            "{} connected ({})",
+        self.toast(crate::localized_format!(
+            "{} connected ({})", "{} conectado ({})",
             d.model.name(),
             if d.is_bluetooth() { "Bluetooth" } else { "USB" }
         ));
@@ -284,7 +285,7 @@ impl Engine {
         if let Some(i) = v.iter().position(|d| d.id == id) {
             let d = v.remove(i);
             drop(v);
-            self.toast(format!("{} disconnected", d.model.name()));
+            self.toast(crate::localized_format!("{} disconnected", "{} desconectado", d.model.name()));
         }
     }
 
@@ -298,8 +299,8 @@ impl Engine {
         entry.0 = Instant::now();
         entry.1 += 1;
         if entry.1 == 1 {
-            self.warn_toast(format!(
-                "Couldn't open a controller ({e}). Another controller app or Steam Input may be holding it."
+            self.warn_toast(crate::localized_format!(
+                "Couldn't open a controller ({e}). Another controller app or Steam Input may be holding it.", "Não foi possível abrir o controle ({e}). Outro aplicativo ou o Steam Input pode estar usando-o."
             ));
         }
     }

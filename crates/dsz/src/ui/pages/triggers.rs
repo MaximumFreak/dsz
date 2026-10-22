@@ -11,23 +11,23 @@ use crate::ui::App;
 
 fn presets() -> Vec<(&'static str, TriggerEffect)> {
     vec![
-        ("Off", TriggerEffect::Off),
+        (crate::i18n::tr("Off"), TriggerEffect::Off),
         (
-            "Light",
+            crate::i18n::tr("Light"),
             TriggerEffect::Feedback {
                 position: 1,
                 strength: 2,
             },
         ),
         (
-            "Heavy",
+            crate::i18n::tr("Heavy"),
             TriggerEffect::Feedback {
                 position: 0,
                 strength: 7,
             },
         ),
         (
-            "Pistol",
+            crate::i18n::tr("Pistol"),
             TriggerEffect::Weapon {
                 start: 4,
                 end: 6,
@@ -35,7 +35,7 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
             },
         ),
         (
-            "Rifle",
+            crate::i18n::tr("Rifle"),
             TriggerEffect::Weapon {
                 start: 2,
                 end: 5,
@@ -43,7 +43,7 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
             },
         ),
         (
-            "Bow",
+            crate::i18n::tr("Bow"),
             TriggerEffect::Bow {
                 start: 1,
                 end: 6,
@@ -52,7 +52,7 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
             },
         ),
         (
-            "Machine gun",
+            crate::i18n::tr("Machine gun"),
             TriggerEffect::Vibration {
                 position: 3,
                 amplitude: 7,
@@ -60,7 +60,7 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
             },
         ),
         (
-            "Engine",
+            crate::i18n::tr("Engine"),
             TriggerEffect::Machine {
                 start: 1,
                 end: 9,
@@ -71,7 +71,7 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
             },
         ),
         (
-            "Galloping",
+            crate::i18n::tr("Galloping"),
             TriggerEffect::Galloping {
                 start: 0,
                 end: 9,
@@ -81,7 +81,7 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
             },
         ),
         (
-            "Brake",
+            crate::i18n::tr("Brake"),
             TriggerEffect::Slope {
                 start: 2,
                 end: 9,
@@ -90,13 +90,13 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
             },
         ),
         (
-            "Rigid",
+            crate::i18n::tr("Rigid"),
             TriggerEffect::Preset {
                 preset: TriggerPreset::Rigid,
             },
         ),
         (
-            "Click",
+            crate::i18n::tr("Click"),
             TriggerEffect::Preset {
                 preset: TriggerPreset::GameCube,
             },
@@ -299,17 +299,17 @@ fn editor(ui: &mut egui::Ui, id: &str, e: &mut TriggerEffect) {
         .selected_text(e.kind_name())
         .show_ui(ui, |ui| {
             for (kk, label) in [
-                (Kind::Off, "Off"),
-                (Kind::Feedback, "Resistance"),
-                (Kind::Weapon, "Weapon (click point)"),
-                (Kind::Vibration, "Vibration"),
-                (Kind::Slope, "Slope (ramping resistance)"),
-                (Kind::MultiFeedback, "Zones: resistance"),
-                (Kind::MultiVibration, "Zones: vibration"),
-                (Kind::Bow, "Bow"),
-                (Kind::Galloping, "Galloping"),
-                (Kind::Machine, "Machine"),
-                (Kind::Preset, "Classic preset"),
+                (Kind::Off, crate::i18n::tr("Off")),
+                (Kind::Feedback, crate::i18n::tr("Resistance")),
+                (Kind::Weapon, crate::i18n::tr("Weapon (click point)")),
+                (Kind::Vibration, crate::i18n::tr("Vibration")),
+                (Kind::Slope, crate::i18n::tr("Slope (ramping resistance)")),
+                (Kind::MultiFeedback, crate::i18n::tr("Zones: resistance")),
+                (Kind::MultiVibration, crate::i18n::tr("Zones: vibration")),
+                (Kind::Bow, crate::i18n::tr("Bow")),
+                (Kind::Galloping, crate::i18n::tr("Galloping")),
+                (Kind::Machine, crate::i18n::tr("Machine")),
+                (Kind::Preset, crate::i18n::tr("Classic preset")),
             ] {
                 ui.selectable_value(&mut k, kk, label);
             }
@@ -322,29 +322,29 @@ fn editor(ui: &mut egui::Ui, id: &str, e: &mut TriggerEffect) {
         slider_row(ui, label, "", v, lo..=hi, "");
     };
     match e {
-        TriggerEffect::Off => muted(ui, "No resistance. The trigger feels normal."),
+        TriggerEffect::Off => muted(ui, crate::i18n::tr("No resistance. The trigger feels normal.")),
         TriggerEffect::Feedback { position, strength } => {
-            zone(ui, "Starts at zone", position, 0, 9);
-            zone(ui, "Strength", strength, 1, 8);
+            zone(ui, crate::i18n::tr("Starts at zone"), position, 0, 9);
+            zone(ui, crate::i18n::tr("Strength"), strength, 1, 8);
         }
         TriggerEffect::Weapon {
             start,
             end,
             strength,
         } => {
-            zone(ui, "Resistance from", start, 2, 7);
+            zone(ui, crate::i18n::tr("Resistance from"), start, 2, 7);
             *end = (*end).max(*start + 1);
-            zone(ui, "Breaks at", end, *start + 1, 8);
-            zone(ui, "Strength", strength, 1, 8);
+            zone(ui, crate::i18n::tr("Breaks at"), end, *start + 1, 8);
+            zone(ui, crate::i18n::tr("Strength"), strength, 1, 8);
         }
         TriggerEffect::Vibration {
             position,
             amplitude,
             frequency,
         } => {
-            zone(ui, "Starts at zone", position, 0, 9);
-            zone(ui, "Amplitude", amplitude, 1, 8);
-            row(ui, "Frequency", "", |ui| {
+            zone(ui, crate::i18n::tr("Starts at zone"), position, 0, 9);
+            zone(ui, crate::i18n::tr("Amplitude"), amplitude, 1, 8);
+            row(ui, crate::i18n::tr("Frequency"), "", |ui| {
                 ui.add(egui::Slider::new(frequency, 1..=80).suffix(" Hz"))
             });
         }
@@ -354,23 +354,23 @@ fn editor(ui: &mut egui::Ui, id: &str, e: &mut TriggerEffect) {
             start_strength,
             end_strength,
         } => {
-            zone(ui, "From zone", start, 0, 8);
+            zone(ui, crate::i18n::tr("From zone"), start, 0, 8);
             *end = (*end).max(*start + 1);
-            zone(ui, "To zone", end, *start + 1, 9);
-            zone(ui, "Start strength", start_strength, 1, 8);
-            zone(ui, "End strength", end_strength, 1, 8);
+            zone(ui, crate::i18n::tr("To zone"), end, *start + 1, 9);
+            zone(ui, crate::i18n::tr("Start strength"), start_strength, 1, 8);
+            zone(ui, crate::i18n::tr("End strength"), end_strength, 1, 8);
         }
         TriggerEffect::MultiFeedback { strengths } => {
-            muted(ui, "Drag across the bars to paint resistance per zone.");
+            muted(ui, crate::i18n::tr("Drag across the bars to paint resistance per zone."));
             zone_editor(ui, strengths, ACCENT);
         }
         TriggerEffect::MultiVibration {
             amplitudes,
             frequency,
         } => {
-            muted(ui, "Drag across the bars to paint vibration per zone.");
+            muted(ui, crate::i18n::tr("Drag across the bars to paint vibration per zone."));
             zone_editor(ui, amplitudes, VIOLET);
-            row(ui, "Frequency", "", |ui| {
+            row(ui, crate::i18n::tr("Frequency"), "", |ui| {
                 ui.add(egui::Slider::new(frequency, 1..=80).suffix(" Hz"))
             });
         }
@@ -380,11 +380,11 @@ fn editor(ui: &mut egui::Ui, id: &str, e: &mut TriggerEffect) {
             strength,
             snap,
         } => {
-            zone(ui, "Draw from", start, 0, 7);
+            zone(ui, crate::i18n::tr("Draw from"), start, 0, 7);
             *end = (*end).max(*start + 1);
-            zone(ui, "Draw to", end, *start + 1, 8);
-            zone(ui, "Tension", strength, 1, 8);
-            zone(ui, "Snap back", snap, 1, 8);
+            zone(ui, crate::i18n::tr("Draw to"), end, *start + 1, 8);
+            zone(ui, crate::i18n::tr("Tension"), strength, 1, 8);
+            zone(ui, crate::i18n::tr("Snap back"), snap, 1, 8);
         }
         TriggerEffect::Galloping {
             start,
@@ -393,13 +393,13 @@ fn editor(ui: &mut egui::Ui, id: &str, e: &mut TriggerEffect) {
             second_foot,
             frequency,
         } => {
-            zone(ui, "From zone", start, 0, 8);
+            zone(ui, crate::i18n::tr("From zone"), start, 0, 8);
             *end = (*end).max(*start + 1);
-            zone(ui, "To zone", end, *start + 1, 9);
-            zone(ui, "Second foot", second_foot, 1, 7);
+            zone(ui, crate::i18n::tr("To zone"), end, *start + 1, 9);
+            zone(ui, crate::i18n::tr("Second foot"), second_foot, 1, 7);
             *first_foot = (*first_foot).min(*second_foot - 1);
-            zone(ui, "First foot", first_foot, 0, *second_foot - 1);
-            row(ui, "Speed", "", |ui| {
+            zone(ui, crate::i18n::tr("First foot"), first_foot, 0, *second_foot - 1);
+            row(ui, crate::i18n::tr("Speed"), "", |ui| {
                 ui.add(egui::Slider::new(frequency, 1..=40).suffix(" Hz"))
             });
         }
@@ -411,30 +411,30 @@ fn editor(ui: &mut egui::Ui, id: &str, e: &mut TriggerEffect) {
             frequency,
             period,
         } => {
-            zone(ui, "From zone", start, 0, 8);
+            zone(ui, crate::i18n::tr("From zone"), start, 0, 8);
             *end = (*end).max(*start + 1);
-            zone(ui, "To zone", end, *start + 1, 9);
-            zone(ui, "Amplitude A", amp_a, 0, 7);
-            zone(ui, "Amplitude B", amp_b, 0, 7);
-            row(ui, "Frequency", "", |ui| {
+            zone(ui, crate::i18n::tr("To zone"), end, *start + 1, 9);
+            zone(ui, crate::i18n::tr("Amplitude A"), amp_a, 0, 7);
+            zone(ui, crate::i18n::tr("Amplitude B"), amp_b, 0, 7);
+            row(ui, crate::i18n::tr("Frequency"), "", |ui| {
                 ui.add(egui::Slider::new(frequency, 1..=80).suffix(" Hz"))
             });
-            zone(ui, "Period", period, 0, 20);
+            zone(ui, crate::i18n::tr("Period"), period, 0, 20);
         }
         TriggerEffect::Preset { preset } => {
-            row(ui, "Preset", "Classic feel presets", |ui| {
+            row(ui, crate::i18n::tr("Preset"), crate::i18n::tr("Classic feel presets"), |ui| {
                 egui::ComboBox::from_id_salt(format!("{id}-preset"))
-                    .selected_text(preset.name())
+                    .selected_text(crate::i18n::tr(preset.name()))
                     .show_ui(ui, |ui| {
                         for pr in TriggerPreset::ALL {
-                            ui.selectable_value(preset, pr, pr.name());
+                            ui.selectable_value(preset, pr, crate::i18n::tr(pr.name()));
                         }
                     });
             });
         }
         TriggerEffect::Custom { .. } | TriggerEffect::Raw { .. } => {
             let b = e.encode();
-            muted(ui, "Imported raw effect bytes:");
+            muted(ui, crate::i18n::tr("Imported raw effect bytes:"));
             ui.label(RichText::new(format!("{:02X?}", b)).monospace().color(TEXT));
         }
     }
@@ -449,13 +449,13 @@ impl App {
     ) {
         page_header(
             ui,
-            "Adaptive triggers",
-            "Resistance and vibration for L2 and R2. Pull a trigger to feel it while you edit.",
+            crate::i18n::tr("Adaptive triggers"),
+            crate::i18n::tr("Resistance and vibration for L2 and R2. Pull a trigger to feel it while you edit."),
         );
         if dev.map(|d| d.model.is_dualshock4()).unwrap_or(false) {
             note(
                 ui,
-                "Adaptive triggers are a DualSense feature. On a DualShock 4, L2 and R2 stay ordinary analog triggers.",
+                crate::i18n::tr("Adaptive triggers are a DualSense feature. On a DualShock 4, L2 and R2 stay ordinary analog triggers."),
                 WARN,
             );
             ui.add_space(10.0);
@@ -500,9 +500,9 @@ impl App {
                     if button(
                         ui,
                         if left {
-                            "Copy to R2  →"
+                            crate::i18n::tr("Copy to R2  →")
                         } else {
-                            "←  Copy to L2"
+                            crate::i18n::tr("←  Copy to L2")
                         },
                     )
                     .clicked()

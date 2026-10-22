@@ -24,13 +24,38 @@ use super::opus::{Encoder, Pcm};
 use super::synth::Synth;
 use crate::device::{Device, StreamPacket, MAX_REPORT, SPEAKER_HEADSET, SPEAKER_MUTED, SPEAKER_UNTOUCHED};
 use crate::engine::{Engine, ProfileCache};
-use crate::profile::AudioSource;
+use crate::profile::{AudioSource, Haptics};
 
 const PERIOD: Duration = Duration::from_nanos(stream::PERIOD_NS);
 /// Stop sending after this long with nothing to play.
 const IDLE_AFTER: Duration = Duration::from_millis(400);
 /// Speaker sound below this peak counts as silence.
 const SPEAKER_GATE: f32 = 1.0 / 2048.0;
+/// Keep microphone-only control packets out of the active media clock.
+/// Each media/haptic payload already carries the microphone enable bit.
+struct MicrophoneClock {
+    state: Option<bool>,
+    next_control: Instant,
+}
+
+impl MicrophoneClock {
+    fn new(now: Instant) -> Self {
+        Self {
+            state: None,
+            next_control: now,
+        }
+    }
+
+    fn due(&self, now: Instant, microphone: Option<bool>) -> bool {
+        microphone.is_some() && (self.state != microphone
+            || (microphone == Some(true) && now >= self.next_control))
+    }
+
+    fn sent(&mut self, now: Instant, microphone: Option<bool>) {
+        self.state = microphone;
+        self.next_control = now + Duration::from_secs(1);
+    }
+}
 /// Silent speaker reports sent at once when a speaker stream starts, so the
 /// controller has a cushion against radio jitter (about 64 ms). Without it
 /// the sound pops wherever a report arrives a little late.
@@ -81,6 +106,63 @@ impl Source {
     }
 }
 
+/// Split one captured PC window into independently enabled destinations.
+struct PcAudio {
+    filter: HapticFilter,
+    prev_haptics: [f32; 2],
+    prev_speaker: [f32; 2],
+    filtered: Vec<[f32; 2]>,
+}
+
+impl PcAudio {
+    fn new() -> Self {
+        Self {
+            filter: HapticFilter::new(48_000.0, 650.0, 25.0),
+            prev_haptics: [0.0; 2],
+            prev_speaker: [0.0; 2],
+            filtered: Vec::with_capacity(1024),
+        }
+    }
+
+    fn render(
+        &mut self,
+        h: &Haptics,
+        chunk: &[[f32; 2]],
+        rate: u32,
+        haptics: &mut [[f32; 2]],
+        speaker: &mut Vec<[f32; 2]>,
+        frames: usize,
+    ) {
+        haptics.fill([0.0; 2]);
+        speaker.clear();
+        if h.source == AudioSource::SystemAudio {
+            self.filter.configure(
+                rate as f32,
+                h.low_pass_hz.clamp(60.0, 1400.0),
+                h.high_pass_hz.clamp(5.0, 300.0),
+            );
+            self.filtered.clear();
+            for fr in chunk {
+                let (l, r) = if h.stereo {
+                    (fr[0], fr[1])
+                } else {
+                    let m = 0.5 * (fr[0] + fr[1]);
+                    (m, m)
+                };
+                self.filtered.push([
+                    self.filter.run(0, l) * h.gain,
+                    self.filter.run(1, r) * h.gain,
+                ]);
+            }
+            resample_window(&mut self.prev_haptics, &self.filtered, haptics);
+        }
+        if h.pc_audio_on_speaker && !chunk.is_empty() {
+            speaker.resize(frames, [0.0; 2]);
+            resample_window(&mut self.prev_speaker, chunk, speaker);
+        }
+    }
+}
+
 /// Speaker volume 1..=100 as the output report's volume byte.
 fn volume_byte(v: u8) -> u8 {
     let span = (SPEAKER_VOLUME_MAX - SPEAKER_VOLUME_MIN) as u32;
@@ -103,9 +185,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     let mut cache = ProfileCache::default();
     let mut counters = StreamCounters::new();
     let mut source: Option<Source> = None;
-    let mut filter = HapticFilter::new(48_000.0, 650.0, 25.0);
+    let mut pc_audio = PcAudio::new();
     let mut synth = Synth::new();
-    let mut prev_h = [0f32; 2];
     let mut prev_buttons = Buttons::default();
     let mut deadline = Instant::now();
     let mut last_sound = Instant::now() - Duration::from_secs(10);
@@ -119,9 +200,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     let mut game = super::game::GameReader::new();
     let mut to_rumble = super::game::ActuatorRumble::new();
     let mut prev_g = [0f32; 2];
-    let mut prev_pc = [0f32; 2];
     let mut squeeze = Squeeze::new();
-    let mut filtered: Vec<[f32; 2]> = Vec::with_capacity(1024);
     let mut pc_spk: Vec<[f32; 2]> = Vec::with_capacity(WINDOW);
     // Speaker audio for one report, before and after fitting to 960 frames.
     let mut spk: Vec<[f32; 2]> = Vec::with_capacity(BLOCKS * WINDOW);
@@ -140,20 +219,30 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     // needs it pushes the instant out by `IDLE_AFTER`.
     let mut stream_until = Instant::now();
 
-    // Stop the microphone stream a speaker stream starts (twice, in case
-    // the radio drops one).
-    let mic_off = |counters: &mut StreamCounters| {
+    // Capture needs no speaker/actuator PCM stream. Keep controller state
+    // reports enabled with bit1 and change only microphone admission bit0.
+    let mic_control = |counters: &mut StreamCounters, microphone: bool| {
         let mut b = [0u8; MAX_REPORT];
+        let mut queued = false;
         for _ in 0..2 {
-            let len = stream::build_mic_off(counters, &mut b).len();
+            let flags = stream::AUDIO_CONTROL_INPUT
+                | if microphone {
+                    stream::AUDIO_CONTROL_MIC
+                } else {
+                    0
+                };
+            let len = stream::build_audio_control(counters, flags, &mut b).len();
             let mut pkt = StreamPacket {
                 len,
                 data: [0u8; MAX_REPORT],
             };
             pkt.data[..len].copy_from_slice(&b[..len]);
-            let _ = device.stream_tx.try_send(pkt);
+            queued |= device.stream_tx.try_send(pkt).is_ok();
         }
+        queued
     };
+    let mut mic_clock = MicrophoneClock::new(Instant::now());
+    let mut capture_used = false;
 
     let set_route = |route: u8| {
         if device.speaker_route.swap(route, Ordering::AcqRel) != route {
@@ -165,10 +254,16 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let profile = cache.get(engine, device);
         let h = &profile.haptics;
         let vo = &profile.virtual_out;
+        device.apply_microphone(&profile.microphone);
+        // Only opt-in capture may change the hardware-tuned media bytes.
+        // Keep this latch for this physical connection, even after disabling.
+        capture_used |= device.microphone.enabled();
+        let recording = capture_used && (device.microphone.recording() || device.mic_tap.lock().is_some());
+        let microphone = capture_used.then_some(recording);
         let enabled = h.enabled && device.is_bluetooth();
         let game_src = device.game_audio.lock().clone();
         let game_speaker = game_src.is_some() && vo.game_speaker;
-        let pc_speaker = h.pc_audio_on_speaker && h.source == AudioSource::SystemAudio;
+        let pc_speaker = h.pc_audio_on_speaker;
         let speaker_allowed = enabled && h.speaker_volume > 0 && (game_speaker || pc_speaker);
         // The speaker route goes on when the speaker is first needed and
         // stays on (silent between sounds) while the profile allows it:
@@ -195,6 +290,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         // Otherwise rumble goes to the controller's own rumble emulation,
         // which is what an Xbox game with no haptic modes on gets.
         let continuous = h.source == AudioSource::SystemAudio
+            || pc_speaker
             || h.buttons.enabled
             || h.triggers.enabled
             || h.rumble_as_haptics
@@ -208,11 +304,16 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let streaming = enabled && now < stream_until;
         device.pcm_mode.store(streaming, Ordering::Release);
         if !streaming {
+            if mic_clock.due(now, microphone) && mic_control(&mut counters, recording) {
+                mic_clock.sent(now, microphone);
+            }
             source = None;
             encoder = None;
             if was_media {
                 was_media = false;
-                mic_off(&mut counters);
+                if mic_control(&mut counters, recording) {
+                    mic_clock.sent(now, microphone);
+                }
                 log::info!("controller speaker stream off");
             }
             device.haptic_level[0].store(0, Ordering::Relaxed);
@@ -274,7 +375,9 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 lead = device.speaker_lead.load(Ordering::Relaxed).clamp(1, 12) as usize;
                 fade_in = true;
             } else {
-                mic_off(&mut counters);
+                if mic_control(&mut counters, recording) {
+                    mic_clock.sent(now, microphone);
+                }
             }
             // Start the new cadence from now.
             deadline = now;
@@ -294,14 +397,17 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 }
                 let headset = device.speaker_route.load(Ordering::Acquire) == SPEAKER_HEADSET;
                 let len =
-                    stream::build_audio(&mut counters, &opus, &[[0u8; HAPTIC_FRAME]; BLOCKS], headset, &mut buf)
+                    stream::build_audio_with_microphone(&mut counters, &opus, &[[0u8; HAPTIC_FRAME]; BLOCKS], headset,
+                    microphone, &mut buf)
                         .len();
                 let mut pkt = StreamPacket {
                     len,
                     data: [0u8; MAX_REPORT],
                 };
                 pkt.data[..len].copy_from_slice(&buf[..len]);
-                let _ = device.stream_tx.try_send(pkt);
+                if device.stream_tx.try_send(pkt).is_ok() {
+                    mic_clock.sent(Instant::now(), microphone);
+                }
             }
             continue;
         }
@@ -312,22 +418,22 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         };
 
         // Audio source
-        match h.source {
-            AudioSource::SystemAudio => {
-                if source
-                    .as_ref()
-                    .map(|s| s.sub.device != h.device)
-                    .unwrap_or(true)
-                {
-                    source = Some(Source {
-                        sub: engine.audio.subscribe(&h.device),
-                        acc: 0.0,
-                        primed: false,
-                        chunk: Vec::with_capacity(1024),
-                    });
-                }
+        // PC audio is captured for audio-to-vibration, for the speaker, or both.
+        if h.source == AudioSource::SystemAudio || pc_speaker {
+            if source
+                .as_ref()
+                .map(|s| s.sub.device != h.device)
+                .unwrap_or(true)
+            {
+                source = Some(Source {
+                    sub: engine.audio.subscribe(&h.device),
+                    acc: 0.0,
+                    primed: false,
+                    chunk: Vec::with_capacity(1024),
+                });
             }
-            AudioSource::None => source = None,
+        } else {
+            source = None;
         }
         // Clock
         let now = Instant::now();
@@ -387,33 +493,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         for frame in frames.iter_mut().take(blocks) {
             // PC audio window
             pc_spk.clear();
+            hap.fill([0.0; 2]);
             if let Some(src) = source.as_mut() {
                 let (chunk, rate) = src.take(win, h.latency.prime_windows(), &mut underruns);
-                // Haptics: filter at the source rate, then decimate to 3 kHz.
-                filter.configure(
-                    rate as f32,
-                    h.low_pass_hz.clamp(60.0, 1400.0),
-                    h.high_pass_hz.clamp(5.0, 300.0),
-                );
-                filtered.clear();
-                for fr in chunk {
-                    let (l, r) = if h.stereo {
-                        (fr[0], fr[1])
-                    } else {
-                        let m = 0.5 * (fr[0] + fr[1]);
-                        (m, m)
-                    };
-                    let a = filter.run(0, l) * h.gain;
-                    let b = filter.run(1, r) * h.gain;
-                    filtered.push([a, b]);
-                }
-                resample_window(&mut prev_h, &filtered, &mut hap);
-                if pc_speaker && !chunk.is_empty() {
-                    pc_spk.resize(win, [0.0; 2]);
-                    resample_window(&mut prev_pc, chunk, &mut pc_spk);
-                }
-            } else {
-                hap.fill([0.0; 2]);
+                pc_audio.render(h, chunk, rate, &mut hap, &mut pc_spk, win);
             }
 
             // Game audio from the virtual DualSense: actuator channels into
@@ -476,7 +559,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             last_sound = now;
         }
         if now.duration_since(last_sound) > IDLE_AFTER && !media {
-            // Nothing to play: keep the radio quiet.
+            // Nothing to play: keep the radio quiet unless recording needs refresh.
+            if mic_clock.due(now, microphone) && mic_control(&mut counters, recording) {
+                mic_clock.sent(now, microphone);
+            }
             continue;
         }
 
@@ -512,9 +598,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                     }
                 }
             }
-            stream::build_audio(&mut counters, &opus, &frames, headset, &mut buf).len()
+            stream::build_audio_with_microphone(&mut counters, &opus, &frames, headset,
+                microphone, &mut buf).len()
         } else {
-            stream::build(&mut counters, &frames[0], &mut buf).len()
+            stream::build_with_microphone(&mut counters, &frames[0], microphone, &mut buf).len()
         };
         let mut pkt = StreamPacket {
             len,
@@ -527,6 +614,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 .stats
                 .stream_underruns
                 .fetch_add(1, Ordering::Relaxed);
+        } else {
+            mic_clock.sent(Instant::now(), microphone);
         }
         if underruns > 0 {
             device
@@ -536,8 +625,9 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             underruns = 0;
         }
     }
-    if was_media {
-        mic_off(&mut counters);
+    device.microphone.configure(false, true, 100);
+    if was_media || capture_used {
+        mic_control(&mut counters, false);
     }
     device.pcm_mode.store(false, Ordering::Release);
     if device.speaker_route.load(Ordering::Acquire) != SPEAKER_UNTOUCHED {
@@ -549,6 +639,106 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pc_tone() -> Vec<[f32; 2]> {
+        (0..WINDOW)
+            .map(|i| {
+                let t = i as f32 / 48_000.0;
+                [
+                    (t * 300.0 * std::f32::consts::TAU).sin() * 0.25,
+                    (t * 600.0 * std::f32::consts::TAU).sin() * 0.5,
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pc_playback_keeps_stereo_without_driving_the_actuators() {
+        let mut route = PcAudio::new();
+        let mut h = Haptics::default();
+        h.source = AudioSource::None;
+        h.pc_audio_on_speaker = true;
+        let chunk = pc_tone();
+        let mut actuators = [[99.0; 2]; 32];
+        let mut speaker = Vec::new();
+        route.render(&h, &chunk, 48_000, &mut actuators, &mut speaker, WINDOW);
+        assert_eq!(actuators, [[0.0; 2]; 32]);
+        assert_eq!(speaker.len(), WINDOW);
+        assert!(speaker
+            .iter()
+            .any(|f| f[0].abs() > 0.1 && (f[0] - f[1]).abs() > 0.1));
+
+        // Selecting audio-derived haptics must not alter the audible PCM.
+        let mut with_haptics = PcAudio::new();
+        h.source = AudioSource::SystemAudio;
+        let mut second_speaker = Vec::new();
+        with_haptics.render(
+            &h,
+            &chunk,
+            48_000,
+            &mut actuators,
+            &mut second_speaker,
+            WINDOW,
+        );
+        assert!(actuators.iter().flatten().any(|v| v.abs() > 0.01));
+        assert_eq!(speaker, second_speaker);
+
+        // Switching back must clear the previous haptic window immediately.
+        h.source = AudioSource::None;
+        with_haptics.render(
+            &h,
+            &chunk,
+            48_000,
+            &mut actuators,
+            &mut second_speaker,
+            WINDOW,
+        );
+        assert_eq!(actuators, [[0.0; 2]; 32]);
+        assert!(second_speaker.iter().flatten().any(|v| v.abs() > 0.1));
+    }
+
+    #[test]
+    fn audio_haptics_and_playback_can_be_disabled_independently() {
+        let mut route = PcAudio::new();
+        let mut h = Haptics::default();
+        h.source = AudioSource::SystemAudio;
+        h.pc_audio_on_speaker = false;
+        let mut actuators = [[0.0; 2]; 32];
+        let mut speaker = vec![[99.0; 2]; WINDOW];
+        route.render(&h, &pc_tone(), 48_000, &mut actuators, &mut speaker, WINDOW);
+        assert!(actuators.iter().flatten().any(|v| v.abs() > 0.01));
+        assert!(speaker.is_empty());
+        h.source = AudioSource::None;
+        route.render(&h, &pc_tone(), 48_000, &mut actuators, &mut speaker, WINDOW);
+        assert_eq!(actuators, [[0.0; 2]; 32]);
+        assert!(speaker.is_empty());
+    }
+
+    #[test]
+    fn microphone_controls_are_opt_in_and_idle_stays_quiet() {
+        let start = Instant::now();
+        let mut clock = MicrophoneClock::new(start);
+        assert!(!clock.due(start, None));
+        assert!(!clock.due(start + Duration::from_secs(3600), None));
+        // Enabling capture while muted still stops the implicit media admission.
+        assert!(clock.due(start, Some(false)));
+        clock.sent(start, Some(false));
+        assert!(!clock.due(start + Duration::from_secs(3600), Some(false)));
+        assert!(clock.due(start, Some(true)));
+        clock.sent(start, Some(true));
+        assert!(!clock.due(start + Duration::from_millis(999), Some(true)));
+        assert!(clock.due(start + Duration::from_secs(1), Some(true)));
+        // Active media carries capture; it needs no standalone refresh.
+        for tick in 1..=300 {
+            let now = start + PERIOD * tick;
+            clock.sent(now, Some(true));
+            assert!(!clock.due(now, Some(true)));
+        }
+        let end = start + PERIOD * 300;
+        assert!(clock.due(end, Some(false)));
+        clock.sent(end, Some(false));
+        assert!(!clock.due(end + Duration::from_secs(3600), Some(false)));
+    }
 
     #[test]
     fn volume_spans_the_accepted_range() {

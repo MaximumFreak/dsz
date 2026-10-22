@@ -566,24 +566,24 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
             t.gyro = Some(on);
             drop(t);
             engine.toast(if on {
-                "Gyro mouse on"
+                crate::i18n::tr("Gyro mouse on")
             } else {
-                "Gyro mouse off"
+                crate::i18n::tr("Gyro mouse off")
             });
         }
         Action::ToggleTouchpadMouse => {
             let live = device.live.lock().touch_mouse_active;
             device.toggles.lock().touchpad = Some(!live);
             engine.toast(if live {
-                "Touchpad mouse off"
+                crate::i18n::tr("Touchpad mouse off")
             } else {
-                "Touchpad mouse on"
+                crate::i18n::tr("Touchpad mouse on")
             });
         }
         Action::Profile { name } => {
             if engine.profiles.exists(name) {
                 engine.set_device_profile(device, name);
-                engine.toast(format!("Profile: {name}"));
+                engine.toast(crate::localized_format!("Profile: {name}", "Perfil: {name}"));
                 device.identify_light();
             }
         }
@@ -636,23 +636,23 @@ fn action_up(a: &Action) {
 /// fires this once per gesture, the same way a profile switch fires once.
 fn turn_off_controller(engine: &Engine, device: &Device) {
     if !device.is_bluetooth() {
-        engine.warn_toast("Turn off works over Bluetooth");
+        engine.warn_toast(crate::i18n::tr("Turn off works over Bluetooth"));
         return;
     }
     let mac = device.mac.lock().clone();
     if crate::platform::bluetooth_address(&mac).is_none() {
-        engine.warn_toast("No Bluetooth address, so the controller stays on");
+        engine.warn_toast(crate::i18n::tr("No Bluetooth address, so the controller stays on"));
         return;
     }
     log::info!("turning the controller off");
     device.flight.expect_off.store(true, Ordering::Release);
-    engine.toast("Turning the controller off");
+    engine.toast(crate::i18n::tr("Turning the controller off"));
     // On the input thread, like idle shutoff: the radio call is short, and
     // the controller is going away anyway.
     if !disconnect_bluetooth(mac) {
         log::warn!("Bluetooth disconnect failed");
         device.flight.expect_off.store(false, Ordering::Release);
-        engine.warn_toast("Couldn't turn the controller off");
+        engine.warn_toast(crate::i18n::tr("Couldn't turn the controller off"));
     }
 }
 
@@ -868,11 +868,17 @@ impl Pipeline {
         // Mute toggle
         if s.buttons.has(Button::Mute)
             && !prev.buttons.has(Button::Mute)
-            && profile.lighting.mute_led == MuteLed::Toggle
+            && (profile.lighting.mute_led == MuteLed::Toggle
+                || (device.microphone.enabled() && profile.microphone.mute_button))
         {
             let mut t = device.toggles.lock();
             t.mute_engaged = !t.mute_engaged;
             drop(t);
+            // Gate capture immediately: the idle media clock can otherwise
+            // sleep for 100 ms after the Mute LED has already changed.
+            if device.microphone.enabled() {
+                device.apply_microphone(&profile.microphone);
+            }
             device.kick();
         }
 

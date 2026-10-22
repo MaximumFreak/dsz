@@ -52,33 +52,33 @@ impl Backup {
     pub fn parse(text: &str) -> Result<Backup, String> {
         let text = text.trim_start_matches(crate::settings::BOM);
         let v: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| format!("This file isn't valid JSON ({e})."))?;
+            serde_json::from_str(text).map_err(|e| crate::localized_format!("This file isn't valid JSON ({e}).", "Este arquivo não contém JSON válido ({e})."))?;
         if v.get("format").and_then(|f| f.as_str()) != Some(FORMAT) {
             if serde_json::from_value::<Profile>(v.clone()).is_ok() && v.get("name").is_some() {
-                return Err("This is a single profile, not a full backup. Use \"Import profile…\" on the Profiles page.".into());
+                return Err(crate::i18n::tr("This is a single profile, not a full backup. Use \"Import profile…\" on the Profiles page.").into());
             }
-            return Err("This file isn't a DSZ backup.".into());
+            return Err(crate::i18n::tr("This file isn't a DSZ backup.").into());
         }
         let b: Backup =
-            serde_json::from_value(v).map_err(|e| format!("This backup is damaged ({e})."))?;
+            serde_json::from_value(v).map_err(|e| crate::localized_format!("This backup is damaged ({e}).", "Este backup está danificado ({e})."))?;
         if b.version > VERSION {
-            return Err(format!(
-                "This backup was made by a newer DSZ ({}). Update DSZ to restore it.",
-                if b.app_version.is_empty() { "unknown version" } else { &b.app_version }
+            return Err(crate::localized_format!(
+                "This backup was made by a newer DSZ ({}). Update DSZ to restore it.", "Este backup foi criado em uma versão mais recente do DSZ ({}). Atualize para restaurá-lo.",
+                if b.app_version.is_empty() { crate::i18n::tr("unknown version") } else { &b.app_version }
             ));
         }
         if b.profiles.is_empty() {
-            return Err("This backup has no profiles in it.".into());
+            return Err(crate::i18n::tr("This backup has no profiles in it.").into());
         }
         for (i, p) in b.profiles.iter().enumerate() {
             if p.name.trim().is_empty() {
-                return Err(format!("Profile {} in this backup has no name.", i + 1));
+                return Err(crate::localized_format!("Profile {} in this backup has no name.", "O perfil {} deste backup não tem nome.", i + 1));
             }
             if b.profiles[..i]
                 .iter()
                 .any(|q| q.name.eq_ignore_ascii_case(&p.name))
             {
-                return Err(format!("This backup has two profiles named \"{}\".", p.name));
+                return Err(crate::localized_format!("This backup has two profiles named \"{}\".", "Este backup contém dois perfis chamados \"{}\".", p.name));
             }
         }
         Ok(b)
@@ -95,12 +95,12 @@ impl Backup {
             self.profiles.len(),
             if self.profiles.len() == 1 { "" } else { "s" }
         );
-        s.push_str(" and app settings");
+        s.push_str(crate::i18n::tr(" and app settings"));
         if !self.created.is_empty() {
-            s.push_str(&format!(", made {}", self.created));
+            s.push_str(&crate::localized_format!(", made {}", ", criado em {}", self.created));
         }
         if !self.app_version.is_empty() {
-            s.push_str(&format!(" by DSZ {}", self.app_version));
+            s.push_str(&crate::localized_format!(" by DSZ {}", " pelo DSZ {}", self.app_version));
         }
         s
     }

@@ -39,8 +39,8 @@ impl App {
         page_header(
             ui,
             &name,
-            &format!(
-                "{} over {}  ·  profile \"{}\"",
+            &crate::localized_format!(
+                "{} over {}  ·  profile \"{}\"", "{} por {}  ·  perfil \"{}\"",
                 d.model.name(),
                 if d.is_bluetooth() { "Bluetooth" } else { "USB" },
                 self.engine.profile_name_for(d)
@@ -76,17 +76,17 @@ impl App {
                 );
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
-                    if primary_button(ui, "Identify")
-                        .on_hover_text("Flash the lightbar and buzz")
+                    if primary_button(ui, crate::i18n::tr("Identify"))
+                        .on_hover_text(crate::i18n::tr("Flash the lightbar and buzz"))
                         .clicked()
                     {
                         d.identify();
                     }
-                    if button(ui, "Rumble test").clicked() {
+                    if button(ui, crate::i18n::tr("Rumble test")).clicked() {
                         d.test_rumble(200, 160, 400);
                     }
                     if d.is_bluetooth() && p.haptics.enabled {
-                        if button(ui, "Haptic L").clicked() {
+                        if button(ui, crate::i18n::tr("Haptic L")).clicked() {
                             d.pulse(HapticPulse {
                                 left: 0.9,
                                 right: 0.0,
@@ -94,7 +94,7 @@ impl App {
                                 ms: 140.0,
                             });
                         }
-                        if button(ui, "Haptic R").clicked() {
+                        if button(ui, crate::i18n::tr("Haptic R")).clicked() {
                             d.pulse(HapticPulse {
                                 left: 0.0,
                                 right: 0.9,
@@ -106,17 +106,17 @@ impl App {
                     if button(
                         ui,
                         if live.calibrating {
-                            "Calibrating…"
+                            crate::i18n::tr("Calibrating…")
                         } else {
-                            "Calibrate gyro"
+                            crate::i18n::tr("Calibrate gyro")
                         },
                     )
-                    .on_hover_text("Put the controller down on a flat surface first")
+                    .on_hover_text(crate::i18n::tr("Put the controller down on a flat surface first"))
                     .clicked()
                     {
                         d.calibrate_request.store(true, Ordering::Release);
                     }
-                    if d.is_bluetooth() && danger_button(ui, "Turn off").clicked() {
+                    if d.is_bluetooth() && danger_button(ui, crate::i18n::tr("Turn off")).clicked() {
                         let mac = d.mac.lock().clone();
                         std::thread::spawn(move || crate::platform::bt_disconnect(&mac));
                     }
@@ -124,15 +124,15 @@ impl App {
             });
         };
         let draw_stats = |ui: &mut egui::Ui| {
-            card(ui, "Status", "", |ui| {
+            card(ui, crate::i18n::tr("Status"), "", |ui| {
                 let link = d.link.lock().clone();
                 let (lt, lc) = match &link {
-                    Link::Live => ("Connected".to_string(), GOOD),
-                    Link::Quiet => ("No signal".to_string(), WARN),
-                    Link::Opening => ("Connecting".to_string(), MUTED),
+                    Link::Live => (crate::i18n::tr("Connected").to_string(), GOOD),
+                    Link::Quiet => (crate::i18n::tr("No signal").to_string(), WARN),
+                    Link::Opening => (crate::i18n::tr("Connecting").to_string(), MUTED),
                     Link::Error(e) => (e.clone(), BAD),
                 };
-                stat(ui, "Link", RichText::new(lt).color(lc));
+                stat(ui, crate::i18n::tr("Link"), RichText::new(lt).color(lc));
                 let bat = input.battery_percent;
                 let bcol = if bat <= 15 {
                     BAD
@@ -142,12 +142,12 @@ impl App {
                     GOOD
                 };
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Battery").color(MUTED));
+                    ui.label(RichText::new(crate::i18n::tr("Battery")).color(MUTED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let status = match input.battery_status {
-                            ds_proto::BatteryStatus::Charging => " · charging",
-                            ds_proto::BatteryStatus::Full => " · full",
-                            ds_proto::BatteryStatus::Error => " · error",
+                            ds_proto::BatteryStatus::Charging => crate::i18n::tr(" · charging"),
+                            ds_proto::BatteryStatus::Full => crate::i18n::tr(" · full"),
+                            ds_proto::BatteryStatus::Error => crate::i18n::tr(" · error"),
                             _ => "",
                         };
                         ui.label(RichText::new(format!("{bat}%{status}")).color(TEXT));
@@ -157,24 +157,24 @@ impl App {
                 let s = &d.stats;
                 stat(
                     ui,
-                    "Input rate",
+                    crate::i18n::tr("Input rate"),
                     format!("{} Hz", s.input_hz.load(Ordering::Relaxed)),
                 );
                 stat(
                     ui,
-                    "Control writes",
+                    crate::i18n::tr("Control writes"),
                     format!("{} /s", s.output_hz.load(Ordering::Relaxed)),
                 );
                 if d.is_bluetooth() {
                     stat(
                         ui,
-                        "Haptic stream",
-                        format!("{} packets/s", s.stream_hz.load(Ordering::Relaxed)),
+                        crate::i18n::tr("Haptic stream"),
+                        crate::localized_format!("{} packets/s", "{} pacotes/s", s.stream_hz.load(Ordering::Relaxed)),
                     );
                 }
                 stat(
                     ui,
-                    "Write time",
+                    crate::i18n::tr("Write time"),
                     format!(
                         "{:.2} ms",
                         s.write_us.load(Ordering::Relaxed) as f32 / 1000.0
@@ -184,9 +184,9 @@ impl App {
                     s.write_errors.load(Ordering::Relaxed) + s.crc_errors.load(Ordering::Relaxed);
                 stat(
                     ui,
-                    "Recovered errors",
-                    RichText::new(format!(
-                        "{} write · {} CRC",
+                    crate::i18n::tr("Recovered errors"),
+                    RichText::new(crate::localized_format!(
+                        "{} write · {} CRC", "{} envios · {} CRC",
                         s.write_errors.load(Ordering::Relaxed),
                         s.crc_errors.load(Ordering::Relaxed)
                     ))
@@ -202,14 +202,14 @@ impl App {
                 let fw = d.firmware.lock().clone();
                 stat(
                     ui,
-                    "Firmware",
+                    crate::i18n::tr("Firmware"),
                     if fw.is_empty() { "—".to_string() } else { fw },
                 );
                 stat(
                     ui,
-                    "Gyro",
+                    crate::i18n::tr("Gyro"),
                     if live.gyro_active {
-                        RichText::new("driving the mouse").color(ACCENT)
+                        RichText::new(crate::i18n::tr("driving the mouse")).color(ACCENT)
                     } else {
                         RichText::new(format!(
                             "{:+.0} / {:+.0} / {:+.0} °/s",
@@ -247,20 +247,20 @@ impl App {
         if !self.engine.settings.read().show_tips {
             return;
         }
-        card(ui, "Tips", "", |ui| {
+        card(ui, crate::i18n::tr("Tips"), "", |ui| {
             for tip in [
-                "Choose what games see under Virtual controller: this controller as-is, an Xbox 360 pad, or a DualSense with game haptics. Mappings that hide a button or press a controller button need one of the virtual pads.",
-                "Haptics & audio streams to the actuators over Bluetooth only while there is something to play. The rest of the time the controller's own rumble emulation plays rumble.",
-                "Profiles & games switches profiles per game. Games with native DualSense support switch to your DualSense profile without a rule.",
-                "Close other controller apps (DS4Windows and the like) while DSZ runs; only one app can drive the controller.",
-                "Steam Input also reads and writes the controller. If buttons double up, or lights and triggers flicker in a Steam game, turn Steam Input off for that game.",
-                "Game mods that drive triggers and lights over UDP connect on port 6969 (Settings).",
+                crate::i18n::tr("Choose what games see under Virtual controller: this controller as-is, an Xbox 360 pad, or a DualSense with game haptics. Mappings that hide a button or press a controller button need one of the virtual pads."),
+                crate::i18n::tr("Haptics & audio streams to the actuators over Bluetooth only while there is something to play. The rest of the time the controller's own rumble emulation plays rumble."),
+                crate::i18n::tr("Profiles & games switches profiles per game. Games with native DualSense support switch to your DualSense profile without a rule."),
+                crate::i18n::tr("Close other controller apps (DS4Windows and the like) while DSZ runs; only one app can drive the controller."),
+                crate::i18n::tr("Steam Input also reads and writes the controller. If buttons double up, or lights and triggers flicker in a Steam game, turn Steam Input off for that game."),
+                crate::i18n::tr("Game mods that drive triggers and lights over UDP connect on port 6969 (Settings)."),
             ] {
                 muted(ui, &format!("• {tip}"));
             }
             ui.add_space(4.0);
-            if button(ui, "Hide tips")
-                .on_hover_text("Turn them back on in Settings")
+            if button(ui, crate::i18n::tr("Hide tips"))
+                .on_hover_text(crate::i18n::tr("Turn them back on in Settings"))
                 .clicked()
             {
                 self.engine.settings.write().show_tips = false;
@@ -272,8 +272,8 @@ impl App {
     fn empty_state(&mut self, ui: &mut egui::Ui, p: &Profile) {
         page_header(
             ui,
-            "No controller yet",
-            "Connect a DualSense or DualSense Edge and it appears here within a second.",
+            crate::i18n::tr("No controller yet"),
+            crate::i18n::tr("Connect a DualSense or DualSense Edge and it appears here within a second."),
         );
         card(ui, "", "", |ui| {
             let mut input = ds_proto::InputState::default();
@@ -307,8 +307,8 @@ impl App {
                 },
             );
             ui.add_space(8.0);
-            ui.label(RichText::new("Pair over Bluetooth").font(heading(15.0)));
-            muted(ui, "Hold Create and PS until the lightbar flashes, then add it from Windows Settings → Bluetooth & devices. A USB cable works too.");
+            ui.label(RichText::new(crate::i18n::tr("Pair over Bluetooth")).font(heading(15.0)));
+            muted(ui, crate::i18n::tr("Hold Create and PS until the lightbar flashes, then add it from Windows Settings → Bluetooth & devices. A USB cable works too."));
         });
         ui.add_space(12.0);
         self.tips(ui);

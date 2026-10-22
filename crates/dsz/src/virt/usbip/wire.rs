@@ -96,6 +96,8 @@ pub struct Submit {
     pub data: Vec<u8>,
     /// Per-packet buffer lengths for isochronous transfers.
     pub iso_lens: Vec<u32>,
+    /// Packet locations in the original host transfer buffer (not packed IN data).
+    pub iso_offsets: Vec<u32>,
 }
 
 /// Read one command. `Ok(None)` at a clean end of stream.
@@ -128,6 +130,7 @@ pub fn read_command(r: &mut impl Read, hdr: &mut [u8; HEADER]) -> io::Result<Opt
             }
             let packets = (np > 0).then_some(np as u32);
             let mut iso_lens = Vec::new();
+            let mut iso_offsets = Vec::new();
             if let Some(n) = packets {
                 if n > 1024 {
                     return Err(io::Error::new(
@@ -143,6 +146,12 @@ pub fn read_command(r: &mut impl Read, hdr: &mut [u8; HEADER]) -> io::Result<Opt
                     .iter()
                     .map(|c| be32(c, 4))
                     .collect();
+                iso_offsets = d
+                    .as_chunks::<ISO_DESC>()
+                    .0
+                    .iter()
+                    .map(|c| be32(c, 0))
+                    .collect();
             }
             Ok(Some(Command::Submit(Submit {
                 seq,
@@ -153,6 +162,7 @@ pub fn read_command(r: &mut impl Read, hdr: &mut [u8; HEADER]) -> io::Result<Opt
                 setup,
                 data,
                 iso_lens,
+                iso_offsets,
             })))
         }
         CMD_UNLINK => Ok(Some(Command::Unlink {
@@ -248,6 +258,32 @@ mod tests {
         assert_eq!(s.ep, 1);
         assert_eq!(s.data, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(s.iso_lens, vec![4, 4]);
+        assert_eq!(s.iso_offsets, vec![0, 4]);
+    }
+
+    #[test]
+    fn capture_offsets_survive_gaps() {
+        let request = |offset: u32, length: u32| {
+            let mut bytes = Vec::new();
+            for value in [CMD_SUBMIT, 7, 0x10001, DIR_IN, 2, 0, 512, 0, 2, 1] {
+                bytes.extend_from_slice(&value.to_be_bytes());
+            }
+            bytes.extend_from_slice(&[0; 8]);
+            for (off, len) in [(0, 192), (offset, length)] {
+                for value in [off, len, 0, 0] {
+                    bytes.extend_from_slice(&value.to_be_bytes());
+                }
+            }
+            bytes
+        };
+        let mut hdr = [0; HEADER];
+        let valid = request(256, 192);
+        let Command::Submit(submit) = read_command(&mut &valid[..], &mut hdr).unwrap().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(submit.iso_offsets, [0, 256]);
+        assert_eq!(submit.iso_lens, [192, 192]);
     }
 
     #[test]

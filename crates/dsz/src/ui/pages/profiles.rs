@@ -51,10 +51,10 @@ fn profile_swatch(ui: &mut egui::Ui, p: &Profile) {
 /// controller's name, in that controller's color.
 fn virtual_badge(ui: &mut egui::Ui, kind: VirtualKind) {
     let (name, color) = match kind {
-        VirtualKind::Off => ("Native: games see this controller", MUTED),
-        VirtualKind::Xbox360 => ("Virtual Xbox 360 controller", GOOD),
-        VirtualKind::DualSense => ("Virtual DualSense", ACCENT),
-        VirtualKind::DualShock4 => ("Virtual DualShock 4", VIOLET),
+        VirtualKind::Off => (crate::i18n::tr("Native: games see this controller"), MUTED),
+        VirtualKind::Xbox360 => (crate::i18n::tr("Virtual Xbox 360 controller"), GOOD),
+        VirtualKind::DualSense => (crate::i18n::tr("Virtual DualSense"), ACCENT),
+        VirtualKind::DualShock4 => (crate::i18n::tr("Virtual DualShock 4"), VIOLET),
     };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -124,7 +124,7 @@ impl App {
         _p: &mut Profile,
         dev: Option<&Arc<Device>>,
     ) {
-        page_header(ui, "Profiles & games", "Each profile holds lighting, triggers, haptics, motion, and mappings. Games can switch profiles automatically.");
+        page_header(ui, crate::i18n::tr("Profiles & games"), crate::i18n::tr("Each profile holds lighting, triggers, haptics, motion, and mappings. Games can switch profiles automatically."));
         let engine = self.engine.clone();
         let active = match dev {
             Some(d) => engine.profile_name_for(d),
@@ -142,12 +142,12 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_profile)
-                    .hint_text("New profile name")
+                    .hint_text(crate::i18n::tr("New profile name"))
                     .desired_width(220.0),
             );
-            if primary_button(ui, "+ Create").clicked() {
+            if primary_button(ui, crate::i18n::tr("+ Create")).clicked() {
                 let name = if self.new_profile.trim().is_empty() {
-                    "New profile"
+                    crate::i18n::tr("New profile")
                 } else {
                     self.new_profile.trim()
                 };
@@ -156,22 +156,22 @@ impl App {
                 self.edit_pin = Some(n);
                 self.page = crate::ui::Page::Lighting;
             }
-            if button(ui, "Import profile…").clicked() {
+            if button(ui, crate::i18n::tr("Import profile…")).clicked() {
                 if let Some(f) = rfd::FileDialog::new()
-                    .add_filter("Profile", &["json"])
+                    .add_filter(crate::i18n::tr("Profile"), &["json"])
                     .pick_file()
                 {
                     match engine.profiles.import(&f) {
-                        Ok(n) => engine.toast(format!("Imported \"{n}\"")),
+                        Ok(n) => engine.toast(crate::localized_format!("Imported \"{n}\"", "\"{n}\" importado")),
                         Err(e) => engine.warn_toast(e),
                     }
                 }
             }
-            if button(ui, "Open profiles folder").clicked() {
+            if button(ui, crate::i18n::tr("Open profiles folder")).clicked() {
                 crate::platform::open_in_explorer(engine.profiles.dir());
             }
-            if button(ui, "Backup & restore…")
-                .on_hover_text("Back up or restore every profile and setting at once, on the Settings page")
+            if button(ui, crate::i18n::tr("Backup & restore…"))
+                .on_hover_text(crate::i18n::tr("Back up or restore every profile and setting at once, on the Settings page"))
                 .clicked()
             {
                 self.page = crate::ui::Page::Settings;
@@ -218,13 +218,13 @@ impl App {
                                                     && ui
                                                         .input(|i| i.key_pressed(egui::Key::Enter));
                                                 ui.horizontal(|ui| {
-                                                    if button(ui, "Save").clicked() || commit {
+                                                    if button(ui, crate::i18n::tr("Save")).clicked() || commit {
                                                         save = Some((
                                                             old.clone(),
                                                             buf.trim().to_string(),
                                                         ));
                                                     }
-                                                    if button(ui, "Cancel").clicked() {
+                                                    if button(ui, crate::i18n::tr("Cancel")).clicked() {
                                                         cancel = true;
                                                     }
                                                 });
@@ -253,13 +253,13 @@ impl App {
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 4.0;
                                             if is_active {
-                                                pill(ui, "Active", ACCENT);
+                                                pill(ui, crate::i18n::tr("Active"), ACCENT);
                                             }
                                             if prof.name == default {
-                                                pill(ui, "Default", MUTED);
+                                                pill(ui, crate::i18n::tr("Default"), MUTED);
                                             }
                                             if ds_auto.as_deref() == Some(prof.name.as_str()) {
-                                                pill(ui, "DualSense games", ACCENT);
+                                                pill(ui, crate::i18n::tr("DualSense games"), ACCENT);
                                             }
                                             let n = games
                                                 .iter()
@@ -268,8 +268,8 @@ impl App {
                                             if n > 0 {
                                                 pill(
                                                     ui,
-                                                    &format!(
-                                                        "{n} game{}",
+                                                    &crate::localized_format!(
+                                                        "{n} game{}", "{n} jogo{}",
                                                         if n == 1 { "" } else { "s" }
                                                     ),
                                                     VIOLET,
@@ -285,33 +285,33 @@ impl App {
                                     (
                                         prof.haptics.enabled
                                             && prof.haptics.source == AudioSource::SystemAudio,
-                                        "Audio haptics",
+                                        crate::i18n::tr("Audio haptics"),
                                     ),
-                                    (prof.gyro.mode == GyroMode::Mouse, "Gyro"),
-                                    (prof.touchpad.mode == TouchMode::Mouse, "Touch mouse"),
+                                    (prof.gyro.mode == GyroMode::Mouse, crate::i18n::tr("Gyro")),
+                                    (prof.touchpad.mode == TouchMode::Mouse, crate::i18n::tr("Touch mouse")),
                                     (
                                         !matches!(prof.triggers.left, ds_proto::TriggerEffect::Off)
                                             || !matches!(
                                                 prof.triggers.right,
                                                 ds_proto::TriggerEffect::Off
                                             ),
-                                        "Triggers",
+                                        crate::i18n::tr("Triggers"),
                                     ),
-                                    (!prof.mappings.is_empty(), "Mappings"),
+                                    (!prof.mappings.is_empty(), crate::i18n::tr("Mappings")),
                                 ];
                                 let list: Vec<&str> =
                                     feats.iter().filter(|f| f.0).map(|f| f.1).collect();
                                 muted(
                                     ui,
                                     &if list.is_empty() {
-                                        "Lighting only".to_string()
+                                        crate::i18n::tr("Lighting only").to_string()
                                     } else {
                                         list.join(" · ")
                                     },
                                 );
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
-                                    if !is_active && primary_button(ui, "Use").clicked() {
+                                    if !is_active && primary_button(ui, crate::i18n::tr("Use")).clicked() {
                                         match dev {
                                             Some(d) => engine.set_device_profile(d, &prof.name),
                                             None => {
@@ -322,45 +322,45 @@ impl App {
                                         }
                                         self.edit_pin = None;
                                     }
-                                    if button(ui, "Edit").clicked() {
+                                    if button(ui, crate::i18n::tr("Edit")).clicked() {
                                         self.edit_pin = Some(prof.name.clone());
                                         self.page = crate::ui::Page::Lighting;
                                     }
-                                    ui.menu_button("More ▾", |ui| {
-                                        if ui.button("Duplicate").clicked() {
+                                    ui.menu_button(crate::i18n::tr("More ▾"), |ui| {
+                                        if ui.button(crate::i18n::tr("Duplicate")).clicked() {
                                             engine.profiles.duplicate(&prof.name);
                                             ui.close();
                                         }
-                                        if ui.button("Rename").clicked() {
+                                        if ui.button(crate::i18n::tr("Rename")).clicked() {
                                             self.rename =
                                                 Some((prof.name.clone(), prof.name.clone()));
                                             ui.close();
                                         }
-                                        if ui.button("Make default").clicked() {
+                                        if ui.button(crate::i18n::tr("Make default")).clicked() {
                                             engine.settings.write().default_profile =
                                                 prof.name.clone();
                                             engine.settings_changed();
                                             ui.close();
                                         }
                                         ui.separator();
-                                        if ui.button("Export profile…").clicked() {
+                                        if ui.button(crate::i18n::tr("Export profile…")).clicked() {
                                             if let Some(f) = rfd::FileDialog::new()
                                                 .set_file_name(format!(
                                                     "{}.json",
                                                     sanitize_file_name(&prof.name)
                                                 ))
-                                                .add_filter("Profile", &["json"])
+                                                .add_filter(crate::i18n::tr("Profile"), &["json"])
                                                 .save_file()
                                             {
                                                 match engine.profiles.export(&prof.name, &f) {
-                                                    Ok(()) => engine.toast("Profile exported"),
+                                                    Ok(()) => engine.toast(crate::i18n::tr("Profile exported")),
                                                     Err(e) => engine.warn_toast(e),
                                                 }
                                             }
                                             ui.close();
                                         }
                                         ui.separator();
-                                        if ui.button(RichText::new("Delete").color(BAD)).clicked() {
+                                        if ui.button(RichText::new(crate::i18n::tr("Delete")).color(BAD)).clicked() {
                                             self.confirm_delete = Some(prof.name.clone());
                                             ui.close();
                                         }
@@ -369,8 +369,8 @@ impl App {
                                 if self.confirm_delete.as_deref() == Some(prof.name.as_str()) {
                                     ui.add_space(4.0);
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new("Delete this profile?").color(BAD));
-                                        if danger_button(ui, "Delete").clicked() {
+                                        ui.label(RichText::new(crate::i18n::tr("Delete this profile?")).color(BAD));
+                                        if danger_button(ui, crate::i18n::tr("Delete")).clicked() {
                                             if engine.profiles.delete(&prof.name) {
                                                 let first = engine
                                                     .profiles
@@ -386,12 +386,12 @@ impl App {
                                                 }
                                             } else {
                                                 engine.warn_toast(
-                                                    "The last profile can't be deleted",
+                                                    crate::i18n::tr("The last profile can't be deleted"),
                                                 );
                                             }
                                             self.confirm_delete = None;
                                         }
-                                        if button(ui, "Keep").clicked() {
+                                        if button(ui, crate::i18n::tr("Keep")).clicked() {
                                             self.confirm_delete = None;
                                         }
                                     });
@@ -407,21 +407,21 @@ impl App {
         let names = engine.profiles.names();
         card(
             ui,
-            "Game profiles",
-            "Switch to a profile while a game runs, and back when it closes",
+            crate::i18n::tr("Game profiles"),
+            crate::i18n::tr("Switch to a profile while a game runs, and back when it closes"),
             |ui| {
                 let mut s = engine.settings.write();
                 let mut changed = false;
-                changed |= toggle_row(ui, "Switch automatically", "", &mut s.auto_profiles);
+                changed |= toggle_row(ui, crate::i18n::tr("Switch automatically"), "", &mut s.auto_profiles);
                 if let Some((p, exe)) = &*engine.game_override.read() {
-                    note(ui, &format!("{exe} is running → \"{p}\""), VIOLET);
+                    note(ui, &crate::localized_format!("{exe} is running → \"{p}\"", "{exe} em execução → \"{p}\""), VIOLET);
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let target = active.clone();
                     egui::ComboBox::from_id_salt("add-running")
                         .width(240.0)
-                        .selected_text("+ Add a running app")
+                        .selected_text(crate::i18n::tr("+ Add a running app"))
                         .height(360.0)
                         .show_ui(ui, |ui| {
                             for exe in &running {
@@ -435,9 +435,9 @@ impl App {
                                 }
                             }
                         });
-                    if button(ui, "Browse for .exe…").clicked() {
+                    if button(ui, crate::i18n::tr("Browse for .exe…")).clicked() {
                         if let Some(f) = rfd::FileDialog::new()
-                            .add_filter("Program", &["exe"])
+                            .add_filter(crate::i18n::tr("Program"), &["exe"])
                             .pick_file()
                         {
                             if let Some(n) = f.file_name() {
@@ -453,7 +453,7 @@ impl App {
                 });
                 ui.add_space(6.0);
                 if s.games.is_empty() {
-                    muted(ui, "No games yet. Add one while it runs, or browse for its .exe.");
+                    muted(ui, crate::i18n::tr("No games yet. Add one while it runs, or browse for its .exe."));
                 }
                 let mut remove = None;
                 for (i, g) in s.games.iter_mut().enumerate() {
@@ -477,18 +477,18 @@ impl App {
                             });
                         changed |= before != g.profile;
                         if !names.contains(&g.profile) {
-                            pill(ui, "missing", WARN);
+                            pill(ui, crate::i18n::tr("missing"), WARN);
                         }
                         let live = running.iter().any(|r| r.eq_ignore_ascii_case(g.exe.trim()));
                         if live {
-                            pill(ui, "running", GOOD);
+                            pill(ui, crate::i18n::tr("running"), GOOD);
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .add(
                                     egui::Button::new(RichText::new("✕").color(MUTED)).frame(false),
                                 )
-                                .on_hover_text("Remove")
+                                .on_hover_text(crate::i18n::tr("Remove"))
                                 .clicked()
                             {
                                 remove = Some(i);
@@ -509,18 +509,18 @@ impl App {
         ui.add_space(16.0);
         card(
             ui,
-            "DualSense games",
-            "Games with native DualSense support (found by checking the game's files) get adaptive triggers and haptics through a DualSense profile, without a rule",
+            crate::i18n::tr("DualSense games"),
+            crate::i18n::tr("Games with native DualSense support (found by checking the game's files) get adaptive triggers and haptics through a DualSense profile, without a rule"),
             |ui| {
                 let mut s = engine.settings.write();
                 let mut changed = toggle_row(
                     ui,
-                    "Switch DualSense games automatically",
-                    "A rule under Game profiles wins over this",
+                    crate::i18n::tr("Switch DualSense games automatically"),
+                    crate::i18n::tr("A rule under Game profiles wins over this"),
                     &mut s.auto_dualsense,
                 );
                 if s.auto_dualsense {
-                    row(ui, "Profile", "Used while a DualSense game runs", |ui| {
+                    row(ui, crate::i18n::tr("Profile"), crate::i18n::tr("Used while a DualSense game runs"), |ui| {
                         let before = s.dualsense_profile.clone();
                         egui::ComboBox::from_id_salt("ds-auto-profile")
                             .width(180.0)
@@ -532,14 +532,14 @@ impl App {
                             });
                         changed |= before != s.dualsense_profile;
                         if !names.contains(&s.dualsense_profile) {
-                            pill(ui, "missing", WARN);
+                            pill(ui, crate::i18n::tr("missing"), WARN);
                         }
                     });
                     if let Some(p) = engine.profiles.find(&s.dualsense_profile) {
                         if p.virtual_out.kind != VirtualKind::DualSense {
                             note(
                                 ui,
-                                "This profile does not use a virtual DualSense, so over Bluetooth the game cannot send its haptics to the controller.",
+                                crate::i18n::tr("This profile does not use a virtual DualSense, so over Bluetooth the game cannot send its haptics to the controller."),
                                 WARN,
                             );
                         }
@@ -547,9 +547,9 @@ impl App {
                     let found = engine.dsdetect.detected();
                     ui.add_space(4.0);
                     if found.is_empty() {
-                        muted(ui, "No DualSense games seen yet. They show up here the first time they run.");
+                        muted(ui, crate::i18n::tr("No DualSense games seen yet. They show up here the first time they run."));
                     } else {
-                        ui.label(RichText::new("Seen so far").color(MUTED));
+                        ui.label(RichText::new(crate::i18n::tr("Seen so far")).color(MUTED));
                         for (path, why) in found {
                             let name = std::path::Path::new(&path)
                                 .file_name()
@@ -565,16 +565,16 @@ impl App {
                 ui.add_space(8.0);
                 row(
                     ui,
-                    "Other games",
-                    "No native DualSense support, and no rule above",
+                    crate::i18n::tr("Other games"),
+                    crate::i18n::tr("No native DualSense support, and no rule above"),
                     |ui| {
                         let before = s.fallback_pad;
                         egui::ComboBox::from_id_salt("fallback-pad")
                             .width(200.0)
-                            .selected_text(s.fallback_pad.label())
+                            .selected_text(crate::i18n::tr(s.fallback_pad.label()))
                             .show_ui(ui, |ui| {
                                 for pad in [FallbackPad::Off, FallbackPad::DualShock4, FallbackPad::Xbox360] {
-                                    ui.selectable_value(&mut s.fallback_pad, pad, pad.label());
+                                    ui.selectable_value(&mut s.fallback_pad, pad, crate::i18n::tr(pad.label()));
                                 }
                             });
                         changed |= before != s.fallback_pad;
@@ -582,7 +582,7 @@ impl App {
                 );
                 muted(
                     ui,
-                    "Steam, GOG, and Xbox app installs, while Switch automatically is on. DualShock 4 is the one games such as Dead Cells use for PlayStation prompts. A rule above wins.",
+                    crate::i18n::tr("Steam, GOG, and Xbox app installs, while Switch automatically is on. DualShock 4 is the one games such as Dead Cells use for PlayStation prompts. A rule above wins."),
                 );
                 drop(s);
                 if changed {

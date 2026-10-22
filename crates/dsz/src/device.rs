@@ -214,6 +214,9 @@ pub struct Device {
     pub speaker_level: AtomicU8,
     /// Microphone packets kept while a speaker test runs.
     pub mic_tap: Mutex<Option<Vec<crate::haptics::mic::Packet>>>,
+    pub microphone: Arc<crate::haptics::capture::Capture>,
+    microphone_source: AtomicU8,
+    microphone_managed: AtomicBool,
     /// Silent reports queued when a speaker stream starts.
     pub speaker_lead: AtomicU8,
     /// What the last speaker test heard, for the Haptics page.
@@ -257,6 +260,96 @@ impl Device {
         let _ = self.kick_tx.try_send(());
     }
 
+    /// Apply a profile's microphone settings. Capture runs only while an app
+    /// records from the virtual DualSense (Discord in a call, a recorder),
+    /// so the rest of the time the controller's microphone, its radio
+    /// traffic and the idle-off timer are as if it were off.
+    pub fn apply_microphone(&self, mic: &crate::profile::Microphone) {
+        let enabled =
+            mic.enabled && self.virt.active() == Some(crate::profile::VirtualKind::DualSense);
+        let muted = mic.muted || (mic.mute_button && self.toggles.lock().mute_engaged);
+        let listening = self.virt.microphone_open();
+        self.set_microphone(enabled, muted || !listening, mic.gain_percent, mic.source);
+    }
+
+    /// Microphone capture is independent of speaker/haptics settings. The
+    /// controller's hardware selector chooses built-in, headset, or auto.
+    pub fn set_microphone(
+        &self,
+        enabled: bool,
+        muted: bool,
+        gain_percent: u16,
+        source: crate::profile::MicrophoneSource,
+    ) {
+        let enabled = enabled && self.is_bluetooth() && !self.model.is_dualshock4();
+        // Off, the other settings don't matter: keep them fixed, so a Mute
+        // press or a source change on a profile without the microphone
+        // changes nothing here.
+        let (muted, gain_percent, source) = if enabled {
+            (muted, gain_percent, source)
+        } else {
+            (false, 100, crate::profile::MicrophoneSource::Auto)
+        };
+        let source = match source {
+            crate::profile::MicrophoneSource::Auto => 0,
+            crate::profile::MicrophoneSource::BuiltIn => 1,
+            crate::profile::MicrophoneSource::Headset => 2,
+        };
+        let changed_source = self.microphone_source.swap(source, Ordering::AcqRel) != source;
+        let changed = self.microphone.configure(enabled, muted, gain_percent);
+        if changed_source {
+            self.microphone.clear();
+        }
+        self.microphone_managed.store(enabled, Ordering::Release);
+        if enabled {
+            // Enabling only capture must never power a speaker left in an
+            // unknown state by another application.
+            if self
+                .speaker_route
+                .compare_exchange(
+                    SPEAKER_UNTOUCHED,
+                    SPEAKER_MUTED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                self.kick();
+            }
+        }
+        if changed || changed_source {
+            self.kick();
+            let _ = self.haptics_wake_tx.try_send(());
+        }
+    }
+
+    fn microphone_output(&self) -> Option<ds_proto::output::Microphone> {
+        use ds_proto::output::{Microphone, MicrophoneSource};
+        if !self.microphone_managed.load(Ordering::Acquire) {
+            return None;
+        }
+        if self.mic_tap.lock().is_some() {
+            // The speaker self-test must hear the nearby internal microphone
+            // even after an earlier session left hardware mute enabled.
+            return Some(Microphone {
+                source: MicrophoneSource::BuiltIn,
+                muted: false,
+            });
+        }
+        Some(Microphone {
+            source: if !self.microphone.enabled() {
+                MicrophoneSource::Auto
+            } else {
+                match self.microphone_source.load(Ordering::Acquire) {
+                    1 => MicrophoneSource::BuiltIn,
+                    2 => MicrophoneSource::Headset,
+                    _ => MicrophoneSource::Auto,
+                }
+            },
+            muted: !self.microphone.recording(),
+        })
+    }
+
     /// Play the speaker test through the game-audio path and listen to it
     /// with the controller's own microphone; the result is logged and kept
     /// in `speaker_test_result`, and the microphone audio is saved as
@@ -274,6 +367,9 @@ impl Device {
             *g = Some(src.clone());
         }
         *self.mic_tap.lock() = Some(Vec::with_capacity(512));
+        self.microphone.clear();
+        self.kick();
+        let _ = self.haptics_wake_tx.try_send(());
         *self.speaker_test_result.lock() = Some("Playing…".into());
         let d = self.clone();
         std::thread::spawn(move || {
@@ -290,6 +386,9 @@ impl Device {
                 }
             }
             let packets = d.mic_tap.lock().take().unwrap_or_default();
+            d.microphone.clear();
+            d.kick();
+            let _ = d.haptics_wake_tx.try_send(());
             let report = crate::haptics::mic::analyze(&packets);
             log::info!("speaker test: {}", report.summary);
             let wav = std::env::temp_dir().join("dsz-speaker-test.wav");
@@ -566,6 +665,9 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         speaker_route: AtomicU8::new(SPEAKER_UNTOUCHED),
         headset_volume: AtomicU8::new(0),
         mic_tap: Mutex::new(None),
+        microphone: Arc::new(crate::haptics::capture::Capture::default()),
+        microphone_source: AtomicU8::new(0),
+        microphone_managed: AtomicBool::new(false),
         speaker_lead: AtomicU8::new(crate::haptics::streamer::SPEAKER_LEAD as u8),
         speaker_test_result: Mutex::new(None),
         calibrate_request: AtomicBool::new(false),
@@ -615,6 +717,13 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
                 })
                 .expect("spawn virtual");
             if conn == Connection::Bluetooth && !model.is_dualshock4() {
+                std::thread::Builder::new()
+                    .name(format!("ds-microphone-{id}"))
+                    .spawn_scoped(s, move || {
+                        let _g = StopOnPanic(d);
+                        d.microphone.run(&d.stop)
+                    })
+                    .expect("spawn microphone");
                 std::thread::Builder::new()
                     .name(format!("ds-haptics-{id}"))
                     .spawn_scoped(s, move || {
@@ -760,13 +869,18 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                         device.stats.crc_errors.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(ParseError::NotState(2)) => {
-                        // Microphone audio: kept only while a speaker test listens.
-                        if let Some(tap) = device.mic_tap.lock().as_mut() {
-                            let n = crate::haptics::mic::MIC_PACKET;
-                            if buf.len() >= 3 + n {
-                                let mut p = [0u8; crate::haptics::mic::MIC_PACKET];
-                                p.copy_from_slice(&buf[3..3 + n]);
-                                tap.push((buf[2], p));
+                        if let Some(packet) = crate::haptics::capture::Capture::packet(buf) {
+                            // A voice call is activity even when no buttons
+                            // move. Muted/disabled capture retains idle-off.
+                            if device.microphone.recording() {
+                                last_activity = Instant::now();
+                            }
+                            device.microphone.enqueue(packet);
+                            if let Some(tap) = device.mic_tap.lock().as_mut() {
+                                // A stuck self-test must not grow memory forever.
+                                if tap.len() < 1024 {
+                                    tap.push(packet);
+                                }
                             }
                         }
                     }
@@ -897,6 +1011,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     let mut composer = Composer::new();
     let mut buf = [0u8; MAX_REPORT];
     let mut last_sent: Option<ds_proto::OutputState> = None;
+    let mut last_microphone_managed = false;
     let mut last_write = Instant::now() - Duration::from_secs(10);
     let mut next_tick = Instant::now();
     let mut fails = 0u32;
@@ -1014,11 +1129,27 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 now,
             )
         };
+        let mut microphone_managed = false;
         if device.is_bluetooth() && !device.model.is_dualshock4() {
             state.audio = audio_route(
                 device.speaker_route.load(Ordering::Acquire),
                 device.headset_volume.load(Ordering::Acquire),
             );
+            state.microphone = device.microphone_output();
+            if device.microphone.enabled() {
+                // While the microphone is in use, the LED shows its mute
+                // (profile or Mute button), whatever a game or mod sends.
+                let m = &profile.microphone;
+                state.mute_led = (m.muted || (m.mute_button && toggles.mute_engaged)) as u8;
+            }
+            microphone_managed = state.microphone.is_some();
+            if last_microphone_managed && !microphone_managed {
+                // Release hardware mute/selection once when capture is disabled.
+                state.microphone = Some(ds_proto::output::Microphone {
+                    source: ds_proto::output::MicrophoneSource::Auto,
+                    muted: false,
+                });
+            }
         }
         let keepalive =
             now.duration_since(last_write) > Duration::from_millis(if pcm { 1000 } else { 500 });
@@ -1035,6 +1166,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             device.force_output.store(false, Ordering::Release);
             let report = control_report(device, &state, &mut buf);
             if do_write(&mut writer, report, false, &mut fails, &mut backoff_until) {
+                last_microphone_managed = microphone_managed;
                 last_sent = Some(state);
                 last_write = now;
                 writes_since += 1;
@@ -1075,6 +1207,12 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     // Leave the controller in a calm state: motors off, triggers released.
     let calm = ds_proto::OutputState {
         lightbar: last_sent.map(|s| s.lightbar).unwrap_or([0, 0, 64]),
+        microphone: (last_microphone_managed || device.microphone_managed.load(Ordering::Acquire)).then_some(
+            ds_proto::output::Microphone {
+                source: ds_proto::output::MicrophoneSource::Auto,
+                muted: false,
+            },
+        ),
         ..Default::default()
     };
     let report = control_report(device, &calm, &mut buf).to_vec();
@@ -1130,6 +1268,9 @@ impl Device {
             speaker_route: AtomicU8::new(SPEAKER_UNTOUCHED),
             headset_volume: AtomicU8::new(0),
             mic_tap: Mutex::new(None),
+            microphone: Arc::new(crate::haptics::capture::Capture::default()),
+            microphone_source: AtomicU8::new(0),
+            microphone_managed: AtomicBool::new(false),
             speaker_lead: AtomicU8::new(0),
             speaker_test_result: Mutex::new(None),
             calibrate_request: AtomicBool::new(false),
@@ -1141,5 +1282,70 @@ impl Device {
             dead: AtomicBool::new(false),
             flight: Default::default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod microphone_tests {
+    use super::*;
+    use ds_proto::output::{Microphone, MicrophoneSource};
+
+    #[test]
+    fn a_profile_without_a_usable_microphone_changes_nothing() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let mut mic = crate::profile::Microphone {
+            muted: true,
+            source: crate::profile::MicrophoneSource::Headset,
+            gain_percent: 50,
+            ..Default::default()
+        };
+        d.toggles.lock().mute_engaged = true;
+        d.apply_microphone(&mic);
+        // On, but with no virtual DualSense to record from.
+        mic.enabled = true;
+        d.apply_microphone(&mic);
+        assert_eq!(d.microphone_output(), None);
+        assert!(!d.microphone.enabled() && !d.microphone.recording());
+        assert_eq!(d.speaker_route.load(Ordering::Acquire), SPEAKER_UNTOUCHED);
+    }
+
+    #[test]
+    fn diagnostics_do_not_claim_microphone_output_without_capture() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        *d.mic_tap.lock() = Some(Vec::new());
+        assert_eq!(d.microphone_output(), None);
+        d.mic_tap.lock().take();
+        d.set_microphone(false, true, 100, crate::profile::MicrophoneSource::Auto);
+        assert_eq!(d.microphone_output(), None);
+        d.set_microphone(true, false, 100, crate::profile::MicrophoneSource::BuiltIn);
+        assert!(d.microphone_output().is_some());
+        d.set_microphone(false, false, 100, crate::profile::MicrophoneSource::Auto);
+        assert_eq!(d.microphone_output(), None);
+        assert!(!d.microphone_managed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn speaker_test_temporarily_unmutes_internal_mic_then_restores_capture() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        assert_eq!(d.microphone_output(), None);
+        d.set_microphone(true, true, 100, crate::profile::MicrophoneSource::Headset);
+        let selected = Some(Microphone {
+            source: MicrophoneSource::Headset,
+            muted: true,
+        });
+        assert_eq!(d.microphone_output(), selected);
+        *d.mic_tap.lock() = Some(Vec::new());
+        assert_eq!(
+            d.microphone_output(),
+            Some(Microphone {
+                source: MicrophoneSource::BuiltIn,
+                muted: false,
+            })
+        );
+        d.mic_tap.lock().take();
+        assert_eq!(d.microphone_output(), selected);
+        d.set_microphone(false, false, 100, crate::profile::MicrophoneSource::Headset);
+        assert_eq!(d.microphone_output(), None);
+        assert_eq!(d.speaker_route.load(Ordering::Acquire), SPEAKER_MUTED);
     }
 }
