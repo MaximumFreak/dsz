@@ -30,8 +30,8 @@ Protocol facts come from public documentation, captures, or code with open licen
 
 ## Interface text
 
-- Wrap UI strings in `crate::i18n::tr("...")`. Formatted ones use `crate::localized_format!("English {x}", "Português {x}", ...)`, which keeps both templates at the call site so the compiler checks the arguments.
-- Every string also goes into `crates/dsz/locales/pt-BR.json`, keyed by the exact English text. Changing the English text changes the key, so update or remove the old entry too; a missing entry shows English.
+- Wrap UI strings in `crate::i18n::tr("...")`. Formatted ones use `crate::localized_format!("English {x}", "Português {x}", "Español {x}", ...)`, which keeps all three templates at the call site so the compiler checks the arguments.
+- Every string also goes into `crates/dsz/locales/pt-BR.json` and `crates/dsz/locales/es.json`, keyed by the exact English text. Changing the English text changes the key, so update or remove the old entries too; a missing entry shows English.
 - Logs, CLI arguments, profile names, file names and anything saved to JSON stay in English and untranslated.
 - UI text is plain and short. Say what a control does, not how it works inside.
 

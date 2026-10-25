@@ -249,6 +249,12 @@ pub fn touchpad_click_zone(
         .map(touchpad_zone)
 }
 
+/// True while a finger is on the third of the pad that `zone` names (one of
+/// `TouchpadLeft`, `TouchpadCenter`, `TouchpadRight`), with no click needed.
+pub fn touch_zone_held(touch: &[TouchPoint; 2], zone: Button) -> bool {
+    touch.iter().any(|p| p.active && touchpad_zone(p.x) == zone)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatteryStatus {
     #[default]
@@ -659,6 +665,23 @@ mod tests {
             x,
             y: 540,
         }
+    }
+
+    #[test]
+    fn touch_zone_held_follows_fingers_without_a_click() {
+        let none = [TouchPoint::default(); 2];
+        let left = [finger(100), TouchPoint::default()];
+        assert!(touch_zone_held(&left, Button::TouchpadLeft));
+        assert!(!touch_zone_held(&left, Button::TouchpadRight));
+        assert!(!touch_zone_held(&none, Button::TouchpadLeft));
+        // A second finger in the middle third counts for that third only.
+        let two = [finger(100), finger(1000)];
+        assert!(touch_zone_held(&two, Button::TouchpadCenter));
+        assert!(touch_zone_held(&two, Button::TouchpadLeft));
+        assert!(!touch_zone_held(&two, Button::TouchpadRight));
+        // A finger that has lifted doesn't count.
+        let lifted = [TouchPoint { active: false, ..finger(1500) }, TouchPoint::default()];
+        assert!(!touch_zone_held(&lifted, Button::TouchpadRight));
     }
 
     #[test]

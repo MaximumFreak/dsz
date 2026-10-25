@@ -583,7 +583,7 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
         Action::Profile { name } => {
             if engine.profiles.exists(name) {
                 engine.set_device_profile(device, name);
-                engine.toast(crate::localized_format!("Profile: {name}", "Perfil: {name}"));
+                engine.toast(crate::localized_format!("Profile: {name}", "Perfil: {name}", "Perfil: {name}"));
                 device.identify_light();
             }
         }
@@ -815,6 +815,7 @@ impl Pipeline {
                     GyroActivation::Always => true,
                     GyroActivation::WhileHeld(b) => s.buttons.has(b),
                     GyroActivation::WhileNotHeld(b) => !s.buttons.has(b),
+                    GyroActivation::WhileTouched(z) => ds_proto::input::touch_zone_held(&s.touch, z),
                     GyroActivation::Toggle(b) => {
                         if s.buttons.has(b) && !prev.buttons.has(b) {
                             self.gyro_toggle = !self.gyro_toggle;
@@ -1473,6 +1474,33 @@ mod turn_off_tests {
 mod tests {
     use super::*;
     use ds_proto::input::TouchPoint;
+
+    #[test]
+    fn directional_reach_only_shapes_passthrough_virtual_sticks() {
+        let mut profile = Profile::default();
+        let vo = &mut profile.virtual_out;
+        vo.left_deadzone.shape = DeadzoneShape::None;
+        vo.right_deadzone.shape = DeadzoneShape::None;
+        vo.left_deadzone.reach.enabled = true;
+        vo.left_deadzone.reach.gains[8] = 116.0;
+        vo.right_deadzone.reach.enabled = true;
+        vo.right_deadzone.reach.gains[0] = 75.0;
+        let s = InputState { lx: 128, ly: 237, rx: 128, ry: 0, ..Default::default() };
+        let pad = virtual_pad(&profile, &s, 0, 0, StickMode::Passthrough, StickMode::Passthrough, TouchMode::Passthrough);
+        assert!(pad.ly >= 254);
+        assert!((31..=33).contains(&pad.ry));
+        assert_eq!((s.lx, s.ly, s.rx, s.ry), (128, 237, 128, 0));
+        for mode in [StickMode::Mouse, StickMode::Scroll, StickMode::Wasd, StickMode::Arrows] {
+            let pad = virtual_pad(&profile, &s, 0, 0, mode, mode, TouchMode::Passthrough);
+            assert_eq!((pad.lx, pad.ly, pad.rx, pad.ry), (128, 128, 128, 128));
+        }
+        profile.virtual_out.invert[1] = true;
+        let pad = virtual_pad(&profile, &s, 0, 0, StickMode::Passthrough, StickMode::Passthrough, TouchMode::Passthrough);
+        assert_eq!(pad.ly, 18, "reach follows the existing inversion order");
+        profile.virtual_out.left_deadzone.reach.gains[0] = 116.0;
+        let pad = virtual_pad(&profile, &s, 0, 0, StickMode::Passthrough, StickMode::Passthrough, TouchMode::Passthrough);
+        assert!(pad.ly <= 1);
+    }
 
     fn finger(x: u16) -> TouchPoint {
         TouchPoint {

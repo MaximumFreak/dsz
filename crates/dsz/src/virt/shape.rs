@@ -1,11 +1,12 @@
-//! Stick deadzones and trigger ranges for the virtual controller. All three
+//! Stick reach, deadzones and trigger ranges for the virtual controller. All
 //! deadzone shapes work on the stick as -1..=1 per axis (see [`axis`]) and
 //! report a centered stick as 128.
 
-use crate::profile::{DeadzoneShape, StickDeadzone};
+use crate::profile::{DeadzoneShape, StickDeadzone, StickReach};
 
 /// Apply a deadzone to one stick's raw bytes.
 pub fn stick(dz: &StickDeadzone, x: u8, y: u8) -> (u8, u8) {
+    let (x, y) = reach(&dz.reach, x, y);
     // Radial and axial: `size` percent of full deflection reads centered,
     // and anything past it passes through untouched.
     let size = dz.size.min(100) as f32 / 100.0;
@@ -27,13 +28,41 @@ pub fn stick(dz: &StickDeadzone, x: u8, y: u8) -> (u8, u8) {
 }
 
 /// Stick byte to -1..=1 (0 and 255 are the ends; 127.5 is the middle).
-fn axis(v: u8) -> f32 {
+pub(crate) fn axis(v: u8) -> f32 {
     (v as f32 - 127.5) / 127.5
 }
 
 /// -1..=1 back to a stick byte; 0 lands on 128.
 fn byte(x: f32) -> u8 {
     (127.5 + x.clamp(-1.0, 1.0) * 127.5).round() as u8
+}
+
+/// Clockwise from up, in sectors rather than radians.
+pub(crate) fn direction(x: f32, y: f32) -> f32 {
+    (x.atan2(-y).rem_euclid(std::f32::consts::TAU)
+        * 16.0 / std::f32::consts::TAU).rem_euclid(16.0)
+}
+
+pub(crate) fn reach_gain(reach: &StickReach, sector: f32) -> f32 {
+    if !reach.enabled { return 1.0; }
+    let sector = sector.rem_euclid(16.0);
+    let i = sector.floor() as usize;
+    let t = (1.0 - ((sector - i as f32) * std::f32::consts::PI).cos()) * 0.5;
+    let gain = |i: usize| {
+        let g = reach.gains[i];
+        if g.is_finite() { g.clamp(50.0, 150.0) } else { 100.0 }
+    };
+    (gain(i) + (gain((i + 1) % 16) - gain(i)) * t) / 100.0
+}
+
+/// The square is intentional: raw corners must survive None and Radial.
+pub(crate) fn reach(reach: &StickReach, x: u8, y: u8) -> (u8, u8) {
+    if !reach.enabled || reach.gains.iter().all(|&g| g == 100.0) {
+        return (x, y);
+    }
+    let (fx, fy) = (axis(x), axis(y));
+    let gain = reach_gain(reach, direction(fx, fy));
+    (byte(fx * gain), byte(fy * gain))
 }
 
 /// See `CurveDeadzone`.
@@ -87,6 +116,164 @@ pub fn trigger(v: u8, range: [u8; 2]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_reach_preserves_controller_reports_and_usb_identity() {
+        use crate::composer::Composer;
+        use crate::device::{Feedback, Overrides, Toggles};
+        use crate::profile::Profile;
+        use crate::virt::usbip::{descriptors as d, wire};
+        use ds_proto::{stream, Connection, InputState};
+
+        let mut bytes = Vec::new();
+        let mut add = |data: &[u8]| {
+            bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(data);
+        };
+        let mut p = Profile::default();
+        let mut buf = [0u8; stream::MAX_REPORT];
+        for disabled in [false, true] {
+            if disabled {
+                p.virtual_out.left_deadzone.reach.gains = [150.0; 16];
+                p.virtual_out.right_deadzone.reach.gains = [50.0; 16];
+            }
+            let out = Composer::new().compose(
+                &p, &InputState::default(), &Overrides::default(), &Feedback::default(),
+                &Toggles::default(), false, 0.0, std::time::Instant::now(),
+            );
+            add(out.build(Connection::Bluetooth, &mut buf));
+            add(out.build(Connection::Usb, &mut buf));
+        }
+        add(stream::build(&mut stream::StreamCounters::new(), &[0; stream::HAPTIC_FRAME], &mut buf));
+        add(stream::build_audio(
+            &mut stream::StreamCounters::new(), &[[0; stream::OPUS_FRAME]; stream::BLOCKS],
+            &[[0; stream::HAPTIC_FRAME]; stream::BLOCKS], false, &mut buf,
+        ));
+        for (device, config, report) in [
+            (&d::DEVICE[..], d::configuration(), &d::HID_REPORT_DESCRIPTOR[..]),
+            (&d::x360::DEVICE[..], d::x360::configuration(), &[][..]),
+            (&d::ds4::DEVICE[..], d::ds4::configuration(), d::ds4::HID_REPORT_DESCRIPTOR),
+        ] {
+            add(device);
+            add(&config);
+            add(report);
+            let mut reply = Vec::new();
+            wire::ret_submit(&mut reply, 1, 0, config.len() as u32, 0, None, &config);
+            add(&reply);
+        }
+        add(&wire::op_common(wire::OP_REP_IMPORT, 0));
+        add(&wire::op_common(wire::OP_REP_DEVLIST, 0));
+        for id in [0x02, 0x12, 0x81, 0xA3] {
+            add(&d::ds4::feature(id, None, &[0; 6]).unwrap());
+        }
+        // Captured from the unchanged report builders, before enabling reach.
+        assert_eq!(bytes.as_slice(), include_bytes!("fixtures/reach-disabled.bin"));
+    }
+
+    #[test]
+    fn neutral_reach_is_byte_exact_for_every_stick_position() {
+        // Keep the pre-reach path here so a neutral feature cannot alter old profiles.
+        fn previous(dz: &StickDeadzone, x: u8, y: u8) -> (u8, u8) {
+            let size = dz.size.min(100) as f32 / 100.0;
+            match dz.shape {
+                DeadzoneShape::None => (x, y),
+                DeadzoneShape::Radial => {
+                    if axis(x).hypot(axis(y)) <= size { (128, 128) } else { (x, y) }
+                }
+                DeadzoneShape::Axial => {
+                    let one = |v: u8| if axis(v).abs() <= size { 128 } else { v };
+                    (one(x), one(y))
+                }
+                DeadzoneShape::Curve => curve(dz, x, y),
+            }
+        }
+        for shape in [DeadzoneShape::None, DeadzoneShape::Radial, DeadzoneShape::Axial, DeadzoneShape::Curve] {
+            let mut dz = StickDeadzone { shape, ..Default::default() };
+            for neutral in 0..3 {
+                dz.reach.enabled = neutral == 1;
+                dz.reach.gains = [if neutral == 2 { 150.0 } else { 100.0 }; 16];
+                for x in 0..=255 {
+                    for y in 0..=255 {
+                        assert_eq!(stick(&dz, x, y), previous(&dz, x, y), "{shape:?} {neutral} {x} {y}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reach_boosts_down_before_each_deadzone() {
+        let mut dz = StickDeadzone { shape: DeadzoneShape::None, ..Default::default() };
+        dz.reach.enabled = true;
+        dz.reach.gains[8] = 116.0;
+        assert!((axis(237) - 0.86).abs() < 0.002);
+        assert!(stick(&dz, 128, 237).1 >= 254);
+        for (x, y) in [(128, 0), (0, 128), (255, 128), (0, 0), (255, 0)] {
+            assert_eq!(stick(&dz, x, y), (x, y));
+        }
+        dz.size = 95;
+        dz.curve.inner = 90.0;
+        for shape in [DeadzoneShape::Radial, DeadzoneShape::Axial, DeadzoneShape::Curve] {
+            dz.shape = shape;
+            assert!(stick(&dz, 128, 237).1 >= 254, "{shape:?}");
+            dz.reach.enabled = false;
+            assert_eq!(stick(&dz, 128, 237), (128, 128));
+            dz.reach.enabled = true;
+        }
+    }
+
+    #[test]
+    fn reach_interpolation_is_smooth_and_cyclic() {
+        let reach = StickReach {
+            enabled: true,
+            gains: std::array::from_fn(|i| 50.0 + i as f32 * 6.0),
+        };
+        for i in 0..16 {
+            let at = i as f32;
+            let expected = reach.gains[i] / 100.0;
+            assert!((reach_gain(&reach, at) - expected).abs() < 0.000001);
+            for eps in [-0.0001, 0.0001] {
+                assert!((reach_gain(&reach, at + eps) - expected).abs() < 0.000001);
+            }
+            let next = reach.gains[(i + 1) % 16] / 100.0;
+            assert!((reach_gain(&reach, at + 0.5) - (expected + next) * 0.5).abs() < 0.000001);
+        }
+        for (x, y, expected) in [(0.0, -1.0, 0.0), (1.0, 0.0, 4.0), (0.0, 1.0, 8.0), (-1.0, 0.0, 12.0)] {
+            assert!((direction(x, y) - expected).abs() < 0.000001);
+        }
+    }
+
+    #[test]
+    fn reach_can_limit_a_direction_without_rounding_corners() {
+        let mut dz = StickDeadzone { shape: DeadzoneShape::None, ..Default::default() };
+        dz.reach.enabled = true;
+        dz.reach.gains[8] = 75.0;
+        let (_, y) = stick(&dz, 128, 255);
+        assert!((axis(y) - 0.75).abs() < 0.005);
+        for shape in [DeadzoneShape::None, DeadzoneShape::Radial] {
+            dz.shape = shape;
+            dz.reach.gains = [150.0; 16];
+            for (x, y) in [(0, 0), (255, 255), (0, 255), (255, 0)] {
+                assert_eq!(stick(&dz, x, y), (x, y));
+            }
+        }
+    }
+
+    #[test]
+    fn reach_stays_finite_and_clips_each_axis_at_the_edges() {
+        let mut r = StickReach { enabled: true, gains: [150.0; 16] };
+        for x in 0..=255 {
+            for y in 0..=255 {
+                assert_eq!(reach(&r, x, y), (byte(axis(x) * 1.5), byte(axis(y) * 1.5)));
+            }
+        }
+        for g in [f32::NAN, f32::INFINITY, -1000.0, 1000.0] {
+            r.gains = [g; 16];
+            for sector in 0..160 {
+                assert!((0.5..=1.5).contains(&reach_gain(&r, sector as f32 / 10.0)));
+            }
+        }
+    }
 
     #[test]
     fn radial() {

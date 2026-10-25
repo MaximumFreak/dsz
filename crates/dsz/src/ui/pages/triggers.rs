@@ -13,14 +13,14 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
     vec![
         (crate::i18n::tr("Off"), TriggerEffect::Off),
         (
-            crate::i18n::tr("Light"),
+            crate::i18n::tr("Gentle"),
             TriggerEffect::Feedback {
                 position: 1,
                 strength: 2,
             },
         ),
         (
-            crate::i18n::tr("Heavy"),
+            crate::i18n::tr("Strong"),
             TriggerEffect::Feedback {
                 position: 0,
                 strength: 7,
@@ -296,7 +296,7 @@ fn editor(ui: &mut egui::Ui, id: &str, e: &mut TriggerEffect) {
     let before = k;
     egui::ComboBox::from_id_salt(format!("{id}-kind"))
         .width(240.0)
-        .selected_text(e.kind_name())
+        .selected_text(crate::i18n::tr(e.kind_name()))
         .show_ui(ui, |ui| {
             for (kk, label) in [
                 (Kind::Off, crate::i18n::tr("Off")),
