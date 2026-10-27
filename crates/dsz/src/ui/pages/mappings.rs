@@ -23,6 +23,7 @@ enum AKind {
     Touch,
     Run,
     Profile,
+    HoldProfile,
     Gamepad,
     Xbox,
     TurnOff,
@@ -42,13 +43,14 @@ fn akind(a: &Action) -> AKind {
         Action::ToggleTouchpadMouse => AKind::Touch,
         Action::Run { .. } => AKind::Run,
         Action::Profile { .. } => AKind::Profile,
+        Action::HoldProfile { .. } => AKind::HoldProfile,
         Action::Gamepad { .. } => AKind::Gamepad,
         Action::Xbox { .. } => AKind::Xbox,
         Action::TurnOffController => AKind::TurnOff,
     }
 }
 
-const KINDS: [(AKind, &str); 15] = [
+const KINDS: [(AKind, &str); 16] = [
     (AKind::None, "Nothing"),
     (AKind::Gamepad, "PlayStation button"),
     (AKind::Xbox, "Xbox button"),
@@ -63,6 +65,7 @@ const KINDS: [(AKind, &str); 15] = [
     (AKind::Touch, "Toggle touchpad mouse"),
     (AKind::Run, "Open a program / file"),
     (AKind::Profile, "Switch to profile"),
+    (AKind::HoldProfile, "Use profile while held"),
     (AKind::TurnOff, "Turn off controller"),
 ];
 
@@ -230,6 +233,14 @@ impl App {
                                 AKind::Profile => Action::Profile {
                                     name: profile_names.iter().find(|n| **n != p_name).cloned().unwrap_or_default(),
                                 },
+                                AKind::HoldProfile => {
+                                    // A held button usually shouldn't reach the game too.
+                                    m.mute = true;
+                                    Action::HoldProfile {
+                                        name: profile_names.iter().find(|n| **n != p_name).cloned().unwrap_or_default(),
+                                        then: String::new(),
+                                    }
+                                }
                                 AKind::Gamepad => Action::Gamepad { button: m.button.physical() },
                                 AKind::Xbox => Action::Xbox {
                                     button: XboxPadButton::ALL
@@ -295,6 +306,33 @@ impl App {
                                             ui.selectable_value(name, n.clone(), n);
                                         }
                                     });
+                            }
+                            Action::HoldProfile { name, then } => {
+                                fit(ui, 170.0);
+                                egui::ComboBox::from_id_salt(("map-hold", i))
+                                    .width(170.0)
+                                    .selected_text(if name.is_empty() { crate::i18n::tr("Choose…") } else { name.as_str() })
+                                    .show_ui(ui, |ui| {
+                                        for n in &profile_names {
+                                            ui.selectable_value(name, n.clone(), n);
+                                        }
+                                    });
+                                fit(ui, 250.0);
+                                // The label stays with its list when the row wraps.
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(crate::i18n::tr("on release")).size(12.5).color(MUTED));
+                                    egui::ComboBox::from_id_salt(("map-hold-then", i))
+                                        .width(170.0)
+                                        .selected_text(if then.is_empty() { crate::i18n::tr("Go back") } else { then.as_str() })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(then, String::new(), crate::i18n::tr("Go back"));
+                                            for n in &profile_names {
+                                                ui.selectable_value(then, n.clone(), n);
+                                            }
+                                        })
+                                        .response
+                                        .on_hover_text(crate::i18n::tr("What happens when the button is let go: go back to the profile from before, or stay on another profile."));
+                                });
                             }
                             Action::Gamepad { button } => {
                                 fit(ui, 130.0);
@@ -381,20 +419,26 @@ impl App {
                                 crate::i18n::tr("The virtual controller never sees this button. Needs a virtual controller.")
                             });
                     });
+                    let held = matches!(m.action, Action::HoldProfile { .. });
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(crate::i18n::tr("Behavior")).size(12.5).color(MUTED));
-                        fit(ui, 290.0);
-                        segmented(
-                            ui,
-                            &mut m.mode,
-                            &[
-                                (HoldStyle::Hold, crate::i18n::tr("Hold")),
-                                (HoldStyle::Tap, crate::i18n::tr("Tap")),
-                                (HoldStyle::Turbo, "Turbo"),
-                                (HoldStyle::Toggle, crate::i18n::tr("Toggle")),
-                            ],
-                        );
-                        if m.mode == HoldStyle::Turbo {
+                        if held {
+                            // The profile lasts as long as the hold.
+                            ui.label(RichText::new(crate::i18n::tr("While held")).size(12.5).color(TEXT));
+                        } else {
+                            fit(ui, 290.0);
+                            segmented(
+                                ui,
+                                &mut m.mode,
+                                &[
+                                    (HoldStyle::Hold, crate::i18n::tr("Hold")),
+                                    (HoldStyle::Tap, crate::i18n::tr("Tap")),
+                                    (HoldStyle::Turbo, "Turbo"),
+                                    (HoldStyle::Toggle, crate::i18n::tr("Toggle")),
+                                ],
+                            );
+                        }
+                        if m.mode == HoldStyle::Turbo && !held {
                             fit(ui, 260.0);
                             ui.add(egui::Slider::new(&mut m.turbo_ms, 30..=1000).suffix(" ms").text(crate::i18n::tr("interval")));
                         }
@@ -440,7 +484,7 @@ impl App {
         ui.add_space(12.0);
         note(
             ui,
-            crate::i18n::tr("Hold sends the output while held, Tap sends one click, Turbo repeats, Toggle latches on and off. Long press and double tap fire only when the gesture completes. Touchpad Left, Center, and Right follow the finger when the pad clicks: left of 640, the middle, and 1280 or further, on the 1920-wide pad. A click with no finger is Touchpad only. Hiding a zone from the game hides that click."),
+            crate::i18n::tr("Hold sends the output while held, Tap sends one click, Turbo repeats, Toggle latches on and off. Long press and double tap fire only when the gesture completes. Use profile while held switches while the button is down and goes back when it comes up; the virtual controller stays the same. Touchpad Left, Center, and Right follow the finger when the pad clicks: left of 640, the middle, and 1280 or further, on the 1920-wide pad. A click with no finger is Touchpad only. Hiding a zone from the game hides that click."),
             ACCENT,
         );
     }

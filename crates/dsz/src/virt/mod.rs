@@ -491,7 +491,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
 
     while !device.stop.load(Ordering::Acquire) {
         let profile = cache.get(engine, device);
-        let vo = &profile.virtual_out;
+        // A held profile keeps the pad of the profile under it, so holding
+        // a button never replugs the controller a game is using.
+        let pad_profile = engine.unheld_profile(device).unwrap_or_else(|| profile.clone());
+        let vo = &pad_profile.virtual_out;
         let (fallback_pad, keep_xbox, hide_ok) = {
             let s = engine.settings.read();
             (s.fallback_pad, s.keep_xbox_pad, s.hidhide_control && hidhide::available())

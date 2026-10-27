@@ -64,6 +64,20 @@ pub struct Engine {
     pub companion: crate::virt::companion::Companion,
 }
 
+/// A profile a controller uses only while a mapping's buttons are held.
+/// Kept on the device, never saved: a restart or a reconnect starts
+/// without it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeldProfile {
+    pub name: String,
+    /// The mapping's buttons: letting go of any of them ends the hold.
+    pub buttons: u32,
+    /// Buttons hidden from the virtual controller, each until it is let go.
+    pub hide: u32,
+    /// Profile switched to on release; none goes back.
+    pub then: Option<String>,
+}
+
 /// Cached profile for a hot loop: refetched only when something changed.
 #[derive(Default)]
 pub struct ProfileCache {
@@ -157,8 +171,78 @@ impl Engine {
 
     /// The profile name a device should be using right now.
     pub fn profile_name_for(&self, device: &Device) -> String {
+        let held = device.held_profile.lock().as_ref().map(|h| h.name.clone());
+        if let Some(p) = held.filter(|p| self.profiles.exists(p)) {
+            return self.profiles.get_or_first(&p).name.clone();
+        }
+        self.unheld_profile_name_for(device)
+    }
+
+    /// The profile a device uses when no button holds one: the one a held
+    /// profile goes back to.
+    pub fn unheld_profile_name_for(&self, device: &Device) -> String {
         let mac = device.mac.lock().clone();
         self.profile_name_for_mac(&mac)
+    }
+
+    /// The profile under a held one, if a held profile is in use. The
+    /// virtual controller follows it, so a hold doesn't replug the pad a
+    /// game is using.
+    pub fn unheld_profile(&self, device: &Device) -> Option<Arc<Profile>> {
+        let held = device.held_profile.lock().as_ref().map(|h| h.name.clone())?;
+        if !self.profiles.exists(&held) {
+            return None;
+        }
+        Some(self.profiles.get_or_first(&self.unheld_profile_name_for(device)))
+    }
+
+    /// Use `held` while its buttons are down. One hold at a time: another
+    /// held mapping pressed meanwhile does nothing. Returns whether it
+    /// started.
+    pub fn hold_profile(&self, device: &Device, held: HeldProfile) -> bool {
+        if !self.profiles.exists(&held.name) {
+            return false;
+        }
+        {
+            let mut slot = device.held_profile.lock();
+            if slot.is_some() {
+                return false;
+            }
+            log::debug!("profile \"{}\" held", held.name);
+            *slot = Some(held);
+        }
+        self.bump_config();
+        device.kick();
+        true
+    }
+
+    /// The held buttons were let go: back to the profile from before the
+    /// hold (a game that started or closed meanwhile counts), or on to the
+    /// mapping's release profile.
+    pub fn release_held_profile(&self, device: &Device) {
+        let Some(held) = device.held_profile.lock().take() else {
+            return;
+        };
+        log::debug!("profile \"{}\" released", held.name);
+        match held.then.filter(|p| self.profiles.exists(p)) {
+            Some(next) => {
+                let next = self.profiles.get_or_first(&next).name.clone();
+                self.set_device_profile(device, &next);
+                self.toast(crate::localized_format!("Profile: {next}", "Perfil: {next}", "Perfil: {next}"));
+                device.identify_light();
+            }
+            None => {
+                self.bump_config();
+                device.kick();
+            }
+        }
+    }
+
+    /// Drop a hold without its release profile (the controller went away).
+    pub fn cancel_held_profile(&self, device: &Device) {
+        if device.held_profile.lock().take().is_some() {
+            self.bump_config();
+        }
     }
 
     /// The profile the controller with `mac` uses (empty: an unknown one).
@@ -202,6 +286,8 @@ impl Engine {
     }
 
     pub fn set_device_profile(&self, device: &Device, name: &str) {
+        // A pick made while a profile is held stays after the release.
+        device.held_profile.lock().take();
         let mac = device.mac.lock().clone();
         {
             let mut s = self.settings.write();

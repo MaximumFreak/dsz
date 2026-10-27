@@ -589,6 +589,8 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
         }
         // Read from the mapping state when the pad is built.
         Action::Gamepad { .. } | Action::Xbox { .. } => {}
+        // Started by the mapping, which knows the buttons to watch.
+        Action::HoldProfile { .. } => {}
         Action::TurnOffController => turn_off_controller(engine, device),
         Action::Run { path } => {
             if !path.trim().is_empty() {
@@ -630,6 +632,31 @@ fn action_up(a: &Action) {
         Action::Media { key } => sim::key(key.vk(), false),
         _ => {}
     }
+}
+
+/// Use the mapping's profile while its buttons stay down.
+fn hold_profile(engine: &Engine, device: &Device, m: &Mapping, name: &str, then: &str) {
+    let mut buttons = 0u32;
+    let mut hide = 0u32;
+    for b in m.buttons() {
+        buttons |= b.bit();
+        if m.mute {
+            hide |= b.bit();
+            if b.is_touchpad_zone() {
+                hide |= Button::Touchpad.bit();
+            }
+        }
+    }
+    let then = then.trim();
+    engine.hold_profile(
+        device,
+        crate::engine::HeldProfile {
+            name: name.to_string(),
+            buttons,
+            hide,
+            then: (!then.is_empty()).then(|| then.to_string()),
+        },
+    );
 }
 
 /// Power the controller off by dropping its Bluetooth link. The mapping
@@ -694,6 +721,9 @@ pub struct Pipeline {
     to_gamebar: bool,
     /// Touchpad zone held on the previous report, if the click was placed.
     touch_zone: Option<Button>,
+    /// Buttons a held profile hid from the game; each stays hidden until it
+    /// is let go, also after the hold ends, like a muted combo.
+    held_hide: u32,
 }
 
 impl Pipeline {
@@ -713,6 +743,7 @@ impl Pipeline {
             helper_sent: 0,
             to_gamebar: false,
             touch_zone: None,
+            held_hide: 0,
         }
     }
 
@@ -765,6 +796,17 @@ impl Pipeline {
         raw: Option<&[u8; ds_proto::virtual_pad::DS_USB_INPUT_LEN]>,
         now: Instant,
     ) {
+        let (mut s, mut prev) = (*s, *prev);
+        self.apply_touchpad_zones(&mut s, &mut prev);
+
+        // A held profile ends as soon as one of its buttons comes up, before
+        // this report picks its profile, so the release already uses the
+        // profile from before the hold.
+        let held = device.held_profile.lock().as_ref().map(|h| h.buttons);
+        if held.is_some_and(|b| s.buttons.0 & b != b) {
+            engine.release_held_profile(device);
+        }
+
         let profile = self.cache.get(engine, device);
         let changed = match &self.built_for {
             Some(b) if Arc::ptr_eq(b, &profile) => false,
@@ -784,8 +826,6 @@ impl Pipeline {
             let solos = (0..profile.mappings.len()).filter(|&i| !profile.mappings[i].is_combo());
             self.map_order = combos.chain(solos).collect();
         }
-        let (mut s, mut prev) = (*s, *prev);
-        self.apply_touchpad_zones(&mut s, &mut prev);
 
         let dt = self
             .last_at
@@ -898,7 +938,10 @@ impl Pipeline {
         }
 
         // Mappings
-        let (suppress, inject, helper) = self.mappings(engine, device, &profile, &s, &prev, now);
+        let (mut suppress, inject, helper) = self.mappings(engine, device, &profile, &s, &prev, now);
+        let held_hide = device.held_profile.lock().as_ref().map_or(0, |h| h.hide);
+        self.held_hide = (self.held_hide | held_hide) & s.buttons.0;
+        suppress |= self.held_hide;
 
         // Game Bar reads only Xbox pads. While its overlay is open, the
         // parked Xbox pad (which games can't see) gets the whole pad, and
@@ -1084,6 +1127,12 @@ impl Pipeline {
 
             if start {
                 rt.active = true;
+                if let Action::HoldProfile { name, then } = &m.action {
+                    // Held only as long as the buttons are: the behavior
+                    // setting doesn't apply.
+                    hold_profile(engine, device, m, name, then);
+                    continue;
+                }
                 match m.mode {
                     HoldStyle::Hold => {
                         action_down(engine, device, &m.action);
@@ -1256,12 +1305,13 @@ mod turn_off_tests {
         Action, Gesture, GyroMode, Mapping, Profile, StickMode, TouchMode, VirtualKind,
     };
 
-    fn gate() -> parking_lot::MutexGuard<'static, ()> {
+    /// Tests that read `TURN_OFFS` run one at a time.
+    pub(super) fn gate() -> parking_lot::MutexGuard<'static, ()> {
         static GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
         GATE.lock()
     }
 
-    fn take_offs() -> Vec<String> {
+    pub(super) fn take_offs() -> Vec<String> {
         std::mem::take(&mut *TURN_OFFS.lock())
     }
 
@@ -1467,6 +1517,333 @@ mod turn_off_tests {
         assert!(missing.engine.toasts.lock().iter().any(|toast| {
             toast.warn && toast.text == "No Bluetooth address, so the controller stays on"
         }));
+    }
+}
+
+#[cfg(test)]
+mod hold_profile_tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use ds_proto::input::Button;
+    use ds_proto::{Connection, InputState};
+
+    use super::turn_off_tests::{gate, take_offs};
+    use super::Pipeline;
+    use crate::device::Device;
+    use crate::engine::Engine;
+    use crate::profile::{
+        Action, Gesture, GyroMode, HoldStyle, Mapping, Profile, StickMode, TouchMode, VirtualKind,
+    };
+
+    const MAC: &str = "AA-BB-CC-DD-EE-23";
+
+    struct Rig {
+        dir: PathBuf,
+        engine: Arc<Engine>,
+        device: Arc<Device>,
+        pipe: Pipeline,
+        prev: InputState,
+        at: Instant,
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl Rig {
+        /// Feed one report, 10 ms after the last.
+        fn step(&mut self, buttons: &[Button]) {
+            let s = centered(buttons);
+            self.at += Duration::from_millis(10);
+            self.pipe
+                .process(&self.engine, &self.device, &s, &self.prev, None, self.at);
+            self.prev = s;
+        }
+        fn wait(&mut self, ms: u64) {
+            let held: Vec<Button> = self.prev.buttons.iter().collect();
+            self.at += Duration::from_millis(ms);
+            self.step(&held);
+        }
+        fn profile(&self) -> String {
+            self.engine.profile_name_for(&self.device)
+        }
+        fn saved(&self) -> Option<String> {
+            self.engine.settings.read().device_profiles.get(MAC).cloned()
+        }
+    }
+
+    fn plain(name: &str, mappings: Vec<Mapping>) -> Profile {
+        let mut p = Profile::named(name);
+        p.mappings = mappings;
+        p.gyro.mode = GyroMode::Off;
+        p.touchpad.mode = TouchMode::Passthrough;
+        p.sticks.left.mode = StickMode::Passthrough;
+        p.sticks.right.mode = StickMode::Passthrough;
+        p.virtual_out.kind = VirtualKind::Off;
+        p.haptics.buttons.enabled = false;
+        p
+    }
+
+    fn hold(button: Button, with: &[Button], name: &str, then: &str, mute: bool) -> Mapping {
+        Mapping {
+            button,
+            with: with.to_vec(),
+            mute,
+            action: Action::HoldProfile {
+                name: name.into(),
+                then: then.into(),
+            },
+            ..Mapping::default()
+        }
+    }
+
+    fn off(button: Button) -> Mapping {
+        Mapping {
+            button,
+            action: Action::TurnOffController,
+            ..Mapping::default()
+        }
+    }
+
+    /// "Base" holds "Chord" with the given mapping. In Chord, Cross turns
+    /// the controller off (a mapping the tests can see fire), and so does
+    /// Create, the usual held button, which must not fire from the hold.
+    fn rig(base: Vec<Mapping>) -> Rig {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("dsz-hold-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::new(dir.clone());
+        let device = Device::for_test(Connection::Bluetooth, MAC);
+        engine.profiles.add(plain("Base", base));
+        engine
+            .profiles
+            .add(plain("Chord", vec![off(Button::Cross), off(Button::Create)]));
+        engine.profiles.add(plain("After", vec![]));
+        engine.profiles.add(plain("Game", vec![]));
+        engine.set_device_profile(&device, "Base");
+        let _ = take_offs();
+        Rig {
+            dir,
+            engine,
+            device,
+            pipe: Pipeline::new(),
+            prev: centered(&[]),
+            at: Instant::now(),
+        }
+    }
+
+    fn centered(buttons: &[Button]) -> InputState {
+        let mut s = InputState {
+            lx: 128,
+            ly: 128,
+            rx: 128,
+            ry: 128,
+            ..InputState::default()
+        };
+        for b in buttons {
+            s.buttons.set(*b, true);
+        }
+        s
+    }
+
+    #[test]
+    fn held_profile_lasts_while_the_button_is_down() {
+        let _g = gate();
+        let mut r = rig(vec![hold(Button::Create, &[], "Chord", "", true)]);
+        r.step(&[]);
+        assert_eq!(r.profile(), "Base");
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Chord");
+        // Held: the held button's own mapping in Chord doesn't fire.
+        r.step(&[Button::Create]);
+        r.wait(600);
+        assert!(take_offs().is_empty());
+        // Chord's mappings work while held.
+        r.step(&[Button::Create, Button::Cross]);
+        assert_eq!(take_offs(), vec![MAC.to_string()]);
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Chord");
+        r.step(&[]);
+        assert_eq!(r.profile(), "Base");
+        // Back on Base, Cross does nothing, and nothing was saved.
+        r.step(&[Button::Cross]);
+        assert!(take_offs().is_empty());
+        assert_eq!(r.saved().as_deref(), Some("Base"));
+        assert!(r.engine.toasts.lock().iter().all(|t| !t.text.contains("Chord")));
+        // And it works again.
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Chord");
+        r.step(&[]);
+        assert_eq!(r.profile(), "Base");
+    }
+
+    #[test]
+    fn behavior_setting_does_not_latch_a_held_profile() {
+        let _g = gate();
+        for mode in [HoldStyle::Toggle, HoldStyle::Tap, HoldStyle::Turbo] {
+            let mut r = rig(vec![Mapping {
+                mode,
+                ..hold(Button::Create, &[], "Chord", "", false)
+            }]);
+            r.step(&[Button::Create]);
+            r.wait(300);
+            assert_eq!(r.profile(), "Chord", "{mode:?}");
+            r.step(&[]);
+            assert_eq!(r.profile(), "Base", "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn release_profile_sticks() {
+        let _g = gate();
+        let mut r = rig(vec![hold(Button::Create, &[], "Chord", "After", true)]);
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Chord");
+        assert_eq!(r.saved().as_deref(), Some("Base"));
+        r.step(&[]);
+        assert_eq!(r.profile(), "After");
+        assert_eq!(r.saved().as_deref(), Some("After"));
+        // A release profile that is gone goes back instead.
+        let mut r = rig(vec![hold(Button::Create, &[], "Chord", "Missing", true)]);
+        r.step(&[Button::Create]);
+        r.step(&[]);
+        assert_eq!(r.profile(), "Base");
+    }
+
+    #[test]
+    fn combo_ends_on_either_button_and_keeps_hiding_the_rest() {
+        let _g = gate();
+        let mut r = rig(vec![hold(Button::L1, &[Button::Create], "Chord", "", true)]);
+        let both = Button::L1.bit() | Button::Create.bit();
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Base");
+        assert_eq!(r.pipe.held_hide, 0);
+        r.step(&[Button::Create, Button::L1]);
+        assert_eq!(r.profile(), "Chord");
+        assert_eq!(r.pipe.held_hide, both);
+        r.step(&[Button::Create, Button::L1]);
+        assert_eq!(r.pipe.held_hide, both, "hidden from Chord's pad too");
+        // L1 up ends the hold; Create, still down, stays hidden until let go.
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Base");
+        assert_eq!(r.pipe.held_hide, Button::Create.bit());
+        r.step(&[]);
+        assert_eq!(r.pipe.held_hide, 0);
+
+        // Without "Hide from game" the game sees the buttons.
+        let mut r = rig(vec![hold(Button::Create, &[], "Chord", "", false)]);
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Chord");
+        assert_eq!(r.pipe.held_hide, 0);
+    }
+
+    #[test]
+    fn long_press_holds_after_the_wait() {
+        let _g = gate();
+        let mut r = rig(vec![Mapping {
+            gesture: Gesture::LongPress,
+            long_ms: 400,
+            ..hold(Button::Ps, &[], "Chord", "", true)
+        }]);
+        r.step(&[Button::Ps]);
+        r.wait(200);
+        assert_eq!(r.profile(), "Base");
+        r.wait(250);
+        assert_eq!(r.profile(), "Chord");
+        r.step(&[]);
+        assert_eq!(r.profile(), "Base");
+        // A short press never switches.
+        r.step(&[Button::Ps]);
+        r.step(&[]);
+        r.wait(500);
+        assert_eq!(r.profile(), "Base");
+    }
+
+    #[test]
+    fn game_switch_while_held_is_where_release_goes() {
+        let _g = gate();
+        let mut r = rig(vec![hold(Button::Create, &[], "Chord", "", true)]);
+        r.step(&[Button::Create]);
+        *r.engine.game_override.write() = Some(("Game".into(), "game.exe".into()));
+        r.engine.bump_config();
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Chord", "the hold wins over a game's profile");
+        r.step(&[]);
+        assert_eq!(r.profile(), "Game");
+        // The game's rule is still on: the hold didn't dismiss it.
+        assert!(r.engine.game_dismissed.lock().is_none());
+        *r.engine.game_override.write() = None;
+        r.engine.bump_config();
+        assert_eq!(r.profile(), "Base");
+    }
+
+    #[test]
+    fn a_pick_while_held_stays() {
+        let _g = gate();
+        let mut r = rig(vec![hold(Button::Create, &[], "Chord", "After", true)]);
+        r.step(&[Button::Create]);
+        r.engine.set_device_profile(&r.device, "Game");
+        assert_eq!(r.profile(), "Game");
+        r.step(&[Button::Create]);
+        r.step(&[]);
+        assert_eq!(r.profile(), "Game", "no release profile after a pick");
+    }
+
+    #[test]
+    fn disconnect_while_held_drops_the_hold() {
+        let _g = gate();
+        let mut r = rig(vec![hold(Button::Create, &[], "Chord", "After", true)]);
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Chord");
+        r.engine.cancel_held_profile(&r.device);
+        assert_eq!(r.profile(), "Base");
+        assert_eq!(r.saved().as_deref(), Some("Base"));
+        assert!(r.device.held_profile.lock().is_none());
+    }
+
+    #[test]
+    fn one_hold_at_a_time_and_missing_profiles_do_nothing() {
+        let _g = gate();
+        let mut r = rig(vec![
+            hold(Button::Create, &[], "Chord", "", true),
+            hold(Button::Options, &[], "Missing", "", true),
+        ]);
+        r.step(&[Button::Options]);
+        assert_eq!(r.profile(), "Base");
+        assert!(r.device.held_profile.lock().is_none());
+        r.step(&[]);
+        // Chord has no hold of its own; a second hold from Base's
+        // mappings can't start while Chord is held.
+        r.step(&[Button::Create]);
+        assert!(!r.engine.hold_profile(
+            &r.device,
+            crate::engine::HeldProfile {
+                name: "After".into(),
+                buttons: Button::Square.bit(),
+                hide: 0,
+                then: None,
+            }
+        ));
+        assert_eq!(r.profile(), "Chord");
+        r.step(&[]);
+        assert_eq!(r.profile(), "Base");
+    }
+
+    #[test]
+    fn virtual_pad_follows_the_profile_under_the_hold() {
+        let _g = gate();
+        let mut r = rig(vec![hold(Button::Create, &[], "Chord", "", true)]);
+        assert!(r.engine.unheld_profile(&r.device).is_none());
+        r.step(&[Button::Create]);
+        assert_eq!(r.engine.unheld_profile(&r.device).unwrap().name, "Base");
+        r.step(&[]);
+        assert!(r.engine.unheld_profile(&r.device).is_none());
     }
 }
 

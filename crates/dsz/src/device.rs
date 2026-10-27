@@ -197,6 +197,8 @@ pub struct Device {
     pub overrides: Mutex<Overrides>,
     pub feedback: Mutex<Feedback>,
     pub toggles: Mutex<Toggles>,
+    /// A profile in use only while a mapping's buttons are held.
+    pub held_profile: Mutex<Option<crate::engine::HeldProfile>>,
     pub stream_tx: Sender<StreamPacket>,
     stream_rx: Receiver<StreamPacket>,
     /// Wakes the writer as soon as the control report may have changed.
@@ -653,6 +655,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         overrides: Mutex::new(Overrides::default()),
         feedback: Mutex::new(Feedback::default()),
         toggles: Mutex::new(Toggles::default()),
+        held_profile: Mutex::new(None),
         stream_tx: tx,
         stream_rx: rx,
         kick_tx,
@@ -933,6 +936,9 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         }
     }
     pipeline.release_all();
+    // Its buttons can't be let go any more; the next connection starts on
+    // the profile from before the hold.
+    engine.cancel_held_profile(device);
     device.stop.store(true, Ordering::Release);
     device.dead.store(true, Ordering::Release);
 }
@@ -1256,6 +1262,7 @@ impl Device {
             overrides: Mutex::new(Overrides::default()),
             feedback: Mutex::new(Feedback::default()),
             toggles: Mutex::new(Toggles::default()),
+            held_profile: Mutex::new(None),
             stream_tx,
             stream_rx,
             kick_tx,

@@ -560,6 +560,15 @@ pub enum Action {
     Profile {
         name: String,
     },
+    /// Use a named profile only while the mapping's buttons are held. On
+    /// release the controller goes back to the profile it would use without
+    /// the hold, or switches to `then` when that is set.
+    HoldProfile {
+        name: String,
+        /// Profile to switch to on release; empty goes back.
+        #[serde(default)]
+        then: String,
+    },
     /// Press a button on the virtual controller (needs one active).
     Gamepad {
         button: Button,
@@ -1361,6 +1370,20 @@ mod tests {
         .unwrap();
         assert_eq!(p.mappings[0].action, Action::TurnOffController);
         assert_eq!(p.mappings[0].button, Button::Cross);
+    }
+
+    #[test]
+    fn hold_profile_action_round_trips() {
+        let a = Action::HoldProfile {
+            name: "Chord".into(),
+            then: String::new(),
+        };
+        let j = serde_json::to_string(&a).unwrap();
+        assert_eq!(j, r#"{"kind":"hold_profile","name":"Chord","then":""}"#);
+        assert_eq!(serde_json::from_str::<Action>(&j).unwrap(), a);
+        // Without a release profile it goes back.
+        let b: Action = serde_json::from_str(r#"{"kind":"hold_profile","name":"Chord"}"#).unwrap();
+        assert_eq!(b, a);
     }
 
     #[test]
