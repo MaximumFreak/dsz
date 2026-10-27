@@ -7,6 +7,8 @@
 //! DualSense (games see the 4-channel speaker/actuator endpoint and write
 //! their haptics audio to it), the in-box `xusb22` for the Xbox 360 pad
 //! (XInput), and HID for the DualShock 4. No other driver is needed.
+//! Beside an Xbox 360 or DualShock 4 pad, the DualSense's microphone can
+//! be a device of its own (USB audio only), since those pads have none.
 //!
 //! ```text
 //! game ─ HID / WASAPI ─► usbip-win2 (UDE) ─ TCP 127.0.0.1 ─► reader thread
@@ -49,6 +51,9 @@ pub enum Model {
     DualSense,
     Xbox360,
     DualShock4,
+    /// The DualSense's microphone alone (no game pad), beside an Xbox 360
+    /// or DualShock 4 pad.
+    Microphone,
 }
 
 impl Model {
@@ -57,11 +62,12 @@ impl Model {
             Model::DualSense => "DualSense",
             Model::Xbox360 => "Xbox 360 controller",
             Model::DualShock4 => "DualShock 4",
+            Model::Microphone => "DualSense microphone",
         }
     }
     fn ids(self) -> (u16, u16) {
         match self {
-            Model::DualSense => (d::VID, d::PID),
+            Model::DualSense | Model::Microphone => (d::VID, d::PID),
             Model::Xbox360 => (d::x360::VID, d::x360::PID),
             Model::DualShock4 => (d::ds4::VID, d::ds4::PID),
         }
@@ -71,21 +77,36 @@ impl Model {
             Model::DualSense => &[(1, 1, 0), (1, 2, 0), (1, 2, 0), (3, 0, 0)],
             Model::Xbox360 => &[(0xFF, 0x5D, 0x01)],
             Model::DualShock4 => &[(3, 0, 0)],
+            Model::Microphone => &[(1, 1, 0), (1, 2, 0)],
         }
     }
-    /// Interrupt endpoints: (input, output).
-    fn endpoints(self) -> (u32, u32) {
+    /// Interrupt endpoints: (input, output). None without a game pad.
+    fn endpoints(self) -> Option<(u32, u32)> {
         match self {
-            Model::DualSense => (d::EP_INPUT, d::EP_OUTPUT),
-            Model::Xbox360 => (d::x360::EP_INPUT, d::x360::EP_OUTPUT),
-            Model::DualShock4 => (d::ds4::EP_INPUT, d::ds4::EP_OUTPUT),
+            Model::DualSense => Some((d::EP_INPUT, d::EP_OUTPUT)),
+            Model::Xbox360 => Some((d::x360::EP_INPUT, d::x360::EP_OUTPUT)),
+            Model::DualShock4 => Some((d::ds4::EP_INPUT, d::ds4::EP_OUTPUT)),
+            Model::Microphone => None,
         }
     }
     fn hid_interface(self) -> Option<u8> {
         match self {
             Model::DualSense => Some(d::IF_HID),
-            Model::Xbox360 => None,
+            Model::Xbox360 | Model::Microphone => None,
             Model::DualShock4 => Some(d::ds4::IF_HID),
+        }
+    }
+    /// The USB audio function: its audio-control interface answers the
+    /// feature-unit requests and its endpoints run at 48 kHz.
+    fn has_audio(self) -> bool {
+        matches!(self, Model::DualSense | Model::Microphone)
+    }
+    /// The microphone's streaming interface, when the device has one.
+    fn capture_interface(self) -> Option<u8> {
+        match self {
+            Model::DualSense => Some(d::IF_CAPTURE),
+            Model::Microphone => Some(d::mic::IF_CAPTURE),
+            Model::Xbox360 | Model::DualShock4 => None,
         }
     }
     fn input_len(self) -> usize {
@@ -97,7 +118,7 @@ impl Model {
     /// A real Xbox 360 pad reports only changes; the Sony pads stream.
     fn keepalive(self) -> Option<Duration> {
         match self {
-            Model::Xbox360 => None,
+            Model::Xbox360 | Model::Microphone => None,
             _ => Some(INPUT_KEEPALIVE),
         }
     }
@@ -116,6 +137,7 @@ impl Model {
                 let pad = ds_proto::virtual_pad::PadState::default();
                 r = ds_proto::virtual_pad::ds4_usb_input(&pad, None, false, 0);
             }
+            Model::Microphone => {}
         }
         r
     }
@@ -430,6 +452,8 @@ impl PcmSource for AudioRing {
 /// Audio-class and HID control state the host sets.
 struct Ctl {
     alt: [u8; 4],
+    /// The model's microphone streaming interface.
+    capture_if: Option<u8>,
     speaker_mute: bool,
     /// Q8.8 dB, -100..0.
     speaker_volume: i16,
@@ -448,7 +472,9 @@ impl Ctl {
     }
 
     fn microphone_enabled(&self) -> bool {
-        self.alt[d::IF_CAPTURE as usize] == 1 && !self.mic_mute
+        self.capture_if
+            .is_some_and(|i| self.alt[i as usize] == 1)
+            && !self.mic_mute
     }
 
     /// Windows' microphone level, with the top of the range (where it
@@ -670,6 +696,7 @@ impl UsbPad {
             microphone: Arc::new(MicrophoneRing::new()),
             ctl: Mutex::new(Ctl {
                 alt: [0; 4],
+                capture_if: model.capture_interface(),
                 speaker_mute: false,
                 speaker_volume: SPEAKER_VOL.1,
                 mic_mute: false,
@@ -794,7 +821,8 @@ impl UsbPad {
 
     /// Whether a game has the render stream open.
     pub fn streaming(&self) -> bool {
-        self.shared.ctl.lock().alt[d::IF_RENDER as usize] != 0
+        self.shared.model == Model::DualSense
+            && self.shared.ctl.lock().alt[d::IF_RENDER as usize] != 0
     }
 
     /// Whether an app is recording from the microphone (capture stream
@@ -937,7 +965,7 @@ fn device_info(s: &Shared) -> Vec<u8> {
         busid: &s.busid,
         busnum: 1,
         devnum: s.devnum,
-        speed: if s.model == Model::DualSense {
+        speed: if s.model.has_audio() {
             d::SPEED_HIGH
         } else {
             d::SPEED_FULL
@@ -1053,7 +1081,9 @@ fn session(s: &Arc<Shared>, listener: &TcpListener) -> bool {
     s.microphone.set_enabled(false);
     s.microphone.clear();
     // A pad replugged later must not look like a recording app is still on it.
-    s.ctl.lock().alt[d::IF_CAPTURE as usize] = 0;
+    if let Some(i) = s.model.capture_interface() {
+        s.ctl.lock().alt[i as usize] = 0;
+    }
     if !s.stop.load(Ordering::Acquire) && s.replug.swap(false, Ordering::AcqRel) {
         return true;
     }
@@ -1097,7 +1127,7 @@ fn submit(s: &Shared, u: Submit) {
                 }
             }
         }
-        (ep, wire::DIR_IN) if ep == s.model.endpoints().0 => {
+        (ep, wire::DIR_IN) if s.model.endpoints().is_some_and(|e| e.0 == ep) => {
             let mut g = s.conn.lock();
             let Some(c) = g.as_mut() else { return };
             if s.fresh.swap(false, Ordering::AcqRel) {
@@ -1107,7 +1137,7 @@ fn submit(s: &Shared, u: Submit) {
                 c.int_in.push_back(u.seq);
             }
         }
-        (ep, wire::DIR_OUT) if ep == s.model.endpoints().1 => {
+        (ep, wire::DIR_OUT) if s.model.endpoints().is_some_and(|e| e.1 == ep) => {
             {
                 let mut g = s.conn.lock();
                 if let Some(c) = g.as_mut() {
@@ -1131,7 +1161,7 @@ fn submit(s: &Shared, u: Submit) {
                 c.render.admit(u.seq, u.iso_lens, Instant::now(), s.epoch);
             }
         }
-        (d::EP_CAPTURE, wire::DIR_IN) if s.model == Model::DualSense && u.packets.is_some() => {
+        (d::EP_CAPTURE, wire::DIR_IN) if s.model.capture_interface().is_some() && u.packets.is_some() => {
             let mut g = s.conn.lock();
             if let Some(c) = g.as_mut() {
                 c.capture.admit(u.seq, u.iso_lens, Instant::now(), s.epoch);
@@ -1266,7 +1296,7 @@ fn control(s: &Shared, u: &Submit) -> Option<Vec<u8>> {
             let (ty, idx) = ((value >> 8) as u8, (value & 0xFF) as u8);
             match ty {
                 1 => Some(match model {
-                    Model::DualSense => d::DEVICE.to_vec(),
+                    Model::DualSense | Model::Microphone => d::DEVICE.to_vec(),
                     Model::Xbox360 => d::x360::DEVICE.to_vec(),
                     Model::DualShock4 => d::ds4::DEVICE.to_vec(),
                 }),
@@ -1274,13 +1304,14 @@ fn control(s: &Shared, u: &Submit) -> Option<Vec<u8>> {
                     Model::DualSense => d::configuration(),
                     Model::Xbox360 => d::x360::configuration(),
                     Model::DualShock4 => d::ds4::configuration(),
+                    Model::Microphone => d::mic::configuration(),
                 }),
                 3 if idx == 3 => Some(d::utf16_string(&match model {
                     Model::DualShock4 => ds4_serial(s.tag),
                     _ => format!("{SERIAL_PREFIX}{}", s.devnum),
                 })),
                 3 => match model {
-                    Model::DualSense => d::string(idx),
+                    Model::DualSense | Model::Microphone => d::string(idx),
                     Model::Xbox360 => d::x360::string(idx),
                     Model::DualShock4 => d::ds4::string(idx),
                 },
@@ -1314,14 +1345,14 @@ fn control(s: &Shared, u: &Submit) -> Option<Vec<u8>> {
             let was = std::mem::replace(&mut s.ctl.lock().alt[iface as usize], alt);
             if was != alt {
                 match iface {
-                    d::IF_RENDER => {
+                    _ if Some(iface) == model.capture_interface() => reset_streams(s, false, true),
+                    d::IF_RENDER if model == Model::DualSense => {
                         log::info!(
                             "virtual DualSense: game audio {}",
                             if alt != 0 { "opened" } else { "closed" }
                         );
                         reset_streams(s, true, false);
                     }
-                    d::IF_CAPTURE => reset_streams(s, false, true),
                     _ => {}
                 }
             }
@@ -1331,13 +1362,13 @@ fn control(s: &Shared, u: &Submit) -> Option<Vec<u8>> {
         (1, _) if recipient == 1 && Some(iface) == hid_if => hid_request(s, req, value, &u.data),
         // ---- audio class, feature units
         (1, 0x01 | 0x81..=0x84)
-            if model == Model::DualSense && recipient == 1 && iface == d::IF_AUDIO_CONTROL =>
+            if model.has_audio() && recipient == 1 && iface == d::IF_AUDIO_CONTROL =>
         {
             audio_request(s, req, (index >> 8) as u8, (value >> 8) as u8, &u.data)
         }
         // ---- audio class, sampling frequency on an endpoint (fixed 48 kHz)
-        (1, 0x01) if model == Model::DualSense && recipient == 2 => Some(Vec::new()),
-        (1, 0x81..=0x84) if model == Model::DualSense && recipient == 2 => {
+        (1, 0x01) if model.has_audio() && recipient == 2 => Some(Vec::new()),
+        (1, 0x81..=0x84) if model.has_audio() && recipient == 2 => {
             Some(vec![0x80, 0xBB, 0x00])
         }
         // ---- Xbox 360 vendor requests: the driver asks for the
@@ -1431,7 +1462,7 @@ fn hid_request(s: &Shared, req: u8, value: u16, data: &[u8]) -> Option<Vec<u8>> 
 
 fn audio_request(s: &Shared, req: u8, unit: u8, selector: u8, data: &[u8]) -> Option<Vec<u8>> {
     let speaker = match unit {
-        d::UNIT_SPEAKER => true,
+        d::UNIT_SPEAKER if s.model == Model::DualSense => true,
         d::UNIT_MIC => false,
         _ => return None,
     };
@@ -1483,20 +1514,25 @@ mod tests {
     use super::*;
 
     fn microphone_test_pad() -> Shared {
+        test_pad(Model::DualSense)
+    }
+
+    fn test_pad(model: Model) -> Shared {
         Shared {
-            model: Model::DualSense,
+            model,
             stop: AtomicBool::new(false),
             sink: DsSink {
                 on_output: Box::new(|_| {}),
                 mirror: Arc::new(Mutex::new(super::super::mirror::Mirror::default())),
             },
             conn: Mutex::new(None),
-            input: Mutex::new(Model::DualSense.idle_input()),
+            input: Mutex::new(model.idle_input()),
             fresh: AtomicBool::new(false),
             audio: Arc::new(AudioRing::new()),
             microphone: Arc::new(MicrophoneRing::new()),
             ctl: Mutex::new(Ctl {
                 alt: [0; 4],
+                capture_if: model.capture_interface(),
                 speaker_mute: false,
                 speaker_volume: SPEAKER_VOL.1,
                 mic_mute: false,
@@ -1866,5 +1902,115 @@ mod tests {
         assert!(!refuse_release(Some([0, 9, 7, 7]), Some("04/21/2026")));
         assert!(!refuse_release(None, Some("09/27/2026")));
         assert!(!refuse_release(None, None));
+    }
+
+    fn control_urb(setup: [u8; 8], length: u32, data: Vec<u8>) -> Submit {
+        Submit {
+            seq: 0,
+            dir: if setup[0] & 0x80 != 0 { wire::DIR_IN } else { wire::DIR_OUT },
+            ep: 0,
+            length,
+            packets: None,
+            setup,
+            data,
+            iso_lens: Vec::new(),
+            iso_offsets: Vec::new(),
+        }
+    }
+
+    fn connect(s: &Shared) -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (writer, _) = listener.accept().unwrap();
+        *s.conn.lock() = Some(Conn {
+            w: writer,
+            buf: Vec::new(),
+            int_in: VecDeque::new(),
+            last_input: s.epoch,
+            render: IsoClock::default(),
+            capture: IsoClock::default(),
+            broken: false,
+        });
+        peer
+    }
+
+    #[test]
+    fn microphone_device_is_the_dualsense_capture_alone() {
+        let s = test_pad(Model::Microphone);
+        let _peer = connect(&s);
+        let get = |ty: u8, idx: u8| control(&s, &control_urb([0x80, 0x06, idx, ty, 0, 0, 0xFF, 0], 255, vec![]));
+        assert_eq!(get(1, 0), Some(d::DEVICE.to_vec()));
+        assert_eq!(get(2, 0), Some(d::mic::configuration()));
+        assert_eq!(get(3, 2), d::string(2), "named like the virtual DualSense");
+        assert_eq!(get(3, 3), Some(d::utf16_string("DSZV1")), "our serial, so default-device protection knows it");
+        // No game pad on it: no HID descriptors, no interrupt endpoints.
+        assert_eq!(control(&s, &control_urb([0x81, 0x06, 0, 0x22, 0, 0, 0xFF, 0], 255, vec![])), None);
+        assert_eq!(Model::Microphone.endpoints(), None);
+        assert_eq!(Model::Microphone.interfaces().len(), d::mic::NUM_INTERFACES as usize);
+
+        // Opening interface 1 is recording, as interface 2 is on the
+        // virtual DualSense; nothing is a render stream.
+        assert!(!s.ctl.lock().microphone_enabled());
+        let open = |alt: u8| control(&s, &control_urb([0x01, 0x0B, alt, 0, d::mic::IF_CAPTURE, 0, 0, 0], 0, vec![]));
+        assert_eq!(open(1), Some(vec![]));
+        assert!(s.ctl.lock().microphone_enabled());
+        assert_eq!(s.ctl.lock().microphone_gain(), 1.0);
+        // Windows' mute and level go to the microphone's feature unit; the
+        // speaker's unit isn't on this device.
+        let mic_mute = control_urb([0x21, 0x01, 0, 1, 0, d::UNIT_MIC, 1, 0], 1, vec![1]);
+        assert_eq!(control(&s, &mic_mute), Some(vec![]));
+        assert!(!s.ctl.lock().microphone_enabled());
+        let mic_unmute = control_urb([0x21, 0x01, 0, 1, 0, d::UNIT_MIC, 1, 0], 1, vec![0]);
+        assert_eq!(control(&s, &mic_unmute), Some(vec![]));
+        let speaker = control_urb([0xA1, 0x81, 0, 1, 0, d::UNIT_SPEAKER, 1, 0], 1, vec![]);
+        assert_eq!(control(&s, &speaker), None);
+        assert_eq!(control(&s, &control_urb([0xA2, 0x81, 0, 1, 0x82, 0, 3, 0], 3, vec![])), Some(vec![0x80, 0xBB, 0x00]));
+
+        // Speech pushed while recording comes out of the capture endpoint.
+        s.microphone.push(&[100, -100, 200, -200]);
+        submit(
+            &s,
+            Submit {
+                seq: 7,
+                dir: wire::DIR_IN,
+                ep: d::mic::EP_CAPTURE,
+                length: 192,
+                packets: Some(1),
+                setup: [0; 8],
+                data: vec![],
+                iso_lens: vec![192],
+                iso_offsets: vec![0],
+            },
+        );
+        let job = s.conn.lock().as_mut().unwrap().capture.q.pop_front().unwrap();
+        assert_eq!(job.seq, 7);
+        let (mut descs, mut data) = (Vec::new(), Vec::new());
+        capture_packets(&s.microphone, &job.lens, &job.capture_offsets, 1.0, &mut descs, &mut data);
+        assert_eq!(descs, [(0, 192, 192)]);
+        assert_eq!(&data[..8], &[100, 0, 0x9C, 0xFF, 200, 0, 0x38, 0xFF]);
+
+        // Closing the stream stops recording and drops what was queued.
+        assert_eq!(open(0), Some(vec![]));
+        assert!(!s.ctl.lock().microphone_enabled());
+        s.microphone.push(&[1, 2]);
+        let mut out = [0u8; 4];
+        s.microphone.read_packet(&mut out, 1.0);
+        assert_eq!(out, [0; 4]);
+    }
+
+    #[test]
+    fn pads_without_a_microphone_never_record() {
+        for model in [Model::Xbox360, Model::DualShock4] {
+            let s = test_pad(model);
+            let _peer = connect(&s);
+            assert_eq!(model.capture_interface(), None);
+            // Even if a host selected an alternate setting on interface 2
+            // (the virtual DualSense's capture), these pads don't record.
+            let _ = control(&s, &control_urb([0x01, 0x0B, 1, 0, d::IF_CAPTURE, 0, 0, 0], 0, vec![]));
+            assert!(!s.ctl.lock().microphone_enabled());
+            let mic = control_urb([0xA1, 0x81, 0, 1, 0, d::UNIT_MIC, 1, 0], 1, vec![]);
+            assert_eq!(control(&s, &mic), None, "{model:?} has no audio function");
+        }
+        assert_eq!(Model::DualSense.capture_interface(), Some(d::IF_CAPTURE));
     }
 }

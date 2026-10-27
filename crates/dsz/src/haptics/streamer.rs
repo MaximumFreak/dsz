@@ -254,7 +254,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let profile = cache.get(engine, device);
         let h = &profile.haptics;
         let vo = &profile.virtual_out;
-        device.apply_microphone(&profile.microphone);
+        // The recording device belongs to the virtual pad, which a held
+        // profile doesn't change, so neither does its microphone.
+        let pad_profile = engine.unheld_profile(device);
+        device.apply_microphone(&pad_profile.as_deref().unwrap_or(&profile).microphone);
         // Only opt-in capture may change the hardware-tuned media bytes.
         // Keep this latch for this physical connection, even after disabling.
         capture_used |= device.microphone.enabled();

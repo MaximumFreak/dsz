@@ -8,6 +8,7 @@ pub mod crc;
 pub mod ds4;
 pub mod input;
 pub mod output;
+pub mod sbc;
 pub mod stream;
 pub mod trigger;
 pub mod virtual_pad;

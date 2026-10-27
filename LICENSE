@@ -24,5 +24,10 @@ The controller drawings (crates/dsz/assets/pads.json) are from OpenController,
 Copyright (c) 2026 Brunovncs, under the MIT License; see
 crates/dsz/assets/OpenController-LICENSE.
 
+The SBC encoder (crates/ds-proto/src/sbc.rs) and the DualShock 4 Bluetooth
+audio reports in crates/ds-proto/src/ds4.rs are ported from DS4 Sound Link,
+Copyright (c) 2026 ControllerAudioSwitcher Contributors (abh1shekbana), under
+the MIT License; see crates/ds-proto/DS4-Sound-Link-LICENSE.
+
 libopus (vendor/opus) is distributed under its own BSD license; see
 vendor/opus/COPYING.

@@ -197,6 +197,8 @@ pub struct Device {
     pub overrides: Mutex<Overrides>,
     pub feedback: Mutex<Feedback>,
     pub toggles: Mutex<Toggles>,
+    /// A profile in use only while a mapping's buttons are held.
+    pub held_profile: Mutex<Option<crate::engine::HeldProfile>>,
     pub stream_tx: Sender<StreamPacket>,
     stream_rx: Receiver<StreamPacket>,
     /// Wakes the writer as soon as the control report may have changed.
@@ -227,6 +229,10 @@ pub struct Device {
     pub speaker_route: AtomicU8,
     /// Headphone volume byte for `SPEAKER_HEADSET`.
     pub headset_volume: AtomicU8,
+    /// Audio fields of a DualShock 4's Bluetooth `0x11` report, set by its
+    /// audio thread. `Untouched` (the report as before) unless the profile
+    /// turns DualShock 4 audio on.
+    pub ds4_audio: Mutex<ds_proto::ds4::AudioOut>,
     pub calibrate_request: AtomicBool,
     /// Calibration feature report (`0x05`) read at connect.
     /// Feature reports a virtual DualSense driven by this controller answers with.
@@ -261,12 +267,12 @@ impl Device {
     }
 
     /// Apply a profile's microphone settings. Capture runs only while an app
-    /// records from the virtual DualSense (Discord in a call, a recorder),
-    /// so the rest of the time the controller's microphone, its radio
-    /// traffic and the idle-off timer are as if it were off.
+    /// records from the virtual DualSense, or from the microphone device
+    /// beside another pad (Discord in a call, a recorder), so the rest of
+    /// the time the controller's microphone, its radio traffic and the
+    /// idle-off timer are as if it were off.
     pub fn apply_microphone(&self, mic: &crate::profile::Microphone) {
-        let enabled =
-            mic.enabled && self.virt.active() == Some(crate::profile::VirtualKind::DualSense);
+        let enabled = mic.enabled && self.virt.microphone_ready();
         let muted = mic.muted || (mic.mute_button && self.toggles.lock().mute_engaged);
         let listening = self.virt.microphone_open();
         self.set_microphone(enabled, muted || !listening, mic.gain_percent, mic.source);
@@ -446,6 +452,15 @@ impl Device {
 
     pub fn is_bluetooth(&self) -> bool {
         self.conn == Connection::Bluetooth
+    }
+
+    /// A Sony DualShock 4 on Bluetooth, which can play sound. Over USB
+    /// Windows already has it as a sound device.
+    pub fn ds4_audio_capable(&self) -> bool {
+        self.model == Model::DualShock4
+            && self.is_bluetooth()
+            && self.has_output
+            && ds_proto::ds4::supports_bt_audio(self.info.vid, self.info.pid)
     }
 
     /// Rumble from the game.
@@ -653,6 +668,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         overrides: Mutex::new(Overrides::default()),
         feedback: Mutex::new(Feedback::default()),
         toggles: Mutex::new(Toggles::default()),
+        held_profile: Mutex::new(None),
         stream_tx: tx,
         stream_rx: rx,
         kick_tx,
@@ -664,6 +680,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         speaker_level: AtomicU8::new(0),
         speaker_route: AtomicU8::new(SPEAKER_UNTOUCHED),
         headset_volume: AtomicU8::new(0),
+        ds4_audio: Mutex::new(ds_proto::ds4::AudioOut::Untouched),
         mic_tap: Mutex::new(None),
         microphone: Arc::new(crate::haptics::capture::Capture::default()),
         microphone_source: AtomicU8::new(0),
@@ -731,6 +748,15 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
                         crate::haptics::streamer::run(e, d)
                     })
                     .expect("spawn haptics");
+            }
+            if d.ds4_audio_capable() {
+                std::thread::Builder::new()
+                    .name(format!("ds-ds4-audio-{id}"))
+                    .spawn_scoped(s, move || {
+                        let _g = StopOnPanic(d);
+                        crate::haptics::ds4::run(e, d)
+                    })
+                    .expect("spawn DualShock 4 audio");
             }
         })
     }));
@@ -933,6 +959,9 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         }
     }
     pipeline.release_all();
+    // Its buttons can't be let go any more; the next connection starts on
+    // the profile from before the hold.
+    engine.cancel_held_profile(device);
     device.stop.store(true, Ordering::Release);
     device.dead.store(true, Ordering::Release);
 }
@@ -981,10 +1010,11 @@ fn min_gap(conn: Connection, pcm: bool) -> Duration {
 fn control_report<'a>(
     device: &Device,
     state: &ds_proto::OutputState,
+    ds4_audio: ds_proto::ds4::AudioOut,
     buf: &'a mut [u8],
 ) -> &'a [u8] {
     if device.model.is_dualshock4() {
-        ds_proto::ds4::output_report(state, device.conn, buf)
+        ds_proto::ds4::output_report_with_audio(state, device.conn, ds4_audio, buf)
     } else {
         state.build(device.conn, buf)
     }
@@ -1164,8 +1194,16 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             keepalive || (changed && !throttled) || device.force_output.load(Ordering::Acquire);
         if due && now >= backoff_until {
             device.force_output.store(false, Ordering::Release);
-            let report = control_report(device, &state, &mut buf);
+            let ds4_audio = *device.ds4_audio.lock();
+            let report = control_report(device, &state, ds4_audio, &mut buf);
             if do_write(&mut writer, report, false, &mut fails, &mut backoff_until) {
+                if ds4_audio == ds_proto::ds4::AudioOut::Off {
+                    // Switched off once; later reports are the plain ones again.
+                    let mut a = device.ds4_audio.lock();
+                    if *a == ds_proto::ds4::AudioOut::Off {
+                        *a = ds_proto::ds4::AudioOut::Untouched;
+                    }
+                }
                 last_microphone_managed = microphone_managed;
                 last_sent = Some(state);
                 last_write = now;
@@ -1215,7 +1253,11 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         ),
         ..Default::default()
     };
-    let report = control_report(device, &calm, &mut buf).to_vec();
+    let ds4_audio = match *device.ds4_audio.lock() {
+        ds_proto::ds4::AudioOut::Untouched => ds_proto::ds4::AudioOut::Untouched,
+        _ => ds_proto::ds4::AudioOut::Off,
+    };
+    let report = control_report(device, &calm, ds4_audio, &mut buf).to_vec();
     let _ = writer.write(&report, 100);
 }
 
@@ -1256,6 +1298,7 @@ impl Device {
             overrides: Mutex::new(Overrides::default()),
             feedback: Mutex::new(Feedback::default()),
             toggles: Mutex::new(Toggles::default()),
+            held_profile: Mutex::new(None),
             stream_tx,
             stream_rx,
             kick_tx,
@@ -1267,6 +1310,7 @@ impl Device {
             speaker_level: AtomicU8::new(0),
             speaker_route: AtomicU8::new(SPEAKER_UNTOUCHED),
             headset_volume: AtomicU8::new(0),
+            ds4_audio: Mutex::new(ds_proto::ds4::AudioOut::Untouched),
             mic_tap: Mutex::new(None),
             microphone: Arc::new(crate::haptics::capture::Capture::default()),
             microphone_source: AtomicU8::new(0),
@@ -1282,6 +1326,18 @@ impl Device {
             dead: AtomicBool::new(false),
             flight: Default::default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod ds4_audio_tests {
+    use super::*;
+
+    #[test]
+    fn audio_fields_start_untouched_and_only_a_dualshock4_can_use_them() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        assert_eq!(*d.ds4_audio.lock(), ds_proto::ds4::AudioOut::Untouched);
+        assert!(!d.ds4_audio_capable(), "a DualSense has its own speaker path");
     }
 }
 

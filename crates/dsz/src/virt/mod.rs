@@ -62,6 +62,8 @@ impl usbip::UsbPad {
             usbip::Model::DualSense => VirtualKind::DualSense,
             usbip::Model::Xbox360 => VirtualKind::Xbox360,
             usbip::Model::DualShock4 => VirtualKind::DualShock4,
+            // The microphone device is no game pad.
+            usbip::Model::Microphone => VirtualKind::Off,
         }
     }
 
@@ -90,6 +92,8 @@ pub struct Status {
     pub hide_note: Option<String>,
     /// A game has the virtual DualSense's audio endpoint open.
     pub game_audio_open: bool,
+    /// The microphone device couldn't be plugged in (retried later).
+    pub microphone_failed: bool,
 }
 
 /// Per-controller handle the reader thread submits to.
@@ -99,6 +103,8 @@ pub struct Slot {
     /// The parked Xbox pad: Xbox buttons, and the whole pad while Game Bar
     /// is open.
     parked: RwLock<Option<Arc<Target>>>,
+    /// The microphone device beside a pad that has no microphone.
+    mic: RwLock<Option<Arc<Target>>>,
     parked_sent: Mutex<Option<XusbReport>>,
     last_xusb: Mutex<Option<XusbReport>>,
     seq: AtomicU8,
@@ -112,12 +118,19 @@ impl Slot {
         self.target.read().as_ref().map(|t| t.kind())
     }
 
-    /// An app is recording from this controller's virtual DualSense.
+    /// An app is recording from this controller's virtual DualSense, or
+    /// from the microphone device beside another pad.
     pub fn microphone_open(&self) -> bool {
         self.target
             .read()
             .as_ref()
             .is_some_and(|t| t.kind() == VirtualKind::DualSense && t.recording())
+            || self.mic.read().as_ref().is_some_and(|m| m.recording())
+    }
+
+    /// Windows has a recording device for this controller's microphone.
+    pub fn microphone_ready(&self) -> bool {
+        self.active() == Some(VirtualKind::DualSense) || self.mic.read().is_some()
     }
 
     pub fn has_parked(&self) -> bool {
@@ -185,6 +198,7 @@ impl Slot {
                 let seq = self.seq.fetch_add(1, Ordering::Relaxed);
                 t.submit(&vp::ds_usb_input(pad, raw, touch, seq))
             }
+            usbip::Model::Microphone => return,
         };
         match r {
             Ok(()) => {
@@ -438,25 +452,78 @@ const SWAP_HIDE: u64 = 1 << 39;
 const NO_HIDHIDE: &str =
     "Install HidHide to hide the physical controller; until then games may see both.";
 
+/// Where the controller's microphone goes: the virtual DualSense's own
+/// capture endpoint, else the microphone device beside another pad.
+fn microphone_sink(
+    pad: Option<&Target>,
+    mic: Option<&Target>,
+) -> Option<Arc<dyn crate::haptics::capture::PcmSink>> {
+    let ring = match pad.filter(|t| t.kind() == VirtualKind::DualSense) {
+        Some(t) => Some(t.microphone()),
+        None => mic.map(|m| m.microphone()),
+    };
+    ring.map(|r| r as Arc<dyn crate::haptics::capture::PcmSink>)
+}
+
 /// Point `device` at `pad`: input goes to it, its game audio comes back.
 fn attach(device: &Device, pad: &Pad) {
     if let Some(a) = pad.target.game_audio() {
         *device.game_audio.lock() = Some(a);
     }
-    let mic = (pad.kind() == VirtualKind::DualSense)
-        .then(|| pad.target.microphone() as Arc<dyn crate::haptics::capture::PcmSink>);
+    let mic = microphone_sink(Some(&pad.target), device.virt.mic.read().as_deref());
     device.microphone.set_sink(mic);
     device.virt.set(Some(pad.target.clone()));
     device.kick();
 }
 
 fn detach(device: &Device) {
-    device.microphone.set_sink(None);
+    device.microphone.set_sink(microphone_sink(None, device.virt.mic.read().as_deref()));
     device.microphone.clear();
     device.virt.set(None);
     *device.game_audio.lock() = None;
     device.feedback.lock().clear_game();
     device.kick();
+}
+
+/// Plug in or take away the microphone device. Capture follows it unless
+/// the virtual DualSense has it.
+fn set_microphone_device(device: &Device, mic: Option<Arc<Target>>) {
+    *device.virt.mic.write() = mic;
+    if device.virt.active() != Some(VirtualKind::DualSense) {
+        device
+            .microphone
+            .set_sink(microphone_sink(None, device.virt.mic.read().as_deref()));
+    }
+    device.kick();
+}
+
+/// Whether the controller needs the microphone device: the profile turns
+/// the microphone on, the controller sends one (a DualSense over
+/// Bluetooth), and the virtual pad in use has none of its own. A virtual
+/// DualSense carries the microphone itself, and with no virtual pad the
+/// app adds no devices.
+pub(crate) fn wants_microphone_device(
+    enabled: bool,
+    bluetooth_dualsense: bool,
+    pad: Option<VirtualKind>,
+) -> bool {
+    enabled
+        && bluetooth_dualsense
+        && matches!(pad, Some(VirtualKind::Xbox360 | VirtualKind::DualShock4))
+}
+
+fn plug_microphone() -> Result<Target, String> {
+    if let Some(why) = usbip::blocked() {
+        return Err(why);
+    }
+    if !usbip::available() {
+        return Err("usbip-win2 is not installed".into());
+    }
+    let sink = usbip::DsSink {
+        on_output: Box::new(|_| {}),
+        mirror: Default::default(),
+    };
+    usbip::UsbPad::create(usbip::Model::Microphone, sink).map_err(|e| e.to_string())
 }
 
 /// Per-controller service: keeps the virtual pad the profile asks for,
@@ -471,6 +538,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     let mut cache = ProfileCache::default();
     let mut failed: Option<(VirtualKind, Instant, String)> = None;
     let mut park_failed: Option<Instant> = None;
+    let mut mic: Option<Arc<Target>> = None;
+    let mut mic_failed: Option<Instant> = None;
     let ids = hide_ids(device);
 
     // Take over the pads this controller had before it went away, or the
@@ -491,7 +560,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
 
     while !device.stop.load(Ordering::Acquire) {
         let profile = cache.get(engine, device);
-        let vo = &profile.virtual_out;
+        // A held profile keeps the pad of the profile under it, so holding
+        // a button never replugs the controller a game is using.
+        let pad_profile = engine.unheld_profile(device).unwrap_or_else(|| profile.clone());
+        let vo = &pad_profile.virtual_out;
         let (fallback_pad, keep_xbox, hide_ok) = {
             let s = engine.settings.read();
             (s.fallback_pad, s.keep_xbox_pad, s.hidhide_control && hidhide::available())
@@ -659,6 +731,54 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             }
         }
 
+        // The microphone device, while the pad in use has no microphone.
+        // Like the pad, it follows the profile under a held one, so a
+        // chord doesn't plug in or take away a recording device.
+        let mic_wanted = wants_microphone_device(
+            pad_profile.microphone.enabled,
+            device.is_bluetooth() && !device.model.is_dualshock4(),
+            pad.as_ref().map(|p| p.kind()),
+        );
+        let mic_lost = mic.as_ref().is_some_and(|m| !m.alive());
+        if mic.is_some() && (!mic_wanted || mic_lost) {
+            set_microphone_device(device, None);
+            mic = None;
+            if mic_lost {
+                log::warn!("the controller microphone device was detached by Windows or the usbip-win2 driver");
+                mic_failed = Some(Instant::now());
+            } else {
+                log::info!("controller microphone device removed");
+            }
+        } else if mic_wanted
+            && mic.is_none()
+            && mic_failed.is_none_or(|t| t.elapsed() >= RETRY_AFTER)
+        {
+            match plug_microphone() {
+                Ok(m) => {
+                    let m = Arc::new(m);
+                    set_microphone_device(device, Some(m.clone()));
+                    log::info!(
+                        "controller microphone plugged in beside the virtual {} controller",
+                        pad.as_ref().map(|p| p.kind().label()).unwrap_or_default()
+                    );
+                    mic = Some(m);
+                    mic_failed = None;
+                }
+                Err(e) => {
+                    if mic_failed.is_none() {
+                        log::warn!("controller microphone device: {e}");
+                        engine.warn_toast(crate::i18n::tr(
+                            "Couldn't add the controller microphone to Windows; trying again in 30 seconds.",
+                        ));
+                    }
+                    mic_failed = Some(Instant::now());
+                }
+            }
+        }
+        if !mic_wanted {
+            mic_failed = None;
+        }
+
         // Status for the UI.
         {
             let target = pad.as_ref().map(|p| p.target.clone());
@@ -683,12 +803,16 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             st.parked = parked
                 .as_ref()
                 .map(|p| (p.target.xinput_slot(), p.park_hidden()));
+            st.microphone_failed = mic_failed.is_some();
         }
 
         // Game feedback arrives on the pad's own threads (callbacks).
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    if mic.take().is_some() {
+        set_microphone_device(device, None);
+    }
     detach(device);
     device.virt.set_parked(None);
     let keep =
@@ -740,6 +864,24 @@ mod tests {
         let stale = stale_pad_entries(&list, &pad_nodes, &pending);
         assert_eq!(stale, list[1..4].to_vec());
         assert!(stale_pad_entries(&list[4..], &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn microphone_device_only_beside_pads_without_one() {
+        use VirtualKind::*;
+        // The requested case: an Xbox 360 pad, and a DualShock 4 the same way.
+        assert!(wants_microphone_device(true, true, Some(Xbox360)));
+        assert!(wants_microphone_device(true, true, Some(DualShock4)));
+        // The virtual DualSense has its own; without a pad nothing is added.
+        assert!(!wants_microphone_device(true, true, Some(DualSense)));
+        assert!(!wants_microphone_device(true, true, None));
+        assert!(!wants_microphone_device(true, true, Some(Off)));
+        // Microphone off (the default), or no Bluetooth DualSense to send
+        // one: no device, so nothing Windows sees changes.
+        for pad in [None, Some(Xbox360), Some(DualShock4), Some(DualSense)] {
+            assert!(!wants_microphone_device(false, true, pad));
+            assert!(!wants_microphone_device(true, false, pad));
+        }
     }
 
     #[test]

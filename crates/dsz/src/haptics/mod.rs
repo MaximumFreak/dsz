@@ -14,6 +14,7 @@
 
 pub mod audio;
 pub mod capture;
+pub mod ds4;
 pub mod dsp;
 pub mod game;
 pub mod mic;
