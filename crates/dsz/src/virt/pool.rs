@@ -255,6 +255,7 @@ fn plug_with(
                 }
             }
         }),
+        Model::Microphone => Box::new(|_| {}),
     };
     let sink = usbip::DsSink {
         on_output,

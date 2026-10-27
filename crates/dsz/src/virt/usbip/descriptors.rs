@@ -137,6 +137,52 @@ pub fn utf16_string(s: &str) -> Vec<u8> {
     v
 }
 
+// ------------------------------------------------------------------ microphone
+
+/// The DualSense's microphone on its own: the same device identity and
+/// capture function as [`configuration`], without the render stream or the
+/// HID game pad, for a virtual pad that has no microphone (Xbox 360 or
+/// DualShock 4). Windows names it after the product string, as with the
+/// virtual DualSense, and no game finds a controller on it.
+///
+/// Interface 0 audio control (input terminal 4, feature unit 5, output
+/// terminal 6, the ids the virtual DualSense uses), 1 capture streaming
+/// (EP 0x82 ISO IN, the same format and packet as the virtual DualSense).
+/// High speed, so the capture clock runs exactly as it does there.
+pub mod mic {
+    pub const NUM_INTERFACES: u8 = 2;
+    pub const IF_AUDIO_CONTROL: u8 = 0;
+    pub const IF_CAPTURE: u8 = 1;
+    pub const EP_CAPTURE: u32 = super::EP_CAPTURE; // 0x82 ISO IN
+
+    pub fn configuration() -> Vec<u8> {
+        let mut v: Vec<u8> = vec![0x09, 0x02, 0, 0, NUM_INTERFACES, 0x01, 0x00, 0xC0, 0xFA];
+        // Interface 0: audio control.
+        v.extend_from_slice(&[0x09, 0x04, IF_AUDIO_CONTROL, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00]);
+        v.extend_from_slice(&[0x09, 0x24, 0x01, 0x00, 0x01, 0x27, 0x00, 0x01, IF_CAPTURE]); // header, streaming 1
+        // IT 4: headset mic, 2 ch. No associated terminal: there is no
+        // speaker on this device.
+        v.extend_from_slice(&[
+            0x0C, 0x24, 0x02, 0x04, 0x02, 0x04, 0x00, 0x02, 0x03, 0x00, 0x00, 0x00,
+        ]);
+        v.extend_from_slice(&[0x09, 0x24, 0x06, 0x05, 0x04, 0x01, 0x03, 0x00, 0x00]); // FU 5
+        v.extend_from_slice(&[0x09, 0x24, 0x03, 0x06, 0x01, 0x01, 0x00, 0x05, 0x00]); // OT 6: USB stream
+        // Interface 1: capture, alt 0 idle, alt 1 streaming.
+        v.extend_from_slice(&[0x09, 0x04, IF_CAPTURE, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00]);
+        v.extend_from_slice(&[0x09, 0x04, IF_CAPTURE, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00]);
+        v.extend_from_slice(&[0x07, 0x24, 0x01, 0x06, 0x01, 0x01, 0x00]);
+        v.extend_from_slice(&[
+            0x0B, 0x24, 0x02, 0x01, 0x02, 0x02, 0x10, 0x01, 0x80, 0xBB, 0x00,
+        ]); // 2 ch, 16 bit, 48 kHz
+        let ep = 0x80 | EP_CAPTURE as u8;
+        v.extend_from_slice(&[0x09, 0x05, ep, 0x05, 0xC4, 0x00, 0x04, 0x00, 0x00]); // ISO async, 196 bytes
+        v.extend_from_slice(&[0x07, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00]);
+        let total = v.len() as u16;
+        v[2..4].copy_from_slice(&total.to_le_bytes());
+        v
+    }
+}
+
 // ------------------------------------------------------------------ Xbox 360
 
 /// A wired Xbox 360 controller as Windows' own `xusb22` driver expects it:
@@ -340,6 +386,105 @@ mod tests {
         let mac = [0u8; 6];
         assert_eq!(ds4::feature(0x02, None, &mac).unwrap().len(), 37);
         assert_eq!(ds4::feature(0x12, None, &mac).unwrap().len(), 16);
+    }
+
+    /// Every descriptor in a configuration, in order.
+    fn descriptors(c: &[u8]) -> Vec<&[u8]> {
+        let mut v = Vec::new();
+        let mut i = 0;
+        while i < c.len() {
+            assert!(c[i] >= 2 && i + c[i] as usize <= c.len());
+            v.push(&c[i..i + c[i] as usize]);
+            i += c[i] as usize;
+        }
+        v
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02X}")).collect()
+    }
+
+    /// The pads' descriptors stay what they were before the microphone
+    /// device existed: Windows binds its drivers to these bytes.
+    #[test]
+    fn pad_descriptors_are_pinned() {
+        assert_eq!(hex(&DEVICE), DS_DEVICE);
+        assert_eq!(hex(&x360::DEVICE), X360_DEVICE);
+        assert_eq!(hex(&ds4::DEVICE), DS4_DEVICE);
+        assert_eq!(hex(&x360::configuration()), X360_CONFIGURATION);
+        assert_eq!(hex(&ds4::configuration()), DS4_CONFIGURATION);
+        assert_eq!(hex(&configuration()), DS_CONFIGURATION);
+    }
+
+    const DS_DEVICE: &str = "12010002000000404C05E60C000101020301";
+    const X360_DEVICE: &str = "12010002FFFFFF085E048E02140101020301";
+    const DS4_DEVICE: &str = "12010002000000404C05C405000101020301";
+    const X360_CONFIGURATION: &str = concat!(
+        "09023100010100A0FA0904000002FF5D010011210001012581140000000013010800000705810320",
+        "000107050103200008",
+    );
+    const DS4_CONFIGURATION: &str =
+        "09022900010100C0FA0904000002030000000921110100012292000705840340000107050303400001";
+    const DS_CONFIGURATION: &str = concat!(
+        "0902E300040100C0FA0904000000010100000A2401000149000201020C2402010101060433000000",
+        "0C24060201010300000000000924030301030402000C240204020403020300000009240605040103",
+        "0000092403060101010500090401000001020000090401010101020000072401010101000B240201",
+        "0402100180BB00090501098801040000072501000000000904020000010200000904020101010200",
+        "00072401060101000B2402010202100180BB0009058205C400040000072501000000000904030002",
+        "030000000921110100012211010705840340000407050303400004",
+    );
+
+    #[test]
+    fn microphone_device_is_a_valid_capture_only_audio_function() {
+        let c = mic::configuration();
+        assert_eq!(u16::from_le_bytes([c[2], c[3]]) as usize, c.len());
+        assert_eq!(c.len(), 109);
+        let all = descriptors(&c);
+        // Interfaces 0..n-1, each listed with alternate setting 0 first,
+        // none of them HID or vendor (no game finds a pad here, no pad
+        // driver loads).
+        let ifs: Vec<&[u8]> = all.iter().copied().filter(|d| d[1] == 0x04).collect();
+        let mut numbers: Vec<u8> = ifs.iter().filter(|d| d[3] == 0).map(|d| d[2]).collect();
+        numbers.dedup();
+        assert_eq!(numbers, (0..mic::NUM_INTERFACES).collect::<Vec<_>>());
+        assert_eq!(c[4], mic::NUM_INTERFACES);
+        assert!(ifs.iter().all(|d| d[5] == 0x01), "audio class only");
+        assert_eq!((ifs[0][2], ifs[0][6]), (mic::IF_AUDIO_CONTROL, 0x01));
+        assert!(ifs[1..].iter().all(|d| d[2] == mic::IF_CAPTURE && d[6] == 0x02));
+        // The audio control header covers exactly the class descriptors
+        // that follow it and names the streaming interface.
+        let ac: Vec<&[u8]> = all[2..].iter().copied().take_while(|d| d[1] == 0x24).collect();
+        let header = ac[0];
+        assert_eq!(header[2], 0x01);
+        let total: usize = ac.iter().map(|d| d.len()).sum();
+        assert_eq!(u16::from_le_bytes([header[5], header[6]]) as usize, total);
+        assert_eq!(&header[7..], &[1, mic::IF_CAPTURE]);
+        // Topology: headset mic (4) -> feature unit (5) -> USB stream (6),
+        // and no terminal points at one that isn't there.
+        let ids: Vec<u8> = ac[1..].iter().map(|d| d[3]).collect();
+        assert_eq!(ids, [4, 5, 6]);
+        assert_eq!(ac[1][2], 0x02);
+        assert_eq!(u16::from_le_bytes([ac[1][4], ac[1][5]]), 0x0402);
+        assert_eq!(ac[1][6], 0, "no associated terminal");
+        assert_eq!((ac[2][2], ac[2][3], ac[2][4]), (0x06, UNIT_MIC, 4));
+        assert_eq!((ac[3][2], ac[3][7]), (0x03, UNIT_MIC));
+        assert_eq!(u16::from_le_bytes([ac[3][4], ac[3][5]]), 0x0101);
+        assert_eq!(ac[3][6], 0, "no associated terminal");
+        // One ISO IN endpoint, the virtual DualSense's capture endpoint.
+        let eps: Vec<&[u8]> = all.iter().copied().filter(|d| d[1] == 0x05).collect();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0][2] as u32, 0x80 | mic::EP_CAPTURE);
+        assert_eq!(eps[0][3] & 0x03, 0x01);
+        // The streaming interface and endpoint are byte for byte the
+        // virtual DualSense's capture, so the same clock serves both.
+        let ds = configuration();
+        let tail = &c[c.len() - 52..];
+        let start = ds.windows(9).position(|w| w == [0x09, 0x04, IF_CAPTURE, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00]).unwrap();
+        let mut ds_tail = ds[start..start + 52].to_vec();
+        ds_tail[2] = mic::IF_CAPTURE;
+        ds_tail[11] = mic::IF_CAPTURE;
+        assert_eq!(tail, &ds_tail[..]);
+        assert_eq!(u16::from_le_bytes([eps[0][4], eps[0][5]]) as usize, CAPTURE_PACKET + 4);
     }
 
     #[test]

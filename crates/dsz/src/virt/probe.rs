@@ -457,6 +457,60 @@ pub fn probe(what: &str) {
                 Err(e) => println!("usbip-win2 DualSense failed: {e}"),
             }
         }
+        "usbip-mic" => {
+            // The microphone device used beside an Xbox 360 or DualShock 4
+            // pad, with a 440 Hz tone in place of the controller: record
+            // from "Wireless Controller" (Sound Recorder, Discord's mic
+            // test) to hear it. Default devices are kept as the app does.
+            let mut guard = super::audio_default::Watcher::new([false; 6]);
+            guard.tick();
+            let sink = usbip::DsSink {
+                on_output: Box::new(|_| {}),
+                mirror: Default::default(),
+            };
+            let t0 = Instant::now();
+            match usbip::UsbPad::create(usbip::Model::Microphone, sink) {
+                Ok(mic) => {
+                    println!("attached in {} ms, serial {}", t0.elapsed().as_millis(), mic.serial());
+                    let ring = mic.microphone();
+                    let secs = secs_arg(20);
+                    let mut listed = false;
+                    let (mut recording, mut phase, mut pushed) = (false, 0f32, 0usize);
+                    let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
+                    let mut next = Instant::now();
+                    while t0.elapsed() < Duration::from_secs(secs) && mic.alive() {
+                        guard.tick();
+                        if !listed && t0.elapsed() > Duration::from_secs(3) {
+                            listed = true;
+                            println!("our recording endpoints: {:?}", super::audio_default::probe::ours(1));
+                            for (i, (id, ours)) in super::audio_default::probe::snapshot().iter().enumerate() {
+                                println!("  default slot {i}: ours {ours} {id:?}");
+                            }
+                        }
+                        if mic.recording() != recording {
+                            recording = !recording;
+                            println!("{:.1} s: an app {} recording", t0.elapsed().as_secs_f32(), if recording { "started" } else { "stopped" });
+                        }
+                        // 10 ms of stereo tone at a time, on the clock.
+                        let mut pcm = [0i16; 960];
+                        for f in pcm.chunks_exact_mut(2) {
+                            let v = (phase.sin() * 8_000.0) as i16;
+                            phase = (phase + step) % (2.0 * std::f32::consts::PI);
+                            f[0] = v;
+                            f[1] = v;
+                        }
+                        ring.push(&pcm);
+                        if recording {
+                            pushed += 480;
+                        }
+                        next += Duration::from_millis(10);
+                        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                    }
+                    println!("alive {} urbs {} frames offered while recording {pushed}", mic.alive(), mic.urbs());
+                }
+                Err(e) => println!("usbip-win2 microphone failed: {e}"),
+            }
+        }
         "game-output" => {
             // Write output reports to the app's virtual DualSense like a game.
             let Some(info) = crate::hid::enumerate_with(true).into_iter().next() else {
@@ -882,7 +936,7 @@ pub fn probe(what: &str) {
             super::audio_default::describe();
         }
         _ => println!(
-            "probe what? hidhide | usbip-x360 | usbip-ds4 | usbip-ds | tone | default-audio"
+            "probe what? hidhide | usbip-x360 | usbip-ds4 | usbip-ds | usbip-mic | tone | default-audio"
         ),
     }
 }

@@ -284,7 +284,7 @@ impl App {
                 toggle_row(
                     ui,
                     crate::i18n::tr("Enable microphone"),
-                    crate::i18n::tr("Requires Bluetooth and an active virtual DualSense controller"),
+                    crate::i18n::tr("Requires Bluetooth and a virtual DualSense, Xbox 360 or DualShock 4 controller"),
                     &mut m.enabled,
                 );
                 if m.enabled {
@@ -320,9 +320,11 @@ impl App {
                         "%",
                     );
                     if let Some(d) = dev {
-                        let ready = bt && d.virt.active() == Some(VirtualKind::DualSense);
-                        if !ready {
-                            note(ui, crate::i18n::tr("Connect over Bluetooth and select DualSense on the Virtual controller page to expose the microphone to Windows."), WARN);
+                        let ready = bt && d.virt.microphone_ready();
+                        if bt && d.virt.status.lock().microphone_failed {
+                            note(ui, crate::i18n::tr("Couldn't add the controller microphone to Windows; trying again in 30 seconds."), WARN);
+                        } else if !ready {
+                            note(ui, crate::i18n::tr("Connect over Bluetooth and select a virtual controller on the Virtual controller page to expose the microphone to Windows."), WARN);
                         } else {
                             let toggled = d.toggles.lock().mute_engaged;
                             ui.horizontal(|ui| {

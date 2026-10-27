@@ -261,12 +261,12 @@ impl Device {
     }
 
     /// Apply a profile's microphone settings. Capture runs only while an app
-    /// records from the virtual DualSense (Discord in a call, a recorder),
-    /// so the rest of the time the controller's microphone, its radio
-    /// traffic and the idle-off timer are as if it were off.
+    /// records from the virtual DualSense, or from the microphone device
+    /// beside another pad (Discord in a call, a recorder), so the rest of
+    /// the time the controller's microphone, its radio traffic and the
+    /// idle-off timer are as if it were off.
     pub fn apply_microphone(&self, mic: &crate::profile::Microphone) {
-        let enabled =
-            mic.enabled && self.virt.active() == Some(crate::profile::VirtualKind::DualSense);
+        let enabled = mic.enabled && self.virt.microphone_ready();
         let muted = mic.muted || (mic.mute_button && self.toggles.lock().mute_engaged);
         let listening = self.virt.microphone_open();
         self.set_microphone(enabled, muted || !listening, mic.gain_percent, mic.source);
