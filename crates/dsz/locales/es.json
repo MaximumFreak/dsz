@@ -184,7 +184,7 @@
   "Connect over Bluetooth and select DualSense on the Virtual controller page to expose the microphone to Windows.": "Conecta por Bluetooth y elige DualSense en Mando virtual para que Windows detecte el micrófono.",
   "Four rising notes, then a steady tone. The controller's microphone listens for clicks.": "Cuatro notas ascendentes y luego un tono constante. El micrófono del mando detecta chasquidos.",
   "A game is using the virtual DualSense; its speaker sound plays here.": "Un juego está usando el DualSense virtual; el sonido de su altavoz se reproduce aquí.",
-  "A DualShock 4 has rumble motors, not the DualSense voice coils. Rumble and button clicks use classic rumble. The haptic stream and the speaker are DualSense only.": "El DualShock 4 usa motores de vibración distintos a los del DualSense. La vibración y las pulsaciones usan vibración clásica. La transmisión háptica y el altavoz solo funcionan con DualSense.",
+  "A DualShock 4 has rumble motors, not the DualSense voice coils. Rumble and button clicks use classic rumble. The haptic stream is DualSense only.": "El DualShock 4 usa motores de vibración distintos a los del DualSense. La vibración y las pulsaciones usan vibración clásica. La transmisión háptica solo funciona con DualSense.",
   "This controller is on USB. PCM haptics stream over Bluetooth only, so rumble and button clicks use classic rumble here.": "Este mando está conectado por USB. La háptica PCM solo se transmite por Bluetooth, así que la vibración y las pulsaciones usan vibración clásica.",
   "Resistance and vibration for L2 and R2. Pull a trigger to feel it while you edit.": "Resistencia y vibración para L2 y R2. Pulsa un gatillo para sentir los cambios mientras editas.",
   "Resistance": "Resistencia",
@@ -726,5 +726,18 @@
   "{missing} directions unmeasured. Apply keeps their current gains.": "{missing} direcciones sin medir. Aplicar conserva sus ganancias actuales.",
   "All directions measured. Apply or discard the preview.": "Todas las direcciones medidas. Aplica o descarta la vista previa.",
   "Connect a controller to calibrate.": "Conecta un mando para calibrar.",
-  "Calibrate to measure the stick's reach.": "Calibra para medir el alcance del stick."
+  "Calibrate to measure the stick's reach.": "Calibra para medir el alcance del stick.",
+  "DualShock 4 speaker / headphones (experimental)": "Altavoz / auriculares del DualShock 4 (experimental)",
+  "Sound on the controller over Bluetooth. Off until you turn on a source.": "Sonido en el mando por Bluetooth. Apagado hasta que actives una fuente.",
+  "Needs a Sony DualShock 4 over Bluetooth. Over USB, Windows already has the controller as a sound device.": "Requiere un DualShock 4 de Sony por Bluetooth. Por USB, Windows ya reconoce el mando como dispositivo de sonido.",
+  "PC audio": "Audio del PC",
+  "Play what the PC plays on the controller": "Reproduce en el mando lo que suena en el PC",
+  "A game's DualSense speaker sound, through the virtual DualSense": "El sonido del altavoz del DualSense de un juego, a través del DualSense virtual",
+  "For game sound, select DualSense on the Virtual controller page, with Game speaker on.": "Para el sonido del juego, elige DualSense en la página Mando virtual, con Altavoz del juego activado.",
+  "Where the controller plays it": "Dónde lo reproduce el mando",
+  "Speaker": "Altavoz",
+  "Headphone jack": "Toma de auriculares",
+  "0 keeps it off": "0 lo mantiene apagado",
+  "Level": "Nivel",
+  "Not tried on a real DualShock 4 yet. While a source is on, the controller gets audio all the time, which uses more battery.": "Aún no probado en un DualShock 4 real. Con una fuente activada, el mando recibe audio todo el tiempo, lo que gasta más batería."
 }

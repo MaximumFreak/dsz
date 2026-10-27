@@ -593,6 +593,18 @@ pub fn as_dualsense_usb(s: &InputState) -> [u8; 64] {
 /// Bluetooth byte 1 is `0xC4`: HID data, CRC present, and a 4 ms poll, which
 /// is the wired rate. `out` must hold the report.
 pub fn output_report<'a>(state: &OutputState, conn: Connection, out: &'a mut [u8]) -> &'a [u8] {
+    output_report_with_audio(state, conn, AudioOut::Untouched, out)
+}
+
+/// [`output_report`] that also sets the Bluetooth audio fields. With
+/// [`AudioOut::Untouched`] the report is exactly [`output_report`]'s; over
+/// USB `audio` is ignored (there the pad is a USB audio device to Windows).
+pub fn output_report_with_audio<'a>(
+    state: &OutputState,
+    conn: Connection,
+    audio: AudioOut,
+    out: &'a mut [u8],
+) -> &'a [u8] {
     let (n, flag, motor, led) = match conn {
         Connection::Usb => {
             out[..USB_OUTPUT_LEN].fill(0);
@@ -602,7 +614,7 @@ pub fn output_report<'a>(state: &OutputState, conn: Connection, out: &'a mut [u8
         Connection::Bluetooth => {
             out[..BT_REPORT_LEN].fill(0);
             out[0] = 0x11;
-            out[1] = 0xC4;
+            out[1] = 0xC0 | BT_POLL_MS;
             (BT_REPORT_LEN, 3, 6, 8)
         }
     };
@@ -615,9 +627,115 @@ pub fn output_report<'a>(state: &OutputState, conn: Connection, out: &'a mut [u8
     out[led + 1] = state.lightbar[1];
     out[led + 2] = state.lightbar[2];
     if conn == Connection::Bluetooth {
+        if let Some((mode, headphones, speaker)) = audio.fields() {
+            out[2] = mode;
+            out[flag] |= AUDIO_VOLUME_FLAGS;
+            out[21] = headphones;
+            out[22] = headphones;
+            out[23] = 0; // microphone
+            out[24] = speaker;
+        }
         crc::seal(PREFIX_OUTPUT, &mut out[..n]);
     }
     &out[..n]
+}
+
+// ------------------------------------------------------------ Bluetooth audio
+//
+// Speaker and headphone audio over Bluetooth, as DS4 Sound Link
+// (https://github.com/abh1shekbana/DS4-Sound-Link, by abh1shekbana, MIT)
+// sends it: report `0x11` arms the audio path with byte 2 `0xA0` and the
+// volume fields, then report `0x17` carries four SBC frames (16 ms of
+// 32 kHz audio) to the speaker (`0x02`) or the headphone jack (`0x24`).
+// Byte 2 `0xA0` rather than `0xA2` keeps the controller sending input while
+// audio plays, per DS4 Sound Link's protocol notes. The `0x17` layout is the
+// one asimonf's DS4AudioStreamer proof of concept sends (GPL-2.0, read as
+// documentation). DS4 Sound Link's full notice is in
+// `crates/ds-proto/DS4-Sound-Link-LICENSE`.
+
+/// Bluetooth poll interval in ms, the low bits of the header byte.
+pub const BT_POLL_MS: u8 = 4;
+/// Report `0x17`: header, four SBC frames, CRC.
+pub const AUDIO_REPORT_LEN: usize = 462;
+/// SBC frames in one `0x17` report.
+pub const AUDIO_FRAMES: usize = 4;
+pub const AUDIO_RATE: u32 = 32_000;
+/// One `0x17` report's worth of audio: 512 frames at 32 kHz.
+pub const AUDIO_PERIOD_NS: u64 = 16_000_000;
+/// Highest headphone or speaker volume byte.
+pub const AUDIO_VOLUME_MAX: u8 = 127;
+const AUDIO_MODE_ON: u8 = 0xA0;
+/// Valid flags for the left and right headphone, microphone, and speaker
+/// volume bytes.
+const AUDIO_VOLUME_FLAGS: u8 = 0xF0;
+const TARGET_SPEAKER: u8 = 0x02;
+const TARGET_HEADPHONES: u8 = 0x24;
+
+/// The audio fields of the Bluetooth `0x11` report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioOut {
+    /// Not written: the report is the plain rumble and lightbar report.
+    #[default]
+    Untouched,
+    /// Audio path off and both volumes 0.
+    Off,
+    /// Speaker at this volume byte, headphones silent.
+    Speaker { volume: u8 },
+    /// Headphone jack at this volume byte, speaker silent.
+    Headphones { volume: u8 },
+}
+
+impl AudioOut {
+    /// (byte 2, headphone volume, speaker volume), or `None` for untouched.
+    fn fields(self) -> Option<(u8, u8, u8)> {
+        let v = |x: u8| x.min(AUDIO_VOLUME_MAX);
+        match self {
+            AudioOut::Untouched => None,
+            AudioOut::Off => Some((0, 0, 0)),
+            AudioOut::Speaker { volume } => Some((AUDIO_MODE_ON, 0, v(volume))),
+            AudioOut::Headphones { volume } => Some((AUDIO_MODE_ON, v(volume), 0)),
+        }
+    }
+
+    pub fn is_on(self) -> bool {
+        matches!(self, AudioOut::Speaker { .. } | AudioOut::Headphones { .. })
+    }
+}
+
+/// Bluetooth audio is only tried on Sony's own DualShock 4 (v1 and v2);
+/// clones and the USB adapter don't take these reports.
+pub fn supports_bt_audio(vid: u16, pid: u16) -> bool {
+    vid == SONY_VID && matches!(pid, 0x05C4 | 0x09CC)
+}
+
+/// Report `0x17`: four SBC frames for the speaker or the headphone jack.
+/// `counter` is the running SBC frame number, which goes up by
+/// [`AUDIO_FRAMES`] per report. `poll` is the poll interval in the header
+/// byte, as in `0x11`. `out` must hold [`AUDIO_REPORT_LEN`] bytes.
+pub fn audio_report<'a>(
+    counter: u16,
+    frames: &[[u8; crate::sbc::FRAME_LEN]; AUDIO_FRAMES],
+    headphones: bool,
+    poll: u8,
+    out: &'a mut [u8],
+) -> &'a [u8] {
+    let out = &mut out[..AUDIO_REPORT_LEN];
+    out.fill(0);
+    out[0] = 0x17;
+    out[1] = 0x40 | poll.min(16);
+    out[2] = AUDIO_MODE_ON;
+    out[3..5].copy_from_slice(&counter.to_le_bytes());
+    out[5] = if headphones {
+        TARGET_HEADPHONES
+    } else {
+        TARGET_SPEAKER
+    };
+    for (i, f) in frames.iter().enumerate() {
+        let at = 6 + i * crate::sbc::FRAME_LEN;
+        out[at..at + crate::sbc::FRAME_LEN].copy_from_slice(f);
+    }
+    crc::seal(PREFIX_OUTPUT, out);
+    out
 }
 
 #[cfg(test)]
@@ -937,5 +1055,108 @@ mod tests {
             y, 471,
             "scaled up for the DualSense image, back down for a virtual DualShock 4"
         );
+    }
+
+    // Bytes from DS4 Sound Link's own builders
+    // (DualShock4BluetoothAudioProtocol, commit 8267b6e), run under .NET 8:
+    // the 0x17 reports carry the four tone frames pinned in `sbc::tests`.
+    const DS4SL_17_HEADPHONES_1234: &str = "1740a03412249c7f306c14d9966666c765453480207d557fbb80dd7d5580bb85a4855583c38a2484918b4bb372c206aad6e0c09219f00c39a38555f6c3189e8155c43bc55f7d5571bbe79f7d5525bb3a9f7d55033b181f7d5519bbc51f7d555f3be79f7d55b3bb3a9f7d55f03b181f7d55f8bb9c7f303830d3000000c0000000c55b9832a6a1e7f0b91e63953aa2528add49180d35810a45c55b98056d21e7f0b51601253aa252ab2c09180d31bb3555c55b983ec161e7f0b5342f953aa252a05989180d358c5a85c55b98015f61e7f0b50472153aa252942b09180d31a951159c7f303830d3000000c0000000c55b983a3161e7f0b53f0a953aa252b5a489180d35a24f95c55b980deaa1e7f0b901d2553aa252839309180d35926015c55b98276d21e7f0b53912653aa252bf3449180d35b70495c55b982443a1e7f0b90f8d953aa252826349180d3582d0159c7f303830d3000000c0000000c55b9810a221e7f0b52581253aa252b7d949180d35bf3e55c55b98384ca1e7f0b92632953aa252914189180d35831345c55b98022b61e7f0b50ef5253aa252a39009180d31b68855c55b983f2961e7f0b5397b953aa252a81c89180d35930385000000000000000000000000000000005718a0d5";
+    const DS4SL_17_SPEAKER_8_POLL4: &str = "1744a00800029c7f306c14d9966666c765453480207d557fbb80dd7d5580bb85a4855583c38a2484918b4bb372c206aad6e0c09219f00c39a38555f6c3189e8155c43bc55f7d5571bbe79f7d5525bb3a9f7d55033b181f7d5519bbc51f7d555f3be79f7d55b3bb3a9f7d55f03b181f7d55f8bb9c7f303830d3000000c0000000c55b9832a6a1e7f0b91e63953aa2528add49180d35810a45c55b98056d21e7f0b51601253aa252ab2c09180d31bb3555c55b983ec161e7f0b5342f953aa252a05989180d358c5a85c55b98015f61e7f0b50472153aa252942b09180d31a951159c7f303830d3000000c0000000c55b983a3161e7f0b53f0a953aa252b5a489180d35a24f95c55b980deaa1e7f0b901d2553aa252839309180d35926015c55b98276d21e7f0b53912653aa252bf3449180d35b70495c55b982443a1e7f0b90f8d953aa252826349180d3582d0159c7f303830d3000000c0000000c55b9810a221e7f0b52581253aa252b7d949180d35bf3e55c55b98384ca1e7f0b92632953aa252914189180d35831345c55b98022b61e7f0b50ef5253aa252a39009180d31b68855c55b983f2961e7f0b5397b953aa252a81c89180d35930385000000000000000000000000000000003f3b7fbe";
+    const DS4SL_11_ARM_HEADPHONES_110: &str = "11c0a0f300000000000000000000000000000000006e6e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001977aebd";
+    const DS4SL_11_ARM_SPEAKER_90: &str = "11c0a0f300000000000000000000000000000000000000005a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d1ab0882";
+    const DS4SL_11_DISARM: &str = "11c000f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000858e4bfe";
+
+    fn tone_frames() -> [[u8; crate::sbc::FRAME_LEN]; AUDIO_FRAMES] {
+        let mut e = crate::sbc::Encoder::new();
+        let mut frames = [[0u8; crate::sbc::FRAME_LEN]; AUDIO_FRAMES];
+        for (i, f) in frames.iter_mut().enumerate() {
+            let (l, r) = crate::sbc::tests::tone(i);
+            e.encode(&l, &r, f);
+        }
+        frames
+    }
+
+    #[test]
+    fn audio_report_matches_ds4_sound_link() {
+        use crate::sbc::tests::unhex;
+        let frames = tone_frames();
+        let mut buf = [0u8; 600];
+        let r = audio_report(0x1234, &frames, true, 0, &mut buf).to_vec();
+        assert_eq!(r, unhex(DS4SL_17_HEADPHONES_1234));
+        let r = audio_report(8, &frames, false, 4, &mut buf).to_vec();
+        assert_eq!(r, unhex(DS4SL_17_SPEAKER_8_POLL4));
+        assert_eq!(&r[..6], &[0x17, 0x44, 0xA0, 8, 0, 0x02]);
+        assert!(crc::verify(PREFIX_OUTPUT, &r));
+    }
+
+    #[test]
+    fn audio_fields_match_ds4_sound_link_arming() {
+        use crate::sbc::tests::unhex;
+        // DS4 Sound Link arms with rumble and the lightbar zeroed and a 0 ms
+        // poll; DSZ keeps its own poll byte and CRC, everything else is theirs.
+        let dark = OutputState {
+            lightbar: [0, 0, 0],
+            ..Default::default()
+        };
+        let mut buf = [0u8; 96];
+        for (audio, want) in [
+            (AudioOut::Headphones { volume: 110 }, DS4SL_11_ARM_HEADPHONES_110),
+            (AudioOut::Speaker { volume: 90 }, DS4SL_11_ARM_SPEAKER_90),
+        ] {
+            let r = output_report_with_audio(&dark, Connection::Bluetooth, audio, &mut buf).to_vec();
+            let want = unhex(want);
+            assert_eq!(r.len(), want.len());
+            assert_eq!(r[1], 0xC4);
+            assert_eq!(&r[2..74], &want[2..74], "{audio:?}");
+            assert!(crc::verify(PREFIX_OUTPUT, &r));
+        }
+        // Off: their disarm, with DSZ's rumble and lightbar bits still set.
+        let r = output_report_with_audio(&dark, Connection::Bluetooth, AudioOut::Off, &mut buf).to_vec();
+        let want = unhex(DS4SL_11_DISARM);
+        assert_eq!(r[2], want[2]);
+        assert_eq!(r[3], want[3] | 0x03);
+        assert_eq!(&r[4..74], &want[4..74]);
+        // Volumes are capped at the field's range.
+        let r = output_report_with_audio(&dark, Connection::Bluetooth, AudioOut::Speaker { volume: 255 }, &mut buf);
+        assert_eq!(r[24], AUDIO_VOLUME_MAX);
+    }
+
+    #[test]
+    fn default_output_is_byte_for_byte_unchanged() {
+        use crate::sbc::tests::unhex;
+        // The 0x11 / 0x05 reports DSZ sent before Bluetooth audio existed.
+        let s = OutputState {
+            rumble_left: 0xAA,
+            rumble_right: 0x55,
+            lightbar: [1, 2, 3],
+            ..Default::default()
+        };
+        let mut buf = [0u8; 96];
+        let bt = "11c40003000055aa010203000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000912db8c3";
+        assert_eq!(output_report(&s, Connection::Bluetooth, &mut buf).to_vec(), unhex(bt));
+        assert_eq!(
+            output_report_with_audio(&s, Connection::Bluetooth, AudioOut::Untouched, &mut buf).to_vec(),
+            unhex(bt)
+        );
+        let usb = output_report(&s, Connection::Usb, &mut buf).to_vec();
+        let mut want = vec![0u8; 32];
+        want[0] = 0x05;
+        want[1] = 0x03;
+        want[4] = 0x55;
+        want[5] = 0xAA;
+        want[6..9].copy_from_slice(&[1, 2, 3]);
+        assert_eq!(usb, want);
+        // USB never carries the audio fields.
+        let on = AudioOut::Headphones { volume: 100 };
+        assert_eq!(output_report_with_audio(&s, Connection::Usb, on, &mut buf).to_vec(), want);
+    }
+
+    #[test]
+    fn bluetooth_audio_only_on_sony_pads() {
+        assert!(supports_bt_audio(0x054C, 0x05C4));
+        assert!(supports_bt_audio(0x054C, 0x09CC));
+        assert!(!supports_bt_audio(0x054C, 0x0BA0), "the USB adapter");
+        assert!(!supports_bt_audio(0x054C, 0x0CE6), "DualSense");
+        assert!(!supports_bt_audio(0x0C12, 0x0E10), "a clone");
     }
 }

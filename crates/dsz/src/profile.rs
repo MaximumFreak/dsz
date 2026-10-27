@@ -258,6 +258,8 @@ pub struct Haptics {
     /// Send speaker audio to a headset in the controller's jack instead,
     /// while one is plugged in.
     pub headset_when_plugged: bool,
+    /// Sound on a DualShock 4 over Bluetooth.
+    pub ds4_audio: Ds4Audio,
 }
 
 impl Default for Haptics {
@@ -278,6 +280,41 @@ impl Default for Haptics {
             speaker_volume: 80,
             pc_audio_on_speaker: false,
             headset_when_plugged: true,
+            ds4_audio: Ds4Audio::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Ds4AudioOutput {
+    #[default]
+    Speaker,
+    Headphones,
+}
+
+/// Sound on a DualShock 4's speaker or headphone jack over Bluetooth (SBC,
+/// report `0x17`). Off by default: until a source is turned on, the
+/// controller gets exactly the reports it got before.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ds4Audio {
+    /// Play the captured PC audio.
+    pub pc_audio: bool,
+    /// Play a game's speaker channels from the virtual DualSense (also
+    /// needs the virtual output's game speaker on).
+    pub game_speaker: bool,
+    pub output: Ds4AudioOutput,
+    /// 0..=100; 0 keeps it off.
+    pub volume: u8,
+}
+
+impl Default for Ds4Audio {
+    fn default() -> Self {
+        Ds4Audio {
+            pc_audio: false,
+            game_speaker: false,
+            output: Ds4AudioOutput::Speaker,
+            volume: 80,
         }
     }
 }
@@ -1235,6 +1272,18 @@ mod tests {
             let s = serde_json::to_string(&p).unwrap();
             let q: Profile = serde_json::from_str(&s).unwrap();
             assert_eq!(p, q);
+        }
+    }
+
+    #[test]
+    fn older_profiles_load_with_dualshock4_audio_off() {
+        let p: Profile =
+            serde_json::from_str(r#"{"name":"Old","haptics":{"speaker_volume":50,"pc_audio_on_speaker":true}}"#)
+                .unwrap();
+        assert_eq!(p.haptics.ds4_audio, Ds4Audio::default());
+        assert!(!p.haptics.ds4_audio.pc_audio && !p.haptics.ds4_audio.game_speaker);
+        for p in Profile::starter_set() {
+            assert_eq!(p.haptics.ds4_audio, Ds4Audio::default(), "{}", p.name);
         }
     }
 

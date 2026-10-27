@@ -27,6 +27,102 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Speaker and headphone sound on a DualShock 4 over Bluetooth.
+    fn ds4_audio_card(&mut self, ui: &mut egui::Ui, p: &mut Profile, d: &Arc<Device>) {
+        let devices = self.audio_device_list();
+        let capture = self.engine.audio.status.lock().clone();
+        card(
+            ui,
+            crate::i18n::tr("DualShock 4 speaker / headphones (experimental)"),
+            crate::i18n::tr("Sound on the controller over Bluetooth. Off until you turn on a source."),
+            |ui| {
+                if !d.ds4_audio_capable() {
+                    muted(ui, crate::i18n::tr("Needs a Sony DualShock 4 over Bluetooth. Over USB, Windows already has the controller as a sound device."));
+                    return;
+                }
+                let game_speaker = p.virtual_out.game_speaker;
+                let a = &mut p.haptics.ds4_audio;
+                toggle_row(
+                    ui,
+                    crate::i18n::tr("PC audio"),
+                    crate::i18n::tr("Play what the PC plays on the controller"),
+                    &mut a.pc_audio,
+                );
+                toggle_row(
+                    ui,
+                    crate::i18n::tr("Game speaker sound"),
+                    crate::i18n::tr("A game's DualSense speaker sound, through the virtual DualSense"),
+                    &mut a.game_speaker,
+                );
+                if a.game_speaker
+                    && (d.virt.active() != Some(VirtualKind::DualSense) || !game_speaker)
+                {
+                    muted(ui, crate::i18n::tr("For game sound, select DualSense on the Virtual controller page, with Game speaker on."));
+                }
+                if !a.pc_audio && !a.game_speaker {
+                    return;
+                }
+                row(ui, crate::i18n::tr("Output"), crate::i18n::tr("Where the controller plays it"), |ui| {
+                    segmented(
+                        ui,
+                        &mut a.output,
+                        &[
+                            (Ds4AudioOutput::Speaker, crate::i18n::tr("Speaker")),
+                            (Ds4AudioOutput::Headphones, crate::i18n::tr("Headphone jack")),
+                        ],
+                    );
+                });
+                slider_row(ui, crate::i18n::tr("Volume"), crate::i18n::tr("0 keeps it off"), &mut a.volume, 0..=100, "%");
+                if a.pc_audio {
+                    let h = &mut p.haptics;
+                    row(
+                        ui,
+                        crate::i18n::tr("Capture from"),
+                        crate::i18n::tr("What the PC plays on this output"),
+                        |ui| {
+                            let label = if h.device.is_empty() {
+                                crate::i18n::tr("Windows default").to_string()
+                            } else {
+                                h.device.clone()
+                            };
+                            egui::ComboBox::from_id_salt("ds4-audio-dev")
+                                .width(240.0)
+                                .selected_text(label)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut h.device, String::new(), crate::i18n::tr("Windows default"));
+                                    for dv in &devices {
+                                        ui.selectable_value(&mut h.device, dv.clone(), dv);
+                                    }
+                                });
+                        },
+                    );
+                    if let Some(e) = capture.error.as_ref().filter(|_| !capture.running) {
+                        ui.label(RichText::new(e).size(12.0).color(BAD));
+                    }
+                }
+                let streaming = d.stats.stream_hz.load(Ordering::Relaxed);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(crate::i18n::tr("Level")).color(MUTED));
+                    meter(ui, d.speaker_level.load(Ordering::Relaxed) as f32 / 255.0, VIOLET, 184.0);
+                    let (t, c) = if streaming > 0 {
+                        (crate::localized_format!("{streaming} pkt/s", "{streaming} pac/s", "{streaming} paq/s"), GOOD)
+                    } else {
+                        (crate::i18n::tr("off").to_string(), FAINT)
+                    };
+                    pill(ui, &t, c);
+                });
+                let under = d.stats.stream_underruns.load(Ordering::Relaxed);
+                if under > 0 {
+                    muted(
+                        ui,
+                        &crate::localized_format!("{under} audio gap(s) smoothed over since connect", "{under} falha(s) de áudio suavizada(s) desde a conexão", "{under} corte(s) de audio suavizado(s) desde la conexión"),
+                    );
+                }
+                note(ui, crate::i18n::tr("Not tried on a real DualShock 4 yet. While a source is on, the controller gets audio all the time, which uses more battery."), WARN);
+            },
+        );
+    }
+
     pub(crate) fn page_haptics(
         &mut self,
         ui: &mut egui::Ui,
@@ -42,10 +138,14 @@ impl App {
         if ds4 {
             note(
                 ui,
-                crate::i18n::tr("A DualShock 4 has rumble motors, not the DualSense voice coils. Rumble and button clicks use classic rumble. The haptic stream and the speaker are DualSense only."),
+                crate::i18n::tr("A DualShock 4 has rumble motors, not the DualSense voice coils. Rumble and button clicks use classic rumble. The haptic stream is DualSense only."),
                 WARN,
             );
             ui.add_space(10.0);
+            if let Some(d) = dev {
+                self.ds4_audio_card(ui, p, d);
+                ui.add_space(12.0);
+            }
         }
         let bt = dev.map(|d| d.is_bluetooth()).unwrap_or(true) && !ds4;
         if !bt && !ds4 {
