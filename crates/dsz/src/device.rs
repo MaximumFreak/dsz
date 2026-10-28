@@ -160,6 +160,8 @@ pub struct Live {
     pub gyro_bias: [f32; 3],
     pub calibrating: bool,
     pub gyro_active: bool,
+    /// The active gyro drives the virtual right stick, not the mouse.
+    pub gyro_stick: bool,
     pub touch_mouse_active: bool,
 }
 

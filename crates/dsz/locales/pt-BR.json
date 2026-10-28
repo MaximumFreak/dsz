@@ -745,5 +745,12 @@
   "Headphone jack": "Entrada de fone",
   "0 keeps it off": "0 mantém desligado",
   "Level": "Nível",
-  "Not tried on a real DualShock 4 yet. While a source is on, the controller gets audio all the time, which uses more battery.": "Ainda não testado em um DualShock 4 real. Com uma fonte ativada, o controle recebe áudio o tempo todo, o que gasta mais bateria."
+  "Not tried on a real DualShock 4 yet. While a source is on, the controller gets audio all the time, which uses more battery.": "Ainda não testado em um DualShock 4 real. Com uma fonte ativada, o controle recebe áudio o tempo todo, o que gasta mais bateria.",
+  "Full tilt at": "Inclinação total a",
+  "Turning speed that pushes the stick all the way": "Velocidade de giro que leva o analógico até o fim",
+  "Game deadzone": "Zona morta do jogo",
+  "Starts the stick past the game's deadzone": "Começa o analógico após a zona morta do jogo",
+  "Choose a virtual controller in this profile to aim with the right stick.": "Escolha um controle virtual neste perfil para mirar com o analógico direito.",
+  "Moving the right stick": "Movendo o analógico direito",
+  "driving the right stick": "controlando o analógico direito"
 }

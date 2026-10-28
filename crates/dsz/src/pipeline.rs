@@ -140,7 +140,9 @@ impl Gyro {
         self.still_n = 0;
     }
 
-    fn mouse(&mut self, g: &crate::profile::Gyro, dps: [f32; 3], dt: f32) {
+    /// Turning speed after inversion, deadzone, and smoothing: horizontal
+    /// and vertical deg/s, and the acceleration gain to apply to them.
+    fn shaped(&mut self, g: &crate::profile::Gyro, dps: [f32; 3]) -> (f32, f32, f32) {
         let (pitch, yaw, roll) = (dps[0], dps[1], dps[2]);
         let mut h = match g.axis {
             GyroAxis::Yaw => -yaw,
@@ -173,6 +175,11 @@ impl Gyro {
             v = v * blend + self.smooth[1] * (1.0 - blend);
         }
         let gain = 1.0 + g.acceleration * ((speed - 40.0) / 300.0).clamp(0.0, 1.0) * 2.0;
+        (h, v, gain)
+    }
+
+    fn mouse(&mut self, g: &crate::profile::Gyro, dps: [f32; 3], dt: f32) {
+        let (h, v, gain) = self.shaped(g, dps);
         let sens = g.sensitivity * gain;
         let px = h * dt * sens + self.rem[0];
         let py = v * dt * sens * g.vertical_ratio + self.rem[1];
@@ -181,6 +188,29 @@ impl Gyro {
         self.rem = [px - ix, py - iy];
         sim::mouse_move(ix as i32, iy as i32);
     }
+
+    /// Right stick deflection, -1..=1 on each axis (positive is right and
+    /// down, like the cursor), from the turning speed.
+    fn stick(&mut self, g: &crate::profile::Gyro, dps: [f32; 3]) -> [f32; 2] {
+        let (h, v, gain) = self.shaped(g, dps);
+        let full = g.stick_speed.max(1.0);
+        let x = h * gain / full;
+        let y = v * gain * g.vertical_ratio / full;
+        stick_out(x, y, g.stick_min)
+    }
+}
+
+/// Clamp a gyro stick vector to the rim and lift it over `min`, the game's
+/// deadzone. Barely moving reads centered, so `min` doesn't make a resting
+/// hand drift the stick.
+fn stick_out(x: f32, y: f32, min: f32) -> [f32; 2] {
+    let m = (x * x + y * y).sqrt();
+    if !(m >= 0.005) {
+        return [0.0; 2];
+    }
+    let min = min.clamp(0.0, 0.5);
+    let k = (min + (1.0 - min) * m.min(1.0)) / m;
+    [x * k, y * k]
 }
 
 // ------------------------------------------------------------------ touchpad
@@ -843,14 +873,19 @@ impl Pipeline {
         }
         let mut dps = [0.0; 3];
         let mut gyro_active = false;
+        let mut gyro_stick = [0.0; 2];
         if s.full && s.motion_valid {
             let gdt = self.gyro.dt(&s, now);
             dps = self.gyro.update_bias(&s, now);
             let mode = toggles
                 .gyro
-                .map(|on| if on { GyroMode::Mouse } else { GyroMode::Off })
+                .map(|on| match (on, profile.gyro.mode) {
+                    (false, _) => GyroMode::Off,
+                    (true, GyroMode::Off) => GyroMode::Mouse,
+                    (true, m) => m,
+                })
                 .unwrap_or(profile.gyro.mode);
-            if mode == GyroMode::Mouse {
+            if mode != GyroMode::Off {
                 gyro_active = match profile.gyro.activation {
                     GyroActivation::Always => true,
                     GyroActivation::WhileHeld(b) => s.buttons.has(b),
@@ -875,7 +910,11 @@ impl Pipeline {
                         self.gyro.rem = [0.0; 2];
                         self.gyro.smooth = [0.0; 2];
                     }
-                    self.gyro.mouse(&profile.gyro, dps, gdt);
+                    if mode == GyroMode::RightStick {
+                        gyro_stick = self.gyro.stick(&profile.gyro, dps);
+                    } else {
+                        self.gyro.mouse(&profile.gyro, dps, gdt);
+                    }
                 }
             }
         }
@@ -956,7 +995,7 @@ impl Pipeline {
 
         // Virtual controller
         if active.is_some() || to_gamebar {
-            let pad = virtual_pad(&profile, &s, suppress, inject, lm, rm, touch_mode);
+            let pad = virtual_pad(&profile, &s, suppress, inject, lm, rm, touch_mode, gyro_stick);
             if active.is_some() {
                 let touch = touch_mode != TouchMode::Mouse || profile.virtual_out.touch_passthrough;
                 if to_gamebar {
@@ -998,6 +1037,7 @@ impl Pipeline {
         ];
         live.calibrating = self.gyro.manual_until.is_some();
         live.gyro_active = gyro_active;
+        live.gyro_stick = gyro_active && profile.gyro.mode == GyroMode::RightStick;
         live.touch_mouse_active = touch_active;
     }
 
@@ -1226,7 +1266,9 @@ fn still(
 }
 
 /// The pad the game sees: mappings and mutes applied, sticks that drive the
-/// mouse centered, then inversion, deadzones, and trigger ranges.
+/// mouse centered, then inversion, deadzones, and trigger ranges, plus the
+/// gyro's right stick deflection.
+#[allow(clippy::too_many_arguments)]
 fn virtual_pad(
     profile: &Profile,
     s: &InputState,
@@ -1235,6 +1277,7 @@ fn virtual_pad(
     left_mode: StickMode,
     right_mode: StickMode,
     touch_mode: TouchMode,
+    gyro_stick: [f32; 2],
 ) -> ds_proto::virtual_pad::PadState {
     use crate::virt::shape;
     let vo = &profile.virtual_out;
@@ -1264,6 +1307,14 @@ fn virtual_pad(
         )
     } else {
         (128, 128)
+    };
+    // The gyro adds to the stick after its deadzone, so slow turns aren't
+    // swallowed by it.
+    let (rx, ry) = if gyro_stick == [0.0; 2] {
+        (rx, ry)
+    } else {
+        let add = |v: u8, d: f32| (v as f32 + d * 128.0).round().clamp(0.0, 255.0) as u8;
+        (add(rx, gyro_stick[0]), add(ry, gyro_stick[1]))
     };
     let trig = |v: u8, btn: Button, range: [u8; 2]| -> u8 {
         if inject & btn.bit() != 0 {
@@ -1864,20 +1915,75 @@ mod tests {
         vo.right_deadzone.reach.enabled = true;
         vo.right_deadzone.reach.gains[0] = 75.0;
         let s = InputState { lx: 128, ly: 237, rx: 128, ry: 0, ..Default::default() };
-        let pad = virtual_pad(&profile, &s, 0, 0, StickMode::Passthrough, StickMode::Passthrough, TouchMode::Passthrough);
+        let pad = virtual_pad(&profile, &s, 0, 0, StickMode::Passthrough, StickMode::Passthrough, TouchMode::Passthrough, [0.0; 2]);
         assert!(pad.ly >= 254);
         assert!((31..=33).contains(&pad.ry));
         assert_eq!((s.lx, s.ly, s.rx, s.ry), (128, 237, 128, 0));
         for mode in [StickMode::Mouse, StickMode::Scroll, StickMode::Wasd, StickMode::Arrows] {
-            let pad = virtual_pad(&profile, &s, 0, 0, mode, mode, TouchMode::Passthrough);
+            let pad = virtual_pad(&profile, &s, 0, 0, mode, mode, TouchMode::Passthrough, [0.0; 2]);
             assert_eq!((pad.lx, pad.ly, pad.rx, pad.ry), (128, 128, 128, 128));
         }
         profile.virtual_out.invert[1] = true;
-        let pad = virtual_pad(&profile, &s, 0, 0, StickMode::Passthrough, StickMode::Passthrough, TouchMode::Passthrough);
+        let pad = virtual_pad(&profile, &s, 0, 0, StickMode::Passthrough, StickMode::Passthrough, TouchMode::Passthrough, [0.0; 2]);
         assert_eq!(pad.ly, 18, "reach follows the existing inversion order");
         profile.virtual_out.left_deadzone.reach.gains[0] = 116.0;
-        let pad = virtual_pad(&profile, &s, 0, 0, StickMode::Passthrough, StickMode::Passthrough, TouchMode::Passthrough);
+        let pad = virtual_pad(&profile, &s, 0, 0, StickMode::Passthrough, StickMode::Passthrough, TouchMode::Passthrough, [0.0; 2]);
         assert!(pad.ly <= 1);
+    }
+
+    #[test]
+    fn gyro_stick_adds_to_the_virtual_right_stick() {
+        let mut profile = Profile::default();
+        profile.virtual_out.right_deadzone.shape = DeadzoneShape::None;
+        let s = InputState { lx: 128, ly: 128, rx: 128, ry: 128, ..Default::default() };
+        let modes = (StickMode::Passthrough, StickMode::Passthrough);
+        let idle = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough, [0.0; 2]);
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough, [0.5, -1.0]);
+        assert_eq!((pad.lx, pad.ly), (idle.lx, idle.ly), "left stick untouched");
+        assert_eq!((pad.rx, pad.ry), (192, 0));
+        assert_eq!(pad.buttons.0, idle.buttons.0);
+        // Added to the physical stick, clamped at the rim.
+        let s = InputState { rx: 250, ry: 128, ..s };
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough, [0.5, 0.0]);
+        assert_eq!(pad.rx, 255);
+        // A right stick set to mouse reads centered, so only the gyro shows.
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, StickMode::Mouse, TouchMode::Passthrough, [-1.0, 1.0]);
+        assert_eq!((pad.rx, pad.ry), (0, 255));
+    }
+
+    #[test]
+    fn gyro_stick_output_scales_and_steps_over_the_deadzone() {
+        assert_eq!(stick_out(0.001, 0.002, 0.3), [0.0; 2], "a resting hand stays centered");
+        assert_eq!(stick_out(f32::NAN, 0.0, 0.0), [0.0; 2]);
+        let [x, y] = stick_out(0.5, 0.0, 0.0);
+        assert!((x - 0.5).abs() < 1e-6 && y == 0.0);
+        let [x, y] = stick_out(3.0, 4.0, 0.0);
+        assert!((x - 0.6).abs() < 1e-6 && (y - 0.8).abs() < 1e-6, "clamped to the rim");
+        let [x, _] = stick_out(0.01, 0.0, 0.2);
+        assert!((x - 0.208).abs() < 1e-4, "starts at the game's deadzone");
+        let [x, _] = stick_out(-1.0, 0.0, 0.2);
+        assert!((x + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gyro_stick_follows_turning_speed() {
+        let mut g = crate::profile::Gyro::default();
+        g.mode = GyroMode::RightStick;
+        g.deadzone = 0.0;
+        g.smoothing = 0.0;
+        g.stick_speed = 100.0;
+        let mut gyro = Gyro::new();
+        // Turning left (positive yaw) moves the cursor left, so the stick
+        // goes left; tipping back (positive pitch) goes up.
+        let [x, y] = gyro.stick(&g, [0.0, 50.0, 0.0]);
+        assert!((x + 0.5).abs() < 1e-6 && y == 0.0);
+        let [x, y] = gyro.stick(&g, [25.0, 0.0, 0.0]);
+        assert!(x == 0.0 && (y + 0.25).abs() < 1e-6);
+        g.invert_x = true;
+        g.vertical_ratio = 2.0;
+        let [x, y] = gyro.stick(&g, [25.0, 50.0, 0.0]);
+        assert!((x - 0.5).abs() < 1e-6 && (y + 0.5).abs() < 1e-6);
+        assert_eq!(gyro.stick(&g, [0.0, 1000.0, 0.0]).map(|v| (v * 1e4).round()), [1e4, 0.0]);
     }
 
     fn finger(x: u16) -> TouchPoint {
@@ -1978,7 +2084,7 @@ mod tests {
         let mut s = s;
         s.buttons.set(Button::TouchpadLeft, true);
         let modes = (StickMode::Passthrough, StickMode::Passthrough);
-        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough);
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough, [0.0; 2]);
         assert!(pad.buttons.has(Button::Touchpad));
         assert!(!pad.buttons.has(Button::TouchpadLeft));
 
@@ -1991,6 +2097,7 @@ mod tests {
             modes.0,
             modes.1,
             TouchMode::Passthrough,
+            [0.0; 2],
         );
         assert!(!pad.buttons.has(Button::Touchpad));
         assert!(!pad.buttons.has(Button::TouchpadLeft));
@@ -1999,7 +2106,7 @@ mod tests {
         let mut profile = profile;
         profile.touchpad.click_to_click = true;
         profile.virtual_out.touch_passthrough = false;
-        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Mouse);
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Mouse, [0.0; 2]);
         assert!(!pad.buttons.has(Button::Touchpad));
     }
 }
