@@ -707,6 +707,14 @@ impl App {
                                 ) {
                                     g.stick_min = min / 100.0;
                                 }
+                                slider_row(
+                                    ui,
+                                    crate::i18n::tr("Game curve"),
+                                    crate::i18n::tr("Raise if slow turns feel sluggish in the game"),
+                                    &mut g.stick_curve,
+                                    1.0..=3.0,
+                                    "",
+                                );
                             } else {
                                 slider_row(
                                     ui,

@@ -189,28 +189,45 @@ impl Gyro {
         sim::mouse_move(ix as i32, iy as i32);
     }
 
-    /// Right stick deflection, -1..=1 on each axis (positive is right and
-    /// down, like the cursor), from the turning speed.
+    /// Right stick push from the turning speed, as a share of full tilt
+    /// (positive is right and down, like the cursor). Not clamped; the
+    /// virtual pad mixes it with the physical stick.
     fn stick(&mut self, g: &crate::profile::Gyro, dps: [f32; 3]) -> [f32; 2] {
         let (h, v, gain) = self.shaped(g, dps);
+        // Below this the hand is resting. Checked in deg/s, so a high
+        // Full tilt at doesn't swallow slow tracking, and the game deadzone
+        // step doesn't make a still controller drift.
+        if !((h * h + v * v).sqrt() >= GYRO_STICK_REST) {
+            return [0.0; 2];
+        }
         let full = g.stick_speed.max(1.0);
-        let x = h * gain / full;
-        let y = v * gain * g.vertical_ratio / full;
-        stick_out(x, y, g.stick_min)
+        [h * gain / full, v * gain * g.vertical_ratio / full]
     }
 }
 
-/// Clamp a gyro stick vector to the rim and lift it over `min`, the game's
-/// deadzone. Barely moving reads centered, so `min` doesn't make a resting
-/// hand drift the stick.
-fn stick_out(x: f32, y: f32, min: f32) -> [f32; 2] {
-    let m = (x * x + y * y).sqrt();
-    if !(m >= 0.005) {
+/// Turning speed (deg/s, after steadiness and smoothing) that still reads
+/// as a resting hand for the gyro stick.
+const GYRO_STICK_REST: f32 = 0.5;
+
+/// Mix the gyro into the right stick the game sees (both -1..=1 per axis).
+/// Games turn a stick past their deadzone `min`, raised to their response
+/// `curve`, into turning speed. The stick is turned into that speed, the
+/// gyro's share of full tilt added, and the sum turned back, so the gyro
+/// adds speed evenly whether or not the stick is pushed, and slow turns
+/// step straight over the game's deadzone.
+fn gyro_mix(stick: [f32; 2], gyro: [f32; 2], min: f32, curve: f32) -> [f32; 2] {
+    let min = min.clamp(0.0, 0.5);
+    let curve = curve.clamp(1.0, 3.0);
+    let len = |v: [f32; 2]| (v[0] * v[0] + v[1] * v[1]).sqrt();
+    let m = len(stick);
+    let speed = if m > min { ((m - min) / (1.0 - min)).min(1.0).powf(curve) / m } else { 0.0 };
+    let t = [stick[0] * speed + gyro[0], stick[1] * speed + gyro[1]];
+    let tm = len(t);
+    if !(tm > 1e-6) {
         return [0.0; 2];
     }
-    let min = min.clamp(0.0, 0.5);
-    let k = (min + (1.0 - min) * m.min(1.0)) / m;
-    [x * k, y * k]
+    let k = (min + (1.0 - min) * tm.min(1.0).powf(1.0 / curve)) / tm;
+    [t[0] * k, t[1] * k]
 }
 
 // ------------------------------------------------------------------ touchpad
@@ -1308,13 +1325,16 @@ fn virtual_pad(
     } else {
         (128, 128)
     };
-    // The gyro adds to the stick after its deadzone, so slow turns aren't
+    // The gyro mixes in after the stick's deadzone, so slow turns aren't
     // swallowed by it.
     let (rx, ry) = if gyro_stick == [0.0; 2] {
         (rx, ry)
     } else {
-        let add = |v: u8, d: f32| (v as f32 + d * 128.0).round().clamp(0.0, 255.0) as u8;
-        (add(rx, gyro_stick[0]), add(ry, gyro_stick[1]))
+        let from = |v: u8| (v as f32 - 128.0) / if v >= 128 { 127.0 } else { 128.0 };
+        let to = |f: f32| (128.0 + f * if f >= 0.0 { 127.0 } else { 128.0 }).round().clamp(0.0, 255.0) as u8;
+        let g = &profile.gyro;
+        let [x, y] = gyro_mix([from(rx), from(ry)], gyro_stick, g.stick_min, g.stick_curve);
+        (to(x), to(y))
     };
     let trig = |v: u8, btn: Button, range: [u8; 2]| -> u8 {
         if inject & btn.bit() != 0 {
@@ -1938,31 +1958,55 @@ mod tests {
         let s = InputState { lx: 128, ly: 128, rx: 128, ry: 128, ..Default::default() };
         let modes = (StickMode::Passthrough, StickMode::Passthrough);
         let idle = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough, [0.0; 2]);
-        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough, [0.5, -1.0]);
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough, [0.5, -0.5]);
         assert_eq!((pad.lx, pad.ly), (idle.lx, idle.ly), "left stick untouched");
-        assert_eq!((pad.rx, pad.ry), (192, 0));
+        assert_eq!((pad.rx, pad.ry), (192, 64));
         assert_eq!(pad.buttons.0, idle.buttons.0);
         // Added to the physical stick, clamped at the rim.
         let s = InputState { rx: 250, ry: 128, ..s };
         let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough, [0.5, 0.0]);
         assert_eq!(pad.rx, 255);
         // A right stick set to mouse reads centered, so only the gyro shows.
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, StickMode::Mouse, TouchMode::Passthrough, [-1.0, 0.0]);
+        assert_eq!((pad.rx, pad.ry), (0, 128));
+        // Clamped round, like a stick's gate.
         let pad = virtual_pad(&profile, &s, 0, 0, modes.0, StickMode::Mouse, TouchMode::Passthrough, [-1.0, 1.0]);
-        assert_eq!((pad.rx, pad.ry), (0, 255));
+        assert_eq!((pad.rx, pad.ry), (37, 218));
+        // The game deadzone step applies once, to the stick and gyro together.
+        profile.gyro.stick_min = 0.2;
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, StickMode::Mouse, TouchMode::Passthrough, [0.01, 0.0]);
+        assert_eq!(pad.rx, 154);
+        let s = InputState { rx: 230, ..s };
+        let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Passthrough, [1e-6, 0.0]);
+        assert_eq!(pad.rx, 230);
     }
 
     #[test]
     fn gyro_stick_output_scales_and_steps_over_the_deadzone() {
-        assert_eq!(stick_out(0.001, 0.002, 0.3), [0.0; 2], "a resting hand stays centered");
-        assert_eq!(stick_out(f32::NAN, 0.0, 0.0), [0.0; 2]);
-        let [x, y] = stick_out(0.5, 0.0, 0.0);
-        assert!((x - 0.5).abs() < 1e-6 && y == 0.0);
-        let [x, y] = stick_out(3.0, 4.0, 0.0);
-        assert!((x - 0.6).abs() < 1e-6 && (y - 0.8).abs() < 1e-6, "clamped to the rim");
-        let [x, _] = stick_out(0.01, 0.0, 0.2);
-        assert!((x - 0.208).abs() < 1e-4, "starts at the game's deadzone");
-        let [x, _] = stick_out(-1.0, 0.0, 0.2);
-        assert!((x + 1.0).abs() < 1e-6);
+        let close = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4;
+        assert_eq!(gyro_mix([0.0; 2], [f32::NAN, 0.0], 0.2, 1.0), [0.0; 2]);
+        assert!(close(gyro_mix([0.0; 2], [0.5, 0.0], 0.0, 1.0), [0.5, 0.0]));
+        assert!(close(gyro_mix([0.0; 2], [3.0, 4.0], 0.0, 1.0), [0.6, 0.8]), "clamped to the rim");
+        assert!(close(gyro_mix([0.0; 2], [0.01, 0.0], 0.2, 1.0), [0.208, 0.0]), "starts at the game's deadzone");
+        assert!(close(gyro_mix([0.0; 2], [-1.0, 0.0], 0.2, 1.0), [-1.0, 0.0]));
+        // A curve of 2 means the game squares the stick: a quarter of full
+        // tilt needs half the stick to turn at a quarter speed.
+        assert!(close(gyro_mix([0.0; 2], [0.25, 0.0], 0.0, 2.0), [0.5, 0.0]));
+        assert!(close(gyro_mix([0.0; 2], [0.25, 0.0], 0.2, 2.0), [0.6, 0.0]));
+        // A pushed stick keeps its speed and the gyro adds to it, without the
+        // deadzone step a second time.
+        for (min, curve) in [(0.0, 1.0), (0.2, 1.0), (0.2, 2.0), (0.5, 3.0)] {
+            assert!(close(gyro_mix([0.0, -0.7], [1e-7, 0.0], min, curve), [0.0, -0.7]));
+            let speed = |m: f32| ((m - min) / (1.0 - min)).max(0.0).powf(curve);
+            let [x, _] = gyro_mix([0.7, 0.0], [0.05, 0.0], min, curve);
+            assert!((speed(x) - speed(0.7) - 0.05).abs() < 1e-4, "{min} {curve}");
+        }
+        // Inside the game's deadzone the stick does nothing, so only the
+        // gyro counts.
+        assert!(close(gyro_mix([0.1, 0.0], [0.0, 0.5], 0.2, 1.0), [0.0, 0.6]));
+        // The gyro turning against the stick slows it down.
+        let [x, _] = gyro_mix([0.6, 0.0], [-0.1, 0.0], 0.2, 1.0);
+        assert!((x - 0.52).abs() < 1e-4);
     }
 
     #[test]
@@ -1983,7 +2027,13 @@ mod tests {
         g.vertical_ratio = 2.0;
         let [x, y] = gyro.stick(&g, [25.0, 50.0, 0.0]);
         assert!((x - 0.5).abs() < 1e-6 && (y + 0.5).abs() < 1e-6);
-        assert_eq!(gyro.stick(&g, [0.0, 1000.0, 0.0]).map(|v| (v * 1e4).round()), [1e4, 0.0]);
+        assert_eq!(gyro.stick(&g, [0.0, 1000.0, 0.0]).map(|v| (v * 1e4).round()), [1e5, 0.0]);
+        // A resting hand reads centered, at any full tilt speed.
+        assert_eq!(gyro.stick(&g, [0.3, 0.2, 0.0]), [0.0; 2]);
+        assert_eq!(gyro.stick(&g, [f32::NAN, 0.0, 0.0]), [0.0; 2]);
+        g.stick_speed = 600.0;
+        let [x, _] = gyro.stick(&g, [0.0, 2.0, 0.0]);
+        assert!((x - 2.0 / 600.0).abs() < 1e-6, "slow tracking survives a high full tilt");
     }
 
     fn finger(x: u16) -> TouchPoint {

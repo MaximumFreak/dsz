@@ -449,6 +449,9 @@ pub struct Gyro {
     /// Right stick output: 0..=0.5, where the stick starts once the gyro
     /// moves, to step over the game's own deadzone.
     pub stick_min: f32,
+    /// Right stick output: 1..=3, the game's stick response curve to undo,
+    /// so slow turns aren't slowed further. 1 = linear.
+    pub stick_curve: f32,
 }
 
 impl Default for Gyro {
@@ -466,6 +469,7 @@ impl Default for Gyro {
             acceleration: 0.0,
             stick_speed: 120.0,
             stick_min: 0.0,
+            stick_curve: 1.0,
         }
     }
 }
@@ -1360,7 +1364,7 @@ mod tests {
         let g: Gyro = serde_json::from_str(r#"{"mode":"Mouse","sensitivity":20.0}"#).unwrap();
         assert_eq!(g.mode, GyroMode::Mouse);
         assert_eq!(g.sensitivity, 20.0);
-        assert_eq!((g.stick_speed, g.stick_min), (120.0, 0.0));
+        assert_eq!((g.stick_speed, g.stick_min, g.stick_curve), (120.0, 0.0, 1.0));
         assert_eq!(Gyro::default().mode, GyroMode::Off);
         let mut g = Gyro::default();
         g.mode = GyroMode::RightStick;

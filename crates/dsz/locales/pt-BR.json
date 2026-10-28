@@ -750,6 +750,8 @@
   "Turning speed that pushes the stick all the way": "Velocidade de giro que leva o analógico até o fim",
   "Game deadzone": "Zona morta do jogo",
   "Starts the stick past the game's deadzone": "Começa o analógico após a zona morta do jogo",
+  "Game curve": "Curva do jogo",
+  "Raise if slow turns feel sluggish in the game": "Aumente se giros lentos parecerem pesados no jogo",
   "Choose a virtual controller in this profile to aim with the right stick.": "Escolha um controle virtual neste perfil para mirar com o analógico direito.",
   "Moving the right stick": "Movendo o analógico direito",
   "driving the right stick": "controlando o analógico direito"
