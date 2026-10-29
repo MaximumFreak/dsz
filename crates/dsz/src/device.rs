@@ -245,6 +245,9 @@ pub struct Device {
     pub force_output: AtomicBool,
     pub stop: AtomicBool,
     pub dead: AtomicBool,
+    /// Quick Charge already dropped this Bluetooth link, so the USB and
+    /// Bluetooth halves don't both ask the radio.
+    quick_charge_off: AtomicBool,
     /// Recent radio traffic, logged if the controller drops by itself.
     pub flight: crate::flight::Recorder,
 }
@@ -615,6 +618,82 @@ fn read_ds4_identity(dev: &HidDevice, conn: Connection) -> (String, String, Mirr
     (mac, firmware, mirror)
 }
 
+/// How long a controller plugged in over USB waits for its Bluetooth link
+/// to go away, so it takes over that link's virtual controller.
+const QUICK_CHARGE_WAIT: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_secs(3)
+};
+
+/// The Bluetooth half when `new` and another connection are the same
+/// controller (same MAC) on USB and Bluetooth.
+fn quick_charge_twin(devices: &[Arc<Device>], new: &Arc<Device>) -> Option<Arc<Device>> {
+    let mac = new.mac.lock().clone();
+    crate::platform::bluetooth_address(&mac).filter(|a| *a != 0)?;
+    let twin = devices.iter().find(|d| {
+        !Arc::ptr_eq(d, new)
+            && d.is_bluetooth() != new.is_bluetooth()
+            && !d.stop.load(Ordering::Acquire)
+            && *d.mac.lock() == mac
+    })?;
+    Some(if new.is_bluetooth() { new.clone() } else { twin.clone() })
+}
+
+/// Quick Charge (Settings, off by default): a controller on Bluetooth that
+/// is also plugged in over USB loses its Bluetooth link, so games and the
+/// app see one controller, on USB. Checked once per connection from either
+/// side, since at startup both can open in either order.
+fn quick_charge(engine: &Engine, device: &Arc<Device>) {
+    if !engine.settings.read().quick_charge {
+        return;
+    }
+    let Some(bt) = quick_charge_twin(&engine.device_list(), device) else {
+        return;
+    };
+    if bt.quick_charge_off.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let mac = bt.mac.lock().clone();
+    log::info!("Quick Charge: {mac} is plugged in over USB; disconnecting its Bluetooth link");
+    bt.flight.expect_off.store(true, Ordering::Release);
+    if !quick_charge_disconnect(mac) {
+        bt.flight.expect_off.store(false, Ordering::Release);
+        engine.warn_toast(crate::i18n::tr("Couldn't disconnect Bluetooth"));
+        return;
+    }
+    engine.toast(crate::i18n::tr("Plugged in over USB: Bluetooth disconnected"));
+    if Arc::ptr_eq(&bt, device) {
+        return;
+    }
+    // The Bluetooth side lets go of its virtual controller as it closes.
+    // This side's virtual thread starts after this returns, so it takes
+    // that pad over instead of plugging in a second one.
+    let t0 = Instant::now();
+    while t0.elapsed() < QUICK_CHARGE_WAIT
+        && !device.stop.load(Ordering::Acquire)
+        && engine.device_list().iter().any(|d| Arc::ptr_eq(d, &bt))
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn quick_charge_disconnect(mac: String) -> bool {
+    // Tests record the address. A real one would talk to the Bluetooth radio.
+    #[cfg(test)]
+    {
+        QUICK_CHARGE_OFFS.lock().push(mac);
+        true
+    }
+    #[cfg(not(test))]
+    {
+        crate::platform::bt_disconnect(&mac)
+    }
+}
+
+#[cfg(test)]
+static QUICK_CHARGE_OFFS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// Stops every worker of a device when one of them panics.
 struct StopOnPanic<'a>(&'a Device);
 
@@ -694,6 +773,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         force_output: AtomicBool::new(true),
         stop: AtomicBool::new(false),
         dead: AtomicBool::new(false),
+        quick_charge_off: AtomicBool::new(false),
         flight: Default::default(),
     });
     log::info!(
@@ -704,6 +784,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         if firmware.is_empty() { "?" } else { &firmware }
     );
     engine.add_device(device.clone());
+    quick_charge(&engine, &device);
 
     // A panic in one worker stops the others, and the device is still
     // removed, so hot-plug opens it again instead of leaving a dead entry.
@@ -1324,6 +1405,7 @@ impl Device {
             force_output: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             dead: AtomicBool::new(false),
+            quick_charge_off: AtomicBool::new(false),
             flight: Default::default(),
         })
     }
@@ -1403,5 +1485,113 @@ mod microphone_tests {
         d.set_microphone(false, false, 100, crate::profile::MicrophoneSource::Headset);
         assert_eq!(d.microphone_output(), None);
         assert_eq!(d.speaker_route.load(Ordering::Acquire), SPEAKER_MUTED);
+    }
+}
+
+#[cfg(test)]
+mod quick_charge_tests {
+    use super::*;
+
+    struct Rig {
+        engine: Arc<Engine>,
+        dir: std::path::PathBuf,
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn rig(quick_charge: bool, devices: &[&Arc<Device>]) -> Rig {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("dsz-quick-charge-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::new(dir.clone());
+        if quick_charge {
+            engine.settings.write().quick_charge = true;
+        }
+        engine.devices.write().extend(devices.iter().map(|d| (*d).clone()));
+        Rig { engine, dir }
+    }
+
+    fn offs(mac: &str) -> usize {
+        QUICK_CHARGE_OFFS.lock().iter().filter(|m| *m == mac).count()
+    }
+
+    #[test]
+    fn off_by_default_the_same_controller_on_usb_and_bluetooth_stays_connected() {
+        let mac = "A0:00:00:00:00:01";
+        let bt = Device::for_test(Connection::Bluetooth, mac);
+        let usb = Device::for_test(Connection::Usb, mac);
+        let r = rig(false, &[&bt, &usb]);
+        assert!(!r.engine.settings.read().quick_charge, "a new settings folder starts with it off");
+        quick_charge(&r.engine, &usb);
+        quick_charge(&r.engine, &bt);
+        assert_eq!(offs(mac), 0, "no Bluetooth disconnect while Quick Charge is off");
+        assert!(!bt.flight.expect_off.load(Ordering::Acquire));
+        assert!(!bt.quick_charge_off.load(Ordering::Acquire));
+        assert!(r.engine.toasts.lock().is_empty());
+        assert_eq!(r.engine.device_list().len(), 2);
+    }
+
+    #[test]
+    fn usb_plugged_in_drops_the_bluetooth_link_once() {
+        let mac = "A0:00:00:00:00:02";
+        let bt = Device::for_test(Connection::Bluetooth, mac);
+        let usb = Device::for_test(Connection::Usb, mac);
+        let r = rig(true, &[&bt, &usb]);
+        quick_charge(&r.engine, &usb);
+        assert_eq!(offs(mac), 1);
+        assert!(bt.flight.expect_off.load(Ordering::Acquire), "not logged as a dropped link");
+        assert!(!usb.flight.expect_off.load(Ordering::Acquire));
+        // The Bluetooth side checking too (both opened at startup) asks once.
+        quick_charge(&r.engine, &bt);
+        quick_charge(&r.engine, &usb);
+        assert_eq!(offs(mac), 1);
+    }
+
+    #[test]
+    fn bluetooth_connecting_while_plugged_in_is_dropped() {
+        let mac = "A0:00:00:00:00:03";
+        let usb = Device::for_test(Connection::Usb, mac);
+        let bt = Device::for_test(Connection::Bluetooth, mac);
+        let r = rig(true, &[&usb, &bt]);
+        quick_charge(&r.engine, &bt);
+        assert_eq!(offs(mac), 1);
+        assert!(bt.flight.expect_off.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn only_the_same_controller_on_the_other_transport_counts() {
+        let a = "A0:00:00:00:00:04";
+        let b = "A0:00:00:00:00:05";
+        let bt = Device::for_test(Connection::Bluetooth, a);
+        let other_usb = Device::for_test(Connection::Usb, b);
+        let second_bt = Device::for_test(Connection::Bluetooth, a);
+        let r = rig(true, &[&bt, &other_usb, &second_bt]);
+        quick_charge(&r.engine, &other_usb);
+        quick_charge(&r.engine, &second_bt);
+        assert_eq!(offs(a) + offs(b), 0, "another controller, or Bluetooth twice, is left alone");
+
+        // No usable address: nothing to match or disconnect.
+        for mac in ["", "00:00:00:00:00:00"] {
+            let bt = Device::for_test(Connection::Bluetooth, mac);
+            let usb = Device::for_test(Connection::Usb, mac);
+            let r = rig(true, &[&bt, &usb]);
+            quick_charge(&r.engine, &usb);
+            assert_eq!(offs(mac), 0);
+            assert!(!bt.flight.expect_off.load(Ordering::Acquire));
+        }
+
+        // A Bluetooth connection already closing is not asked again.
+        let c = "A0:00:00:00:00:06";
+        let bt = Device::for_test(Connection::Bluetooth, c);
+        bt.stop.store(true, Ordering::Release);
+        let usb = Device::for_test(Connection::Usb, c);
+        let r = rig(true, &[&bt, &usb]);
+        quick_charge(&r.engine, &usb);
+        assert_eq!(offs(c), 0);
     }
 }

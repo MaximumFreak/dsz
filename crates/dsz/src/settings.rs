@@ -98,6 +98,9 @@ pub struct Settings {
     pub games: Vec<GameRule>,
     /// Power off a Bluetooth controller after this many idle minutes (0 = never).
     pub idle_off_minutes: u32,
+    /// Quick Charge: drop a controller's Bluetooth link when the same
+    /// controller (by MAC) is plugged in over USB, so only USB is left.
+    pub quick_charge: bool,
     pub ui_scale: f32,
     /// Drop Bluetooth input reports whose CRC does not match.
     pub check_input_crc: bool,
@@ -160,6 +163,7 @@ impl Default for Settings {
             auto_profiles: true,
             games: Vec::new(),
             idle_off_minutes: 15,
+            quick_charge: false,
             ui_scale: 1.0,
             check_input_crc: true,
             show_tips: true,
@@ -222,6 +226,24 @@ mod tests {
         assert_eq!(parsed.fallback_pad, FallbackPad::Off);
         let parsed: Settings = serde_json::from_str(r#"{"fallback_pad":"DualShock4"}"#).unwrap();
         assert_eq!(parsed.fallback_pad, FallbackPad::DualShock4);
+    }
+
+    #[test]
+    fn quick_charge_defaults_off_and_old_settings_load_with_it_off() {
+        assert!(!Settings::default().quick_charge);
+        let parsed: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.quick_charge);
+        // A settings.json saved before the option existed.
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        old.as_object_mut().unwrap().remove("quick_charge");
+        old["idle_off_minutes"] = 5.into();
+        let parsed: Settings = serde_json::from_value(old).unwrap();
+        assert!(!parsed.quick_charge);
+        assert_eq!(parsed, Settings { idle_off_minutes: 5, ..Settings::default() });
+        let parsed: Settings = serde_json::from_str(r#"{"quick_charge":true}"#).unwrap();
+        assert!(parsed.quick_charge);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+        assert!(back.quick_charge);
     }
 
     #[test]

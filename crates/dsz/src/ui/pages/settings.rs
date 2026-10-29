@@ -133,6 +133,12 @@ impl App {
                         crate::i18n::tr("Checks each Bluetooth report's CRC so interference never shows up as a ghost input"),
                         &mut s.check_input_crc,
                     );
+                    changed |= toggle_row(
+                        ui,
+                        crate::i18n::tr("Quick Charge"),
+                        crate::i18n::tr("Disconnects Bluetooth when the same controller is plugged in over USB"),
+                        &mut s.quick_charge,
+                    );
                     drop(s);
                     ui.separator();
                     ui.label(RichText::new(crate::i18n::tr("Names")).font(heading(14.0)));
