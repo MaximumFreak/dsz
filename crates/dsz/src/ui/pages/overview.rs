@@ -208,7 +208,9 @@ impl App {
                 stat(
                     ui,
                     crate::i18n::tr("Gyro"),
-                    if live.gyro_active {
+                    if live.gyro_stick {
+                        RichText::new(crate::i18n::tr("driving the right stick")).color(ACCENT)
+                    } else if live.gyro_active {
                         RichText::new(crate::i18n::tr("driving the mouse")).color(ACCENT)
                     } else {
                         RichText::new(format!(

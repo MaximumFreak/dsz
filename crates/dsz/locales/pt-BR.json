@@ -422,6 +422,10 @@
   "On top of the Windows display scale": "Além da escala de exibição do Windows",
   "Drop corrupted radio packets": "Descartar pacotes sem fio corrompidos",
   "Checks each Bluetooth report's CRC so interference never shows up as a ghost input": "Verifica o CRC dos pacotes Bluetooth para evitar entradas falsas por interferência",
+  "Quick Charge": "Carregamento rápido",
+  "Disconnects Bluetooth when the same controller is plugged in over USB": "Desconecta o Bluetooth quando o mesmo controle é conectado por USB",
+  "Plugged in over USB: Bluetooth disconnected": "Conectado por USB: Bluetooth desconectado",
+  "Couldn't disconnect Bluetooth": "Não foi possível desconectar o Bluetooth",
   "Names": "Nomes",
   "Connect a controller to name it.": "Conecte um controle para dar um nome a ele.",
   "Couldn't change the startup entry": "Não foi possível alterar a inicialização",
@@ -745,5 +749,14 @@
   "Headphone jack": "Entrada de fone",
   "0 keeps it off": "0 mantém desligado",
   "Level": "Nível",
-  "Not tried on a real DualShock 4 yet. While a source is on, the controller gets audio all the time, which uses more battery.": "Ainda não testado em um DualShock 4 real. Com uma fonte ativada, o controle recebe áudio o tempo todo, o que gasta mais bateria."
+  "Not tried on a real DualShock 4 yet. While a source is on, the controller gets audio all the time, which uses more battery.": "Ainda não testado em um DualShock 4 real. Com uma fonte ativada, o controle recebe áudio o tempo todo, o que gasta mais bateria.",
+  "Full tilt at": "Inclinação total a",
+  "Turning speed that pushes the stick all the way": "Velocidade de giro que leva o analógico até o fim",
+  "Game deadzone": "Zona morta do jogo",
+  "Starts the stick past the game's deadzone": "Começa o analógico após a zona morta do jogo",
+  "Game curve": "Curva do jogo",
+  "Raise if slow turns feel sluggish in the game": "Aumente se giros lentos parecerem pesados no jogo",
+  "Choose a virtual controller in this profile to aim with the right stick.": "Escolha um controle virtual neste perfil para mirar com o analógico direito.",
+  "Moving the right stick": "Movendo o analógico direito",
+  "driving the right stick": "controlando o analógico direito"
 }

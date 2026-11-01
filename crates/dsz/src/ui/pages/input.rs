@@ -620,12 +620,26 @@ impl App {
                     crate::i18n::tr("Gyro mouse"),
                     crate::i18n::tr("Tilt and turn the controller to move the cursor or aim"),
                     |ui| {
+                        let virtual_on = p.virtual_out.kind != VirtualKind::Off;
                         let g = &mut p.gyro;
-                        let mut on = g.mode == GyroMode::Mouse;
+                        let mut on = g.mode != GyroMode::Off;
                         if toggle_row(ui, crate::i18n::tr("Enabled"), "", &mut on) {
                             g.mode = if on { GyroMode::Mouse } else { GyroMode::Off };
                         }
-                        if g.mode == GyroMode::Mouse {
+                        if g.mode != GyroMode::Off {
+                            row(ui, crate::i18n::tr("Output"), "", |ui| {
+                                segmented(
+                                    ui,
+                                    &mut g.mode,
+                                    &[
+                                        (GyroMode::Mouse, crate::i18n::tr("Mouse")),
+                                        (GyroMode::RightStick, crate::i18n::tr("Right stick")),
+                                    ],
+                                );
+                            });
+                            if g.mode == GyroMode::RightStick && !virtual_on {
+                                note(ui, crate::i18n::tr("Choose a virtual controller in this profile to aim with the right stick."), WARN);
+                            }
                             let (mut kind, mut b) = match g.activation {
                                 GyroActivation::Always => (0, Button::R1),
                                 GyroActivation::WhileHeld(b) => (1, b),
@@ -673,14 +687,44 @@ impl App {
                                 3 => GyroActivation::Toggle(b),
                                 _ => GyroActivation::WhileTouched(touch_zone(b)),
                             };
-                            slider_row(
-                                ui,
-                                crate::i18n::tr("Sensitivity"),
-                                crate::i18n::tr("Pixels per degree"),
-                                &mut g.sensitivity,
-                                1.0..=80.0,
-                                "",
-                            );
+                            if g.mode == GyroMode::RightStick {
+                                slider_row(
+                                    ui,
+                                    crate::i18n::tr("Full tilt at"),
+                                    crate::i18n::tr("Turning speed that pushes the stick all the way"),
+                                    &mut g.stick_speed,
+                                    20.0..=600.0,
+                                    " °/s",
+                                );
+                                let mut min = (g.stick_min * 100.0).round();
+                                if slider_row(
+                                    ui,
+                                    crate::i18n::tr("Game deadzone"),
+                                    crate::i18n::tr("Starts the stick past the game's deadzone"),
+                                    &mut min,
+                                    0.0..=50.0,
+                                    "%",
+                                ) {
+                                    g.stick_min = min / 100.0;
+                                }
+                                slider_row(
+                                    ui,
+                                    crate::i18n::tr("Game curve"),
+                                    crate::i18n::tr("Raise if slow turns feel sluggish in the game"),
+                                    &mut g.stick_curve,
+                                    1.0..=3.0,
+                                    "",
+                                );
+                            } else {
+                                slider_row(
+                                    ui,
+                                    crate::i18n::tr("Sensitivity"),
+                                    crate::i18n::tr("Pixels per degree"),
+                                    &mut g.sensitivity,
+                                    1.0..=80.0,
+                                    "",
+                                );
+                            }
                             slider_row(
                                 ui,
                                 crate::i18n::tr("Vertical ratio"),
@@ -745,6 +789,8 @@ impl App {
                         ui.horizontal(|ui| {
                             let (t, c) = if live.calibrating {
                                 (crate::i18n::tr("Calibrating — keep still"), WARN)
+                            } else if live.gyro_stick {
+                                (crate::i18n::tr("Moving the right stick"), ACCENT)
                             } else if live.gyro_active {
                                 (crate::i18n::tr("Moving the cursor"), ACCENT)
                             } else {

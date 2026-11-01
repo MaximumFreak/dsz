@@ -189,6 +189,14 @@ pub struct Pool {
     pads: Mutex<Vec<Arc<Pad>>>,
     next_id: AtomicU64,
     started: AtomicBool,
+    /// Held while [`Pool::maintain`] works on pads nobody drives, and by
+    /// [`Pool::claim`] and [`Pool::claim_parked`]. A swap unplugs the idle
+    /// pad and plugs in its replacement, which takes a while, outside the
+    /// `pads` lock; a controller connecting meanwhile found no pad to take
+    /// and plugged in its own, so two virtual DualSense pads were left
+    /// (issue 31). A pad claimed after the idle list was made was also
+    /// unplugged or replaced under the controller driving it.
+    idle_work: Mutex<()>,
 }
 
 impl Default for Pool {
@@ -197,6 +205,7 @@ impl Default for Pool {
             pads: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1 << 40),
             started: AtomicBool::new(false),
+            idle_work: Mutex::new(()),
         }
     }
 }
@@ -342,6 +351,7 @@ impl Pool {
     /// startup for another controller is unplugged instead, so the
     /// controller gets a pad with its own identity.
     pub fn claim(&self, engine: &Engine, device: &Arc<Device>) -> Option<Arc<Pad>> {
+        let _idle = self.idle_work.lock();
         let mac = device.mac.lock().clone();
         let pads = self.pads.lock();
         let free = |p: &&Arc<Pad>| p.owner.lock().is_none() && p.alive() && !p.is_parked();
@@ -391,6 +401,7 @@ impl Pool {
     /// The parked Xbox pad a newly connected controller takes back: the
     /// one it had, else one that belongs to nobody yet.
     pub fn claim_parked(&self, device: &Arc<Device>) -> Option<Arc<Pad>> {
+        let _idle = self.idle_work.lock();
         let mac = device.mac.lock().clone();
         let pads = self.pads.lock();
         let free = |p: &&Arc<Pad>| p.owner.lock().is_none() && p.alive() && p.is_parked();
@@ -780,6 +791,8 @@ impl Pool {
         let park_hide = hide_ok && hidhide::available();
         let forced = engine.game_override.read().is_some();
         let falling_back = engine.fallback_exe.read().is_some();
+        // Until every idle pad is dealt with, no controller takes one.
+        let _idle = self.idle_work.lock();
         let idle: Vec<Arc<Pad>> = self
             .list()
             .into_iter()
@@ -892,5 +905,47 @@ impl Pool {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use ds_proto::Connection;
+
+    use crate::device::Device;
+    use crate::engine::Engine;
+
+    /// A controller connecting while `maintain` swaps an idle pad waits for
+    /// the swap, so it takes the new pad instead of plugging in a second.
+    #[test]
+    fn claims_wait_for_idle_pad_work() {
+        let dir = std::env::temp_dir().join(format!("dsz-pool-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::new(dir.clone());
+        let device = Device::for_test(Connection::Bluetooth, "aa-bb-cc-dd-ee-ff");
+
+        let swap = engine.pads.idle_work.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = {
+            let (engine, device) = (engine.clone(), device.clone());
+            std::thread::spawn(move || {
+                let pad = engine.pads.claim(&engine, &device).is_some();
+                let parked = engine.pads.claim_parked(&device).is_some();
+                tx.send((pad, parked)).unwrap();
+            })
+        };
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the claim went ahead during the swap"
+        );
+        drop(swap);
+        let got = rx.recv_timeout(Duration::from_secs(5)).expect("the claim finished");
+        t.join().unwrap();
+        // No pads in this pool: nothing to take, and nothing plugged in.
+        assert_eq!(got, (false, false));
+        assert!(engine.pads.list().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

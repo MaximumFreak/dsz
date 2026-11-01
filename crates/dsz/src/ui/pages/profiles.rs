@@ -287,7 +287,7 @@ impl App {
                                             && prof.haptics.source == AudioSource::SystemAudio,
                                         crate::i18n::tr("Audio haptics"),
                                     ),
-                                    (prof.gyro.mode == GyroMode::Mouse, crate::i18n::tr("Gyro")),
+                                    (prof.gyro.mode != GyroMode::Off, crate::i18n::tr("Gyro")),
                                     (prof.touchpad.mode == TouchMode::Mouse, crate::i18n::tr("Touch mouse")),
                                     (
                                         !matches!(prof.triggers.left, ds_proto::TriggerEffect::Off)

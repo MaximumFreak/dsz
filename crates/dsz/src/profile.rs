@@ -400,6 +400,9 @@ impl Default for Touchpad {
 pub enum GyroMode {
     Off,
     Mouse,
+    /// Turning speed drives the virtual controller's right stick, for games
+    /// that ignore the mouse while a controller is in use.
+    RightStick,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +444,14 @@ pub struct Gyro {
     pub smoothing: f32,
     /// Extra speed for fast flicks, 0 = none.
     pub acceleration: f32,
+    /// Right stick output: degrees per second that tilt the stick fully.
+    pub stick_speed: f32,
+    /// Right stick output: 0..=0.5, where the stick starts once the gyro
+    /// moves, to step over the game's own deadzone.
+    pub stick_min: f32,
+    /// Right stick output: 1..=3, the game's stick response curve to undo,
+    /// so slow turns aren't slowed further. 1 = linear.
+    pub stick_curve: f32,
 }
 
 impl Default for Gyro {
@@ -456,6 +467,9 @@ impl Default for Gyro {
             deadzone: 1.2,
             smoothing: 0.35,
             acceleration: 0.0,
+            stick_speed: 120.0,
+            stick_min: 0.0,
+            stick_curve: 1.0,
         }
     }
 }
@@ -1343,6 +1357,19 @@ mod tests {
         assert_eq!(d.default_profile, "Xbox");
         assert_eq!(d.dualsense_profile, "DualSense");
         assert_eq!(d.fallback_pad, crate::settings::FallbackPad::Off);
+    }
+
+    #[test]
+    fn gyro_from_before_right_stick_loads_unchanged() {
+        let g: Gyro = serde_json::from_str(r#"{"mode":"Mouse","sensitivity":20.0}"#).unwrap();
+        assert_eq!(g.mode, GyroMode::Mouse);
+        assert_eq!(g.sensitivity, 20.0);
+        assert_eq!((g.stick_speed, g.stick_min, g.stick_curve), (120.0, 0.0, 1.0));
+        assert_eq!(Gyro::default().mode, GyroMode::Off);
+        let mut g = Gyro::default();
+        g.mode = GyroMode::RightStick;
+        let back: Gyro = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+        assert_eq!(back, g);
     }
 
     #[test]

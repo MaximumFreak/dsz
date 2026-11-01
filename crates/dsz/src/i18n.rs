@@ -194,6 +194,7 @@ mod tests {
             include_str!("pipeline.rs"),
             include_str!("virt/mod.rs"),
             include_str!("engine.rs"),
+            include_str!("device.rs"),
             include_str!("ui/mod.rs"),
             include_str!("ui/pages/haptics.rs"),
             include_str!("ui/pages/input.rs"),
