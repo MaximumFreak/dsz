@@ -433,6 +433,12 @@ pub struct GameOutput {
     pub release_leds: bool,
     /// Motor power reduction byte.
     pub motor_power: Option<u8>,
+    /// Speaker volume byte, when the game sets it.
+    pub speaker_volume: Option<u8>,
+    /// Audio control byte (output path in bits 5:4), when set.
+    pub audio_control: Option<u8>,
+    /// Speaker preamp gain (audio control 2, bits 2:0), when set.
+    pub speaker_preamp: Option<u8>,
 }
 
 /// USB output report `0x02` offsets and valid flags, from the layout in
@@ -446,7 +452,10 @@ mod out {
     pub const MUTE_LED: usize = 9;
     pub const RIGHT_TRIGGER: usize = 11;
     pub const LEFT_TRIGGER: usize = 22;
+    pub const SPEAKER_VOLUME: usize = 6;
+    pub const AUDIO_CONTROL: usize = 8;
     pub const MOTOR_POWER: usize = 37;
+    pub const AUDIO_CONTROL2: usize = 38;
     pub const PLAYER_LEDS: usize = 44;
     pub const RGB: usize = 45;
 
@@ -455,12 +464,15 @@ mod out {
     pub const RUMBLE: u8 = 0x01 | 0x02;
     pub const RIGHT_TRIGGER_ON: u8 = 0x04;
     pub const LEFT_TRIGGER_ON: u8 = 0x08;
+    pub const SPEAKER_VOLUME_ON: u8 = 0x20;
+    pub const AUDIO_CONTROL_ON: u8 = 0x80;
     /// Flags 1.
     pub const MUTE_LED_ON: u8 = 0x01;
     pub const RGB_ON: u8 = 0x04;
     pub const RELEASE_LEDS: u8 = 0x08;
     pub const PLAYER_LEDS_ON: u8 = 0x10;
     pub const MOTOR_POWER_ON: u8 = 0x40;
+    pub const AUDIO_CONTROL2_ON: u8 = 0x80;
 }
 
 /// Parse a USB output report `0x02` from the virtual DualSense. Anything
@@ -489,6 +501,9 @@ pub fn parse_ds_usb_output(r: &[u8]) -> Option<GameOutput> {
         player_leds: on(f1, out::PLAYER_LEDS_ON).then(|| r[out::PLAYER_LEDS]),
         release_leds: on(f1, out::RELEASE_LEDS),
         motor_power: on(f1, out::MOTOR_POWER_ON).then(|| r[out::MOTOR_POWER]),
+        speaker_volume: on(f0, out::SPEAKER_VOLUME_ON).then(|| r[out::SPEAKER_VOLUME]),
+        audio_control: on(f0, out::AUDIO_CONTROL_ON).then(|| r[out::AUDIO_CONTROL]),
+        speaker_preamp: on(f1, out::AUDIO_CONTROL2_ON).then(|| r[out::AUDIO_CONTROL2] & 0x07),
     })
 }
 
@@ -597,6 +612,16 @@ mod tests {
         // Release LEDs.
         r[2] = 0x08;
         assert!(parse_ds_usb_output(&r).unwrap().release_leds);
+        // The speaker fields a game sets over USB, as Linux lays them out:
+        // what OutputState writes for the speaker route reads back.
+        let st = crate::OutputState {
+            audio: crate::AudioRoute::Speaker { volume: 0x64 },
+            speaker_preamp: 3,
+            ..Default::default()
+        };
+        let mut usb = [0u8; 64];
+        let o = parse_ds_usb_output(st.build(crate::Connection::Usb, &mut usb)).unwrap();
+        assert_eq!((o.speaker_volume, o.audio_control, o.speaker_preamp), (Some(0x64), Some(0x30), Some(3)));
         // Wrong id or length is ignored.
         r[0] = 5;
         assert!(parse_ds_usb_output(&r).is_none());

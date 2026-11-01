@@ -32,6 +32,9 @@ pub struct OutputState {
     pub enhanced_rumble: bool,
     /// Where the controller plays the audio stream.
     pub audio: AudioRoute,
+    /// Speaker preamp gain, the 3-bit field of audio control 2, sent with
+    /// the speaker route. Linux sends 2 (+6 dB); higher is louder.
+    pub speaker_preamp: u8,
     /// Explicit microphone input path and mute, independent of speaker output.
     pub microphone: Option<Microphone>,
 }
@@ -82,6 +85,9 @@ pub const SPEAKER_VOLUME_MIN: u8 = 0x3D;
 pub const SPEAKER_VOLUME_MAX: u8 = 0x64;
 /// Highest headphone volume, the value in the PS5's speaker-stream config.
 pub const HEADSET_VOLUME_MAX: u8 = 0x7F;
+/// Speaker preamp gain as Linux sets it (+6 dB), and the field's top.
+pub const SPEAKER_PREAMP_DEFAULT: u8 = 0x02;
+pub const SPEAKER_PREAMP_MAX: u8 = 0x07;
 
 impl Default for OutputState {
     fn default() -> Self {
@@ -98,6 +104,7 @@ impl Default for OutputState {
             rumble_reduction: 0,
             enhanced_rumble: true,
             audio: AudioRoute::Untouched,
+            speaker_preamp: SPEAKER_PREAMP_DEFAULT,
             microphone: None,
         }
     }
@@ -126,8 +133,7 @@ impl OutputState {
                 flag1 |= 0x80;
                 b[5] = volume.clamp(SPEAKER_VOLUME_MIN, SPEAKER_VOLUME_MAX);
                 b[7] = 3 << 4;
-                // Speaker preamp +6 dB, as Linux sets it.
-                b[37] = 0x02;
+                b[37] = self.speaker_preamp.min(SPEAKER_PREAMP_MAX);
             }
             AudioRoute::Headset { volume } => {
                 flag0 |= 0x10 | 0x20 | 0x80;
@@ -309,8 +315,18 @@ mod tests {
         assert_eq!(r[3] & 0x80, 0x80);
         assert_eq!(r[2 + 5], SPEAKER_VOLUME_MIN);
         assert_eq!(r[2 + 7], 0x30);
-        assert_eq!(r[2 + 37], 0x02);
+        assert_eq!(r[2 + 37], 0x02, "preamp +6 dB, as Linux sets it");
         assert!(crc::verify(crc::PREFIX_OUTPUT, &r));
+        let loud = OutputState { speaker_preamp: 4, ..s };
+        let r2 = loud.build(Connection::Bluetooth, &mut a).to_vec();
+        assert_eq!(r2[2 + 37], 4);
+        assert_eq!(r2[..2 + 37], r[..2 + 37], "only the preamp byte (and the CRC) differ");
+        assert_eq!(r2[2 + 38..r.len() - 4], r[2 + 38..r.len() - 4]);
+        let r3 = OutputState { speaker_preamp: 0xFF, ..s }.build(Connection::Bluetooth, &mut a).to_vec();
+        assert_eq!(r3[2 + 37], SPEAKER_PREAMP_MAX);
+        let quiet = OutputState { audio: AudioRoute::Muted, speaker_preamp: 4, ..Default::default() };
+        let r4 = quiet.build(Connection::Bluetooth, &mut a).to_vec();
+        assert_eq!(r4[2 + 37], 0, "only the speaker route sends a preamp");
         let s = OutputState {
             audio: AudioRoute::Headset { volume: 0xFF },
             ..Default::default()

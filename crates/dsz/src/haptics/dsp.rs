@@ -257,9 +257,68 @@ pub fn soft_clip(x: f32) -> f32 {
     }
 }
 
+/// Peak limiter for a level boosted past 100 %: quiet sound gets the whole
+/// boost, loud sound is held at the ceiling instead of being squashed by
+/// `soft_clip`. The gain drops at once, so no sample passes the ceiling,
+/// and recovers smoothly, so it doesn't pump on every peak. Both channels
+/// share one gain, which keeps the balance.
+pub struct Limiter {
+    ceiling: f32,
+    release: f32,
+    gain: f32,
+}
+
+impl Limiter {
+    pub fn new(rate: f32, release_secs: f32, ceiling: f32) -> Self {
+        Limiter {
+            ceiling,
+            release: 1.0 - (-1.0 / (rate * release_secs)).exp(),
+            gain: 1.0,
+        }
+    }
+
+    pub fn run(&mut self, frames: &mut [[f32; 2]]) {
+        for f in frames.iter_mut() {
+            let peak = f[0].abs().max(f[1].abs());
+            let want = if peak > self.ceiling { self.ceiling / peak } else { 1.0 };
+            self.gain = if want < self.gain {
+                want
+            } else {
+                self.gain + (want - self.gain) * self.release
+            };
+            f[0] *= self.gain;
+            f[1] *= self.gain;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limiter_holds_the_ceiling_and_recovers() {
+        let mut lim = Limiter::new(3000.0, 0.08, 0.9);
+        // Quiet sound passes untouched.
+        let mut quiet = [[0.3, -0.2]; 64];
+        lim.run(&mut quiet);
+        assert_eq!(quiet[63], [0.3, -0.2]);
+        // A loud burst never passes the ceiling, on either channel, and
+        // both channels drop together.
+        let mut loud: Vec<[f32; 2]> = (0..300).map(|i| [((i as f32) * 0.4).sin() * 2.0, 0.5]).collect();
+        lim.run(&mut loud);
+        assert!(loud.iter().all(|f| f[0].abs() <= 0.9 + 1e-6 && f[1].abs() <= 0.9 + 1e-6));
+        assert!(loud[299][1] < 0.5, "the quiet channel follows the shared gain");
+        // Afterwards the gain comes back up over a few release times.
+        let mut after = vec![[0.3, 0.3]; 3000];
+        lim.run(&mut after);
+        assert!(after[0][0] < 0.3);
+        assert!((after[2999][0] - 0.3).abs() < 1e-3);
+        // NaN neither sticks nor spreads to the gain.
+        let mut odd = [[f32::NAN, 0.0], [0.3, 0.3]];
+        lim.run(&mut odd);
+        assert!(odd[1][0].is_finite());
+    }
 
     #[test]
     fn squeeze_gives_960_per_1024_and_keeps_the_tone() {

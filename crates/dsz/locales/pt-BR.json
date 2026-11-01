@@ -758,5 +758,15 @@
   "Raise if slow turns feel sluggish in the game": "Aumente se giros lentos parecerem pesados no jogo",
   "Choose a virtual controller in this profile to aim with the right stick.": "Escolha um controle virtual neste perfil para mirar com o analógico direito.",
   "Moving the right stick": "Movendo o analógico direito",
-  "driving the right stick": "controlando o analógico direito"
+  "driving the right stick": "controlando o analógico direito",
+  "Above 100% makes faint effects stronger": "Acima de 100% reforça os efeitos fracos",
+  "Above 100% makes quiet sounds louder": "Acima de 100% deixa os sons baixos mais altos",
+  "Amplifier": "Amplificador",
+  "Louder settings may distort": "Os níveis mais altos podem distorcer",
+  "Normal": "Normal",
+  "Louder": "Mais alto",
+  "Loudest": "Máximo",
+  "Game haptics and speaker sound need a virtual DualSense.": "A háptica e o som do alto-falante do jogo precisam de um DualSense virtual.",
+  "Game haptics and speaker sound need a virtual DualSense. Games with DualSense support switch to the \"{name}\" profile, so set them there.": "A háptica e o som do alto-falante do jogo precisam de um DualSense virtual. Jogos com suporte ao DualSense mudam para o perfil \"{name}\"; ajuste-os lá.",
+  "A game's own speaker sound plays with the \"{name}\" profile's volume and amplifier.": "O som do alto-falante do próprio jogo usa o volume e o amplificador do perfil \"{name}\"."
 }

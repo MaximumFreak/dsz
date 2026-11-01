@@ -47,8 +47,10 @@ impl Drone {
 /// with the motor level: heavy from 34 Hz to 50 Hz, light from 85 Hz to
 /// 110 Hz. Gain is the mean of the level and its square root, which lifts
 /// weak rumble so it can still be felt, scaled to 0.80 (heavy) and 0.36
-/// (light) at full. The level eases in over 10 ms and out over 60 ms, and
-/// the pitch glides over 25 ms, so a motor step does not click.
+/// (light) at full. A strength past 100 % raises that ceiling in
+/// proportion, up to twice (soft-clipped later), instead of only reaching
+/// it sooner. The level eases in over 10 ms and out over 60 ms, and the
+/// pitch glides over 25 ms, so a motor step does not click.
 #[derive(Clone, Copy, Debug)]
 struct Rumble {
     amp: [f32; 2],
@@ -70,18 +72,23 @@ impl Default for Rumble {
     }
 }
 
+/// Largest rumble boost: the Haptics page's 200 % strength.
+const RUMBLE_BOOST_MAX: f32 = 2.0;
+
 /// One-pole smoothing step for time constant `tau` seconds at `RATE`.
 fn smoothing(tau: f32) -> f32 {
     1.0 - (-1.0 / (RATE * tau)).exp()
 }
 
 impl Rumble {
-    /// `heavy` and `light` are the motor levels as 0..=1 gains.
+    /// `heavy` and `light` are the motor levels times the strength, 0..=2;
+    /// past 1 only the amplitude grows.
     fn set(&mut self, heavy: f32, light: f32) {
+        let boost = |v: f32| v.clamp(1.0, RUMBLE_BOOST_MAX);
         let x = heavy.clamp(0.0, 1.0);
         let y = light.clamp(0.0, 1.0);
         let lift = |v: f32| (v + v.sqrt()) / 2.0;
-        self.target = [0.80 * lift(x), 0.36 * lift(y)];
+        self.target = [0.80 * lift(x) * boost(heavy), 0.36 * lift(y) * boost(light)];
         self.freq_target = [34.0 + 16.0 * x, 85.0 + 25.0 * y];
     }
 
@@ -264,6 +271,31 @@ mod tests {
         s.rumble(64, 0, 1.0);
         let p = peak(&mut s, 60);
         assert!((p[0] - 0.30).abs() < 0.02, "{p:?}");
+    }
+
+    #[test]
+    fn strength_past_100_raises_the_ceiling() {
+        // 100 % and below: the levels exactly as before.
+        for (motor, strength) in [(255u8, 1.0f32), (128, 1.0), (255, 0.5)] {
+            let mut r = Rumble::default();
+            r.set(motor as f32 / 255.0 * strength, motor as f32 / 255.0 * strength);
+            let x = motor as f32 / 255.0 * strength;
+            let lift = (x + x.sqrt()) / 2.0;
+            assert_eq!(r.target, [0.80 * lift, 0.36 * lift]);
+        }
+        // 200 %: half a motor reaches today's full level, a full motor twice it.
+        let mut s = Synth::new();
+        s.rumble(255, 255, 2.0);
+        let p = peak(&mut s, 60);
+        assert!((p[0] - 1.60).abs() < 0.04 && (p[1] - 0.72).abs() < 0.02, "{p:?}");
+        let mut s = Synth::new();
+        s.rumble(128, 0, 2.0);
+        let p = peak(&mut s, 60);
+        assert!((p[0] - 0.80).abs() < 0.03, "{p:?}");
+        // The pitch still tops out where it did.
+        let mut r = Rumble::default();
+        r.set(2.0, 2.0);
+        assert_eq!(r.freq_target, [50.0, 110.0]);
     }
 
     #[test]

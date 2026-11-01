@@ -18,7 +18,7 @@ use ds_proto::stream::{self, StreamCounters, BLOCKS, HAPTIC_FRAME, OPUS_FRAME, O
 use ds_proto::Buttons;
 
 use super::audio::Sub;
-use super::dsp::{resample_window, soft_clip, HapticFilter, Squeeze};
+use super::dsp::{resample_window, soft_clip, HapticFilter, Limiter, Squeeze};
 use super::game::WINDOW;
 use super::opus::{Encoder, Pcm};
 use super::synth::Synth;
@@ -31,6 +31,15 @@ const PERIOD: Duration = Duration::from_nanos(stream::PERIOD_NS);
 const IDLE_AFTER: Duration = Duration::from_millis(400);
 /// Speaker sound below this peak counts as silence.
 const SPEAKER_GATE: f32 = 1.0 / 2048.0;
+/// Highest game haptics and game speaker level, in percent. Past 100 % a
+/// limiter holds the peaks, so the boost lifts quiet sound: the actuators
+/// get 8-bit samples over Bluetooth, which rounds the faint effects games
+/// write for a 16-bit USB DualSense down to nothing.
+pub const LEVEL_MAX: u8 = 200;
+/// Limiter ceilings: the actuators take full scale; the speaker stops a
+/// little lower, where `to_i16`'s soft clip only bends it gently.
+const HAPTICS_CEILING: f32 = 1.0;
+const SPEAKER_CEILING: f32 = 0.9;
 /// Keep microphone-only control packets out of the active media clock.
 /// Each media/haptic payload already carries the microphone enable bit.
 struct MicrophoneClock {
@@ -178,6 +187,23 @@ fn to_i16(x: f32) -> i16 {
     (soft_clip(x) * 32767.0).round() as i16
 }
 
+/// Add game audio at `level` percent into `out`. Up to 100 % it is the
+/// plain scaled sum; above, the boosted audio goes through `limiter` first.
+fn add_level(out: &mut [[f32; 2]], input: &mut [[f32; 2]], level: u8, limiter: &mut Limiter) {
+    let lvl = level.min(LEVEL_MAX) as f32 / 100.0;
+    for v in input.iter_mut() {
+        v[0] *= lvl;
+        v[1] *= lvl;
+    }
+    if level > 100 {
+        limiter.run(input);
+    }
+    for (o, v) in out.iter_mut().zip(input.iter()) {
+        o[0] += v[0];
+        o[1] += v[1];
+    }
+}
+
 pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     crate::platform::timer_resolution_1ms();
     crate::platform::raise_thread_priority(true);
@@ -200,6 +226,9 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     let mut game = super::game::GameReader::new();
     let mut to_rumble = super::game::ActuatorRumble::new();
     let mut prev_g = [0f32; 2];
+    let mut haptics_limiter = Limiter::new(super::synth::RATE, 0.08, HAPTICS_CEILING);
+    let mut speaker_limiter = Limiter::new(48_000.0, 0.15, SPEAKER_CEILING);
+    let mut game_spk: Vec<[f32; 2]> = Vec::with_capacity(WINDOW);
     let mut squeeze = Squeeze::new();
     let mut pc_spk: Vec<[f32; 2]> = Vec::with_capacity(WINDOW);
     // Speaker audio for one report, before and after fitting to 960 frames.
@@ -509,23 +538,17 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             if let Some(src) = game_src.as_ref() {
                 if let Some(w) = game.take(src.as_ref(), win) {
                     if vo.game_haptics {
-                        let lvl = vo.game_haptics_level.min(100) as f32 / 100.0;
                         let mut g = [[0f32; 2]; 32];
                         resample_window(&mut prev_g, &w.haptics, &mut g);
-                        for (o, v) in hap.iter_mut().zip(g.iter()) {
-                            o[0] += v[0] * lvl;
-                            o[1] += v[1] * lvl;
-                        }
+                        add_level(&mut hap, &mut g, vo.game_haptics_level, &mut haptics_limiter);
                         if w.peak > 1e-4 {
                             last_sound = now;
                         }
                     }
                     if vo.game_speaker {
-                        let lvl = vo.game_speaker_level.min(100) as f32 / 100.0;
-                        for (o, v) in spk[at..].iter_mut().zip(w.speaker.iter()) {
-                            o[0] += v[0] * lvl;
-                            o[1] += v[1] * lvl;
-                        }
+                        game_spk.clear();
+                        game_spk.extend_from_slice(&w.speaker);
+                        add_level(&mut spk[at..], &mut game_spk, vo.game_speaker_level, &mut speaker_limiter);
                     }
                 }
             }
@@ -741,6 +764,34 @@ mod tests {
         assert!(clock.due(end, Some(false)));
         clock.sent(end, Some(false));
         assert!(!clock.due(end + Duration::from_secs(3600), Some(false)));
+    }
+
+    #[test]
+    fn levels_up_to_100_are_the_plain_sum_and_past_it_are_limited() {
+        let input: Vec<[f32; 2]> = (0..64).map(|i| [((i as f32) * 0.7).sin() * 0.9, ((i as f32) * 0.3).cos() * 0.05]).collect();
+        for level in [0u8, 37, 100] {
+            let mut out = vec![[0.25f32, -0.1]; 64];
+            let mut want = out.clone();
+            let lvl = level as f32 / 100.0;
+            for (o, v) in want.iter_mut().zip(&input) {
+                o[0] += v[0] * lvl;
+                o[1] += v[1] * lvl;
+            }
+            let mut lim = Limiter::new(3000.0, 0.08, HAPTICS_CEILING);
+            add_level(&mut out, &mut input.clone(), level, &mut lim);
+            assert_eq!(out, want, "level {level} is bit for bit what it was");
+        }
+        // 200 %: the quiet channel doubles, the loud one stays under the ceiling.
+        let mut out = vec![[0.0f32; 2]; 64];
+        let mut lim = Limiter::new(3000.0, 0.08, HAPTICS_CEILING);
+        add_level(&mut out, &mut input.clone(), 200, &mut lim);
+        assert!(out.iter().all(|f| f[0].abs() <= HAPTICS_CEILING + 1e-6));
+        assert!((out[0][1] - 0.1).abs() < 1e-6, "{:?}", out[0]);
+        assert!(out.iter().map(|f| f[0].abs()).fold(0.0, f32::max) > 0.95);
+        // Out-of-range profile values stop at the top.
+        let mut a = vec![[0.0f32; 2]; 1];
+        add_level(&mut a, &mut [[0.1, 0.1]], 255, &mut Limiter::new(3000.0, 0.08, 1.0));
+        assert!((a[0][0] - 0.2).abs() < 1e-6);
     }
 
     #[test]

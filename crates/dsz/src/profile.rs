@@ -172,6 +172,31 @@ pub enum AudioSource {
     SystemAudio,
 }
 
+/// The controller speaker's own amplifier: the output report's preamp gain.
+/// Louder is the default, also for profiles saved before the setting: with
+/// Normal, games that sound right on a wired DualSense were quiet over
+/// Bluetooth, and Louder was clearly louder without distorting (DualSense
+/// Edge, firmware 2.17, Animal Well).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpeakerAmp {
+    Normal,
+    #[default]
+    Louder,
+    Loudest,
+}
+
+impl SpeakerAmp {
+    /// Normal is Linux's +6 dB; the others are the next two steps of the
+    /// 3-bit field, not measured.
+    pub fn preamp(self) -> u8 {
+        match self {
+            SpeakerAmp::Normal => ds_proto::output::SPEAKER_PREAMP_DEFAULT,
+            SpeakerAmp::Louder => 3,
+            SpeakerAmp::Loudest => 4,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Latency {
     Short,
@@ -253,6 +278,8 @@ pub struct Haptics {
     pub rumble_as_haptics: bool,
     /// Controller speaker volume over Bluetooth, 0..=100; 0 keeps it off.
     pub speaker_volume: u8,
+    /// The speaker's amplifier (not the headset jack).
+    pub speaker_amp: SpeakerAmp,
     /// Also play the captured PC audio on the controller speaker.
     pub pc_audio_on_speaker: bool,
     /// Send speaker audio to a headset in the controller's jack instead,
@@ -277,7 +304,10 @@ impl Default for Haptics {
             triggers: TriggerHaptics::default(),
             rumble_intensity: 1.0,
             rumble_as_haptics: false,
-            speaker_volume: 80,
+            // What games ask for over USB (Animal Well sends 0x64, the top
+            // of the range Linux found accepted).
+            speaker_volume: 100,
+            speaker_amp: SpeakerAmp::Louder,
             pc_audio_on_speaker: false,
             headset_when_plugged: true,
             ds4_audio: Ds4Audio::default(),
@@ -913,12 +943,12 @@ pub struct VirtualOutput {
     pub game_leds: bool,
     /// Game haptics: the virtual DualSense's actuator channels.
     pub game_haptics: bool,
-    /// 0..=100
+    /// Percent, 0..=200; past 100 a limiter holds the peaks.
     pub game_haptics_level: u8,
     /// Game speaker: the virtual DualSense's speaker channels, to the
     /// controller speaker over Bluetooth.
     pub game_speaker: bool,
-    /// 0..=100
+    /// Percent, 0..=200; past 100 a limiter holds the peaks.
     pub game_speaker_level: u8,
     pub left_deadzone: StickDeadzone,
     pub right_deadzone: StickDeadzone,
@@ -942,7 +972,9 @@ impl Default for VirtualOutput {
             game_haptics: true,
             game_haptics_level: 100,
             game_speaker: true,
-            game_speaker_level: 100,
+            // Past 100 % the limiter holds the peaks, so quiet speaker
+            // sounds get louder and loud ones don't clip.
+            game_speaker_level: 150,
             left_deadzone: StickDeadzone::default(),
             right_deadzone: StickDeadzone::default(),
             invert: [false; 4],
@@ -1357,6 +1389,29 @@ mod tests {
         assert_eq!(d.default_profile, "Xbox");
         assert_eq!(d.dualsense_profile, "DualSense");
         assert_eq!(d.fallback_pad, crate::settings::FallbackPad::Off);
+    }
+
+    #[test]
+    fn louder_speaker_defaults() {
+        let p = Profile::default();
+        assert_eq!(p.haptics.speaker_volume, 100);
+        assert_eq!(p.haptics.speaker_amp, SpeakerAmp::Louder);
+        assert_eq!(p.haptics.speaker_amp.preamp(), 3);
+        assert_eq!(SpeakerAmp::Normal.preamp(), 0x02, "Normal is what Linux sends");
+        assert_eq!((p.virtual_out.game_haptics_level, p.virtual_out.game_speaker_level), (100, 150));
+        // A profile from before the amplifier setting gets Louder; its saved
+        // volume and levels are kept as they are.
+        let h: Haptics = serde_json::from_str(r#"{"speaker_volume":60}"#).unwrap();
+        assert_eq!(h.speaker_amp, SpeakerAmp::Louder);
+        assert_eq!(h.speaker_volume, 60);
+        let v: VirtualOutput = serde_json::from_str(r#"{"game_speaker_level":100}"#).unwrap();
+        assert_eq!(v.game_speaker_level, 100);
+        let mut h = Haptics::default();
+        h.speaker_amp = SpeakerAmp::Loudest;
+        let back: Haptics = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
+        assert_eq!(back.speaker_amp, SpeakerAmp::Loudest);
+        let v: VirtualOutput = serde_json::from_str(r#"{"game_haptics_level":180}"#).unwrap();
+        assert_eq!(v.game_haptics_level, 180);
     }
 
     #[test]

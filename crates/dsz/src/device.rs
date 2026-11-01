@@ -97,6 +97,9 @@ pub struct GameState {
     pub rgb: Option<[u8; 3]>,
     pub player_leds: Option<u8>,
     pub mute_led: Option<u8>,
+    /// Speaker volume, audio control and preamp the game last asked for,
+    /// logged when they change. Not applied: the profile sets the speaker.
+    pub audio: (Option<u8>, Option<u8>, Option<u8>),
     pub reports: u64,
 }
 
@@ -517,6 +520,17 @@ impl Device {
         }
         if let Some(m) = o.mute_led {
             g.mute_led = Some(m);
+        }
+        let audio = (o.speaker_volume, o.audio_control, o.speaker_preamp);
+        if audio != (None, None, None) && audio != g.audio {
+            g.audio = audio;
+            let hex = |v: Option<u8>| v.map_or("-".to_string(), |b| format!("0x{b:02X}"));
+            log::info!(
+                "game asks for speaker volume {}, audio control {}, preamp {}",
+                hex(audio.0),
+                hex(audio.1),
+                hex(audio.2)
+            );
         }
         drop(f);
         self.kick();
@@ -1248,6 +1262,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 device.speaker_route.load(Ordering::Acquire),
                 device.headset_volume.load(Ordering::Acquire),
             );
+            state.speaker_preamp = profile.haptics.speaker_amp.preamp();
             state.microphone = device.microphone_output();
             if device.microphone.enabled() {
                 // While the microphone is in use, the LED shows its mute

@@ -309,6 +309,10 @@ impl App {
                     );
                 });
             } else {
+                let ds_profile = {
+                    let s = self.engine.settings.read();
+                    s.auto_dualsense.then(|| s.dualsense_profile.clone())
+                };
                 card(
                     ui,
                     crate::i18n::tr("Controller speaker / headset"),
@@ -323,6 +327,26 @@ impl App {
                             0..=100,
                             "%",
                         );
+                        row(ui, crate::i18n::tr("Amplifier"), crate::i18n::tr("Louder settings may distort"), |ui| {
+                            segmented(
+                                ui,
+                                &mut h.speaker_amp,
+                                &[
+                                    (SpeakerAmp::Normal, crate::i18n::tr("Normal")),
+                                    (SpeakerAmp::Louder, crate::i18n::tr("Louder")),
+                                    (SpeakerAmp::Loudest, crate::i18n::tr("Loudest")),
+                                ],
+                            );
+                        });
+                        if p.virtual_out.kind != VirtualKind::DualSense {
+                            if let Some(name) = &ds_profile {
+                                muted(ui, &crate::localized_format!(
+                                    "A game's own speaker sound plays with the \"{name}\" profile's volume and amplifier.",
+                                    "O som do alto-falante do próprio jogo usa o volume e o amplificador do perfil \"{name}\".",
+                                    "El sonido del altavoz del propio juego usa el volumen y el amplificador del perfil \"{name}\"."
+                                ));
+                            }
+                        }
                         let mut pc = h.pc_audio_on_speaker;
                         if toggle_row(
                             ui,
