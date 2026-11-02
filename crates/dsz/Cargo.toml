@@ -32,6 +32,7 @@ features = [
     "Win32_Security",
     "Win32_Devices_HumanInterfaceDevice",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
     "Win32_Devices_Bluetooth",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",

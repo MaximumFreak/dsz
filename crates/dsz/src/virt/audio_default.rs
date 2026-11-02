@@ -135,6 +135,105 @@ fn endpoint_instance(en: &Com, endpoint: &str) -> Option<String> {
     }
 }
 
+/// `PKEY_Device_FriendlyName`, pid 14.
+const PKEY_FRIENDLY_NAME: GUID = GUID::from_u128(0xA45C254E_DF1C_4EFD_8020_67D146A850E0);
+/// `PKEY_Device_ContainerId`, pid 2.
+const PKEY_CONTAINER_ID: GUID = GUID::from_u128(0x8C7ED206_3F8A_4827_B3AB_AE9E1FAEFC6C);
+const VT_LPWSTR: u16 = 31;
+const VT_CLSID: u16 = 72;
+
+/// One property of an endpoint, handed to `read` as (variant type,
+/// pointer). Only string and GUID properties are read, and their memory is
+/// freed after `read`.
+unsafe fn endpoint_prop<T>(
+    en: &Com,
+    endpoint: &str,
+    fmtid: GUID,
+    pid: u32,
+    read: impl FnOnce(u16, *const c_void) -> Option<T>,
+) -> Option<T> {
+    #[repr(C)]
+    struct PropertyKey {
+        fmtid: GUID,
+        pid: u32,
+    }
+    #[repr(C)]
+    struct PropVariant {
+        vt: u16,
+        _r: [u16; 3],
+        ptr: *mut c_void,
+        _pad: usize,
+    }
+    let get_device: unsafe extern "system" fn(*mut c_void, *const u16, *mut *mut c_void) -> i32 =
+        en.method(5);
+    let w = win::wide(endpoint);
+    let mut dev = null_mut();
+    if get_device(en.0, w.as_ptr(), &mut dev) < 0 || dev.is_null() {
+        return None;
+    }
+    let dev = Com(dev);
+    let open: unsafe extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> i32 = dev.method(4);
+    let mut store = null_mut();
+    if open(dev.0, 0, &mut store) < 0 || store.is_null() {
+        return None;
+    }
+    let store = Com(store);
+    let get_value: unsafe extern "system" fn(*mut c_void, *const PropertyKey, *mut PropVariant) -> i32 =
+        store.method(5);
+    let key = PropertyKey { fmtid, pid };
+    let mut v = PropVariant {
+        vt: 0,
+        _r: [0; 3],
+        ptr: null_mut(),
+        _pad: 0,
+    };
+    if get_value(store.0, &key, &mut v) < 0 {
+        return None;
+    }
+    let out = read(v.vt, v.ptr);
+    if (v.vt == VT_LPWSTR || v.vt == VT_CLSID) && !v.ptr.is_null() {
+        CoTaskMemFree(v.ptr);
+    }
+    out
+}
+
+/// Friendly names ("Speakers (DualSense Wireless Controller)") of the
+/// active playback endpoints in device container `container`: for a wired
+/// controller, its own sound card, never another controller's or a
+/// virtual pad's.
+pub fn render_endpoints_in_container(container: &GUID) -> Vec<String> {
+    let Some(en) = create(&CLSID_MM_DEVICE_ENUMERATOR, &IID_IMM_DEVICE_ENUMERATOR) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for id in active_endpoints(&en, 0) {
+        let same = unsafe {
+            endpoint_prop(&en, &id, PKEY_CONTAINER_ID, 2, |vt, p| {
+                (vt == VT_CLSID && !p.is_null()).then(|| win::same_guid(&*(p as *const GUID), container))
+            })
+        };
+        if same != Some(true) {
+            continue;
+        }
+        let name = unsafe {
+            endpoint_prop(&en, &id, PKEY_FRIENDLY_NAME, 14, |vt, p| {
+                (vt == VT_LPWSTR && !p.is_null()).then(|| {
+                    let p = p as *const u16;
+                    let mut n = 0;
+                    while *p.add(n) != 0 {
+                        n += 1;
+                    }
+                    String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+                })
+            })
+        };
+        if let Some(name) = name {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// Instance id of an endpoint's device node; the property when Windows
 /// has it, else the `SWD\MMDEVAPI\<endpoint id>` it is always named.
 fn endpoint_node(en: &Com, endpoint: &str) -> String {

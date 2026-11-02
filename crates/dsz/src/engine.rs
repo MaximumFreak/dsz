@@ -105,7 +105,7 @@ impl Engine {
         let mut settings = Settings::load(&data_dir);
         crate::i18n::set_language(settings.language);
         if !profiles.exists(&settings.default_profile) {
-            settings.default_profile = profiles.names().first().cloned().unwrap_or_default();
+            settings.default_profile = profiles.fallback_name();
         }
         let hider = crate::virt::Hider::new(&data_dir);
         Arc::new(Engine {

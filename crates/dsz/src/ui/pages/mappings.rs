@@ -61,7 +61,7 @@ const KINDS: [(AKind, &str); 16] = [
     (AKind::Media, "Media key"),
     (AKind::Next, "Next profile"),
     (AKind::Prev, "Previous profile"),
-    (AKind::Gyro, "Toggle gyro mouse"),
+    (AKind::Gyro, "Toggle gyro"),
     (AKind::Touch, "Toggle touchpad mouse"),
     (AKind::Run, "Open a program / file"),
     (AKind::Profile, "Switch to profile"),

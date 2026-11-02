@@ -297,6 +297,42 @@ fn is_software_bus(instance_id: &str) -> bool {
     id.starts_with("ROOT\\") || id.starts_with("SWD\\")
 }
 
+/// Container id of a device node. Every function of one physical device
+/// shares it: a wired DualSense's game pad, its sound card, and that
+/// sound card's playback endpoint.
+pub fn container_id(instance_id: &str) -> Option<GUID> {
+    use windows_sys::Win32::Devices::Properties::DEVPROPKEY;
+    const DEVPROP_TYPE_GUID: u32 = 0x0D;
+    let key = DEVPROPKEY {
+        fmtid: GUID::from_u128(0x8C7ED206_3F8A_4827_B3AB_AE9E1FAEFC6C),
+        pid: 2,
+    };
+    unsafe {
+        let w = wide(instance_id);
+        let mut inst = 0u32;
+        if CM_Locate_DevNodeW(&mut inst, w.as_ptr(), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS {
+            return None;
+        }
+        let mut guid: GUID = std::mem::zeroed();
+        let mut ty = 0u32;
+        let mut len = std::mem::size_of::<GUID>() as u32;
+        let r = CM_Get_DevNode_PropertyW(
+            inst,
+            &key,
+            &mut ty,
+            &mut guid as *mut GUID as *mut u8,
+            &mut len,
+            0,
+        );
+        (r == CR_SUCCESS && ty == DEVPROP_TYPE_GUID).then_some(guid)
+    }
+}
+
+/// Whether two GUIDs are the same.
+pub fn same_guid(a: &GUID, b: &GUID) -> bool {
+    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
+}
+
 /// Instance id of the parent node (the Bluetooth HID service for a BT pad).
 pub fn parent_instance_id(instance_id: &str) -> Option<String> {
     unsafe {

@@ -206,7 +206,7 @@ pub fn restore(engine: &Engine, b: &Backup) -> Result<PathBuf, String> {
     }
     engine.profiles.replace_all(b.profiles.clone());
     if !engine.profiles.exists(&s.default_profile) {
-        s.default_profile = engine.profiles.names().first().cloned().unwrap_or_default();
+        s.default_profile = engine.profiles.fallback_name();
     }
     *engine.settings.write() = s;
     engine.settings_changed();

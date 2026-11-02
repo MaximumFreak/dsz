@@ -101,6 +101,8 @@ pub struct GameState {
     /// logged when they change. Not applied: the profile sets the speaker.
     pub audio: (Option<u8>, Option<u8>, Option<u8>),
     pub reports: u64,
+    /// The first rumble of this session was logged.
+    pub rumble_logged: bool,
 }
 
 #[derive(Debug, Default)]
@@ -500,6 +502,12 @@ impl Device {
         g.reports += 1;
         let (heavy, light) = o.rumble;
         g.rumble = (heavy != 0 || light != 0).then_some((heavy, light));
+        if g.rumble.is_some() && !g.rumble_logged {
+            // Which way a game sends its feedback (rumble, haptic audio, or
+            // both) decides which level applies; issue 29.
+            g.rumble_logged = true;
+            log::info!("the game sends classic rumble to the virtual DualSense (heavy {heavy}, light {light})");
+        }
         if let Some(t) = o.right_trigger {
             g.right_trigger = Some(t);
         }
@@ -642,8 +650,42 @@ const QUICK_CHARGE_WAIT: Duration = if cfg!(test) {
     Duration::from_secs(3)
 };
 
+/// How long a controller plugged in over USB waits for its Bluetooth side
+/// to report cable power before Quick Charge leaves it alone. The pad
+/// reports it within a few input reports of the cable going in.
+const QUICK_CHARGE_CONFIRM: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_millis(1500)
+};
+
+/// Bluetooth HID service class: in the interface path of every Bluetooth
+/// HID device, never in a USB one.
+const BLUETOOTH_HID_SERVICE: &str = "{00001124-0000-1000-8000-00805f9b34fb}";
+
+/// Whether `usb` is a controller really on a USB cable: not the app's own
+/// virtual DualSense (which answers with the physical controller's
+/// address, so games keep their settings for it) and not a Bluetooth
+/// collection that was taken for a USB one.
+fn real_usb(usb: &Device) -> bool {
+    usb.conn == Connection::Usb
+        && !usb.info.serial.starts_with(crate::virt::usbip::SERIAL_PREFIX)
+        && !usb.info.path.to_ascii_lowercase().contains(BLUETOOTH_HID_SERVICE)
+}
+
+/// The Bluetooth side says it runs on cable power (charging or full). A
+/// controller on a USB cable does; one that only looks alike over another
+/// path doesn't. DS4Windows' Quick Charge goes by this alone.
+fn on_cable_power(bt: &Device) -> bool {
+    matches!(
+        bt.live.lock().input.battery_status,
+        ds_proto::input::BatteryStatus::Charging | ds_proto::input::BatteryStatus::Full
+    )
+}
+
 /// The Bluetooth half when `new` and another connection are the same
-/// controller (same MAC) on USB and Bluetooth.
+/// controller (same MAC) on USB and Bluetooth, and the USB half is a real
+/// USB connection.
 fn quick_charge_twin(devices: &[Arc<Device>], new: &Arc<Device>) -> Option<Arc<Device>> {
     let mac = new.mac.lock().clone();
     crate::platform::bluetooth_address(&mac).filter(|a| *a != 0)?;
@@ -653,13 +695,17 @@ fn quick_charge_twin(devices: &[Arc<Device>], new: &Arc<Device>) -> Option<Arc<D
             && !d.stop.load(Ordering::Acquire)
             && *d.mac.lock() == mac
     })?;
-    Some(if new.is_bluetooth() { new.clone() } else { twin.clone() })
+    let (bt, usb) = if new.is_bluetooth() { (new, twin) } else { (twin, new) };
+    real_usb(usb).then(|| bt.clone())
 }
 
-/// Quick Charge (Settings, off by default): a controller on Bluetooth that
+/// Quick Charge (Settings, on by default): a controller on Bluetooth that
 /// is also plugged in over USB loses its Bluetooth link, so games and the
 /// app see one controller, on USB. Checked once per connection from either
-/// side, since at startup both can open in either order.
+/// side, since at startup both can open in either order, and again from
+/// the Bluetooth side when it starts reporting cable power. The link is
+/// dropped only when both agree: the same address on a real USB
+/// connection, and the Bluetooth side on cable power.
 fn quick_charge(engine: &Engine, device: &Arc<Device>) {
     if !engine.settings.read().quick_charge {
         return;
@@ -667,6 +713,30 @@ fn quick_charge(engine: &Engine, device: &Arc<Device>) {
     let Some(bt) = quick_charge_twin(&engine.device_list(), device) else {
         return;
     };
+    if bt.quick_charge_off.load(Ordering::Acquire) {
+        return;
+    }
+    if !on_cable_power(&bt) {
+        // Just plugged in: the Bluetooth side's next reports show the
+        // cable. The Bluetooth side checks again by itself later.
+        let t0 = Instant::now();
+        while !on_cable_power(&bt)
+            && t0.elapsed() < QUICK_CHARGE_CONFIRM
+            && !Arc::ptr_eq(&bt, device)
+            && !device.stop.load(Ordering::Acquire)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !on_cable_power(&bt) {
+            if !Arc::ptr_eq(&bt, device) {
+                log::info!(
+                    "Quick Charge: {} also shows up over USB, but its Bluetooth side reports no cable power; Bluetooth stays",
+                    bt.mac.lock()
+                );
+            }
+            return;
+        }
+    }
     if bt.quick_charge_off.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -692,6 +762,52 @@ fn quick_charge(engine: &Engine, device: &Arc<Device>) {
     {
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Quick Charge for a Bluetooth side that opens while its USB twin is
+/// already open (at startup both are found together, in either order).
+/// Its battery status comes only with its first full input reports, so
+/// wait for those, up to [`QUICK_CHARGE_CONFIRM`], and check again before
+/// its virtual controller starts. True when its link is being dropped, so
+/// no virtual controller is plugged in for it only to go away again.
+fn quick_charge_on_open(engine: &Engine, device: &Arc<Device>) -> bool {
+    if device.is_bluetooth()
+        && engine.settings.read().quick_charge
+        && quick_charge_twin(&engine.device_list(), device).is_some()
+    {
+        let t0 = Instant::now();
+        while !device.live.lock().input.full
+            && t0.elapsed() < QUICK_CHARGE_CONFIRM
+            && !device.stop.load(Ordering::Acquire)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        quick_charge(engine, device);
+    }
+    device.flight.expect_off.load(Ordering::Acquire)
+}
+
+/// A Bluetooth link lost sooner than this after connecting gets a log line
+/// naming other controller apps that are running.
+const EARLY_DROP: Duration = Duration::from_secs(10);
+
+/// Programs that can drive or disconnect a DualSense themselves, as
+/// lower-case exe names.
+const CONTROLLER_APPS: &[&str] = &[
+    "ds4windows.exe",
+    "dualsensex.exe",
+    "dualsensey.exe",
+    "steam.exe",
+    "rewasdengine.exe",
+    "rewasd.exe",
+    "x360ce.exe",
+    "padforge.exe",
+    "joytokey.exe",
+];
+
+/// The [`CONTROLLER_APPS`] in `running`, in list order.
+fn controller_apps(running: &std::collections::HashSet<String>) -> Vec<&'static str> {
+    CONTROLLER_APPS.iter().copied().filter(|a| running.contains(*a)).collect()
 }
 
 fn quick_charge_disconnect(mac: String) -> bool {
@@ -799,6 +915,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         if mac.is_empty() { "?" } else { &mac },
         if firmware.is_empty() { "?" } else { &firmware }
     );
+    let connected_at = Instant::now();
     engine.add_device(device.clone());
     quick_charge(&engine, &device);
 
@@ -823,13 +940,25 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
                     writer_loop(e, d, devr)
                 })
                 .expect("spawn writer");
-            std::thread::Builder::new()
-                .name(format!("ds-virtual-{id}"))
-                .spawn_scoped(s, move || {
-                    let _g = StopOnPanic(d);
-                    crate::virt::run(e, d)
-                })
-                .expect("spawn virtual");
+            let dropping = quick_charge_on_open(e, d);
+            if dropping {
+                // Quick Charge is dropping this link: let it close before
+                // a virtual controller would be plugged in for it, so the
+                // USB side keeps the only one.
+                let t0 = Instant::now();
+                while t0.elapsed() < QUICK_CHARGE_WAIT && !d.stop.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            if !(dropping && d.stop.load(Ordering::Acquire)) {
+                std::thread::Builder::new()
+                    .name(format!("ds-virtual-{id}"))
+                    .spawn_scoped(s, move || {
+                        let _g = StopOnPanic(d);
+                        crate::virt::run(e, d)
+                    })
+                    .expect("spawn virtual");
+            }
             if conn == Connection::Bluetooth && !model.is_dualshock4() {
                 std::thread::Builder::new()
                     .name(format!("ds-microphone-{id}"))
@@ -845,6 +974,15 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
                         crate::haptics::streamer::run(e, d)
                     })
                     .expect("spawn haptics");
+            }
+            if conn == Connection::Usb && !model.is_dualshock4() {
+                std::thread::Builder::new()
+                    .name(format!("ds-usb-haptics-{id}"))
+                    .spawn_scoped(s, move || {
+                        let _g = StopOnPanic(d);
+                        crate::haptics::usb::run(e, d)
+                    })
+                    .expect("spawn USB haptics");
             }
             if d.ds4_audio_capable() {
                 std::thread::Builder::new()
@@ -866,6 +1004,22 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
 
     let battery = device.live.lock().input.battery_percent;
     device.flight.dump_if_lost(model.name(), battery);
+    if conn == Connection::Bluetooth
+        && device.flight.lost.load(Ordering::Acquire)
+        && !device.flight.expect_off.load(Ordering::Acquire)
+        && connected_at.elapsed() < EARLY_DROP
+    {
+        // Issue 29: links dropped within seconds of connecting, with no
+        // cable and nothing in this app asking. Name what else might have.
+        let apps = controller_apps(&crate::platform::process_names());
+        log::warn!(
+            "{} dropped Bluetooth {} ms after connecting; this app didn't ask (Quick Charge {}). Other controller apps running: {}",
+            model.name(),
+            connected_at.elapsed().as_millis(),
+            if engine.settings.read().quick_charge { "on" } else { "off" },
+            if apps.is_empty() { "none found".to_string() } else { apps.join(", ") }
+        );
+    }
     engine.remove_device(id);
     log::info!("{} disconnected", model.name());
 }
@@ -1041,6 +1195,15 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             count_since = 0;
             last_rate = now;
             check_crc = engine.settings.read().check_input_crc;
+            // Quick Charge from this side: the cable went in after the USB
+            // side had already looked (or that side opened first).
+            if device.is_bluetooth()
+                && !device.quick_charge_off.load(Ordering::Acquire)
+                && engine.settings.read().quick_charge
+                && on_cable_power(device)
+            {
+                quick_charge(engine, device);
+            }
             // Idle power-off for Bluetooth controllers.
             let idle_min = engine.settings.read().idle_off_minutes;
             if idle_min > 0
@@ -1363,13 +1526,18 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
 impl Device {
     /// A controller with no HID handle, for mapping tests.
     pub(crate) fn for_test(conn: Connection, mac: &str) -> Arc<Self> {
+        Self::for_test_at(conn, mac, "", mac)
+    }
+
+    /// [`Device::for_test`] with a HID interface path and serial.
+    pub(crate) fn for_test_at(conn: Connection, mac: &str, path: &str, serial: &str) -> Arc<Self> {
         let (stream_tx, stream_rx) = bounded::<StreamPacket>(1);
         let (kick_tx, kick_rx) = bounded::<()>(1);
         let (haptics_wake_tx, haptics_wake) = bounded::<()>(1);
         Arc::new(Device {
             id: 1,
             info: DeviceInfo {
-                path: String::new(),
+                path: path.to_string(),
                 vid: ds_proto::SONY_VID,
                 pid: ds_proto::DUALSENSE_PID,
                 input_len: if conn == Connection::Bluetooth {
@@ -1381,7 +1549,7 @@ impl Device {
                 feature_len: 64,
                 usage_page: 0x01,
                 usage: 0x05,
-                serial: mac.to_string(),
+                serial: serial.to_string(),
                 product: "DualSense".into(),
             },
             model: Model::DualSense,
@@ -1526,9 +1694,8 @@ mod quick_charge_tests {
         let dir = std::env::temp_dir().join(format!("dsz-quick-charge-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let engine = Engine::new(dir.clone());
-        if quick_charge {
-            engine.settings.write().quick_charge = true;
-        }
+        assert!(engine.settings.read().quick_charge, "a new settings folder starts with it on");
+        engine.settings.write().quick_charge = quick_charge;
         engine.devices.write().extend(devices.iter().map(|d| (*d).clone()));
         Rig { engine, dir }
     }
@@ -1537,13 +1704,17 @@ mod quick_charge_tests {
         QUICK_CHARGE_OFFS.lock().iter().filter(|m| *m == mac).count()
     }
 
+    /// What the Bluetooth side reports once a cable is in.
+    fn on_cable(bt: &Device) {
+        bt.live.lock().input.battery_status = ds_proto::input::BatteryStatus::Charging;
+    }
     #[test]
-    fn off_by_default_the_same_controller_on_usb_and_bluetooth_stays_connected() {
+    fn turned_off_the_same_controller_on_usb_and_bluetooth_stays_connected() {
         let mac = "A0-00-00-00-00-01";
         let bt = Device::for_test(Connection::Bluetooth, mac);
         let usb = Device::for_test(Connection::Usb, mac);
         let r = rig(false, &[&bt, &usb]);
-        assert!(!r.engine.settings.read().quick_charge, "a new settings folder starts with it off");
+        on_cable(&bt);
         quick_charge(&r.engine, &usb);
         quick_charge(&r.engine, &bt);
         assert_eq!(offs(mac), 0, "no Bluetooth disconnect while Quick Charge is off");
@@ -1559,6 +1730,7 @@ mod quick_charge_tests {
         let bt = Device::for_test(Connection::Bluetooth, mac);
         let usb = Device::for_test(Connection::Usb, mac);
         let r = rig(true, &[&bt, &usb]);
+        on_cable(&bt);
         quick_charge(&r.engine, &usb);
         assert_eq!(offs(mac), 1);
         assert!(bt.flight.expect_off.load(Ordering::Acquire), "not logged as a dropped link");
@@ -1575,9 +1747,46 @@ mod quick_charge_tests {
         let usb = Device::for_test(Connection::Usb, mac);
         let bt = Device::for_test(Connection::Bluetooth, mac);
         let r = rig(true, &[&usb, &bt]);
+        on_cable(&bt);
         quick_charge(&r.engine, &bt);
         assert_eq!(offs(mac), 1);
         assert!(bt.flight.expect_off.load(Ordering::Acquire));
+    }
+
+    /// At startup the Bluetooth side can open second, before any of its
+    /// input has been read: its battery status is still the default
+    /// (discharging). It looks again once its full reports are in, before
+    /// its virtual controller starts, so no second pad is plugged in.
+    #[test]
+    fn bluetooth_opening_second_checks_again_before_its_virtual_controller() {
+        let mac = "A0-00-00-00-00-0C";
+        let usb = Device::for_test(Connection::Usb, mac);
+        let bt = Device::for_test(Connection::Bluetooth, mac);
+        let r = rig(true, &[&usb, &bt]);
+        quick_charge(&r.engine, &bt);
+        assert_eq!(offs(mac), 0, "no input read yet");
+        {
+            let mut live = bt.live.lock();
+            live.input.full = true;
+            live.input.battery_status = ds_proto::input::BatteryStatus::Charging;
+        }
+        assert!(quick_charge_on_open(&r.engine, &bt), "dropping: no virtual controller for it");
+        assert_eq!(offs(mac), 1);
+
+        // On battery it keeps its link and gets its virtual controller.
+        let mac = "A0-00-00-00-00-0D";
+        let usb = Device::for_test(Connection::Usb, mac);
+        let bt = Device::for_test(Connection::Bluetooth, mac);
+        bt.live.lock().input.full = true;
+        let r = rig(true, &[&usb, &bt]);
+        assert!(!quick_charge_on_open(&r.engine, &bt));
+        assert_eq!(offs(mac), 0);
+        // A USB side, or Quick Charge off, never waits or drops.
+        assert!(!quick_charge_on_open(&r.engine, &usb));
+        let r = rig(false, &[&usb, &bt]);
+        on_cable(&bt);
+        assert!(!quick_charge_on_open(&r.engine, &bt));
+        assert_eq!(offs(mac), 0);
     }
 
     #[test]
@@ -1587,6 +1796,8 @@ mod quick_charge_tests {
         let bt = Device::for_test(Connection::Bluetooth, a);
         let other_usb = Device::for_test(Connection::Usb, b);
         let second_bt = Device::for_test(Connection::Bluetooth, a);
+        on_cable(&bt);
+        on_cable(&second_bt);
         let r = rig(true, &[&bt, &other_usb, &second_bt]);
         quick_charge(&r.engine, &other_usb);
         quick_charge(&r.engine, &second_bt);
@@ -1596,6 +1807,7 @@ mod quick_charge_tests {
         for mac in ["", "00-00-00-00-00-00"] {
             let bt = Device::for_test(Connection::Bluetooth, mac);
             let usb = Device::for_test(Connection::Usb, mac);
+            on_cable(&bt);
             let r = rig(true, &[&bt, &usb]);
             quick_charge(&r.engine, &usb);
             assert_eq!(offs(mac), 0);
@@ -1606,9 +1818,98 @@ mod quick_charge_tests {
         let c = "A0-00-00-00-00-06";
         let bt = Device::for_test(Connection::Bluetooth, c);
         bt.stop.store(true, Ordering::Release);
+        on_cable(&bt);
         let usb = Device::for_test(Connection::Usb, c);
         let r = rig(true, &[&bt, &usb]);
         quick_charge(&r.engine, &usb);
         assert_eq!(offs(c), 0);
+    }
+
+    #[test]
+    fn early_drops_name_other_controller_apps() {
+        let running: std::collections::HashSet<String> =
+            ["explorer.exe", "steam.exe", "ds4windows.exe"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(controller_apps(&running), vec!["ds4windows.exe", "steam.exe"]);
+        assert!(controller_apps(&Default::default()).is_empty());
+    }
+
+    /// Issue 29: Bluetooth dropped with no cable plugged in. Whatever else
+    /// shows the same address, a controller running on its battery keeps
+    /// its Bluetooth link.
+    #[test]
+    fn no_cable_power_keeps_bluetooth_until_the_pad_reports_it() {
+        let mac = "A0-00-00-00-00-07";
+        let bt = Device::for_test(Connection::Bluetooth, mac);
+        let usb = Device::for_test(Connection::Usb, mac);
+        let r = rig(true, &[&bt, &usb]);
+        quick_charge(&r.engine, &usb);
+        quick_charge(&r.engine, &bt);
+        assert_eq!(offs(mac), 0, "on battery: not plugged in, whatever else has its address");
+        assert!(!bt.flight.expect_off.load(Ordering::Acquire));
+        assert!(!bt.quick_charge_off.load(Ordering::Acquire), "free to drop once the cable shows");
+        // The reader's once-a-second check from the Bluetooth side.
+        on_cable(&bt);
+        quick_charge(&r.engine, &bt);
+        assert_eq!(offs(mac), 1);
+        quick_charge(&r.engine, &bt);
+        assert_eq!(offs(mac), 1, "asked once");
+        // Full counts as cable power too; discharging after the drop changes nothing.
+        let mac2 = "A0-00-00-00-00-08";
+        let bt2 = Device::for_test(Connection::Bluetooth, mac2);
+        bt2.live.lock().input.battery_status = ds_proto::input::BatteryStatus::Full;
+        let usb2 = Device::for_test(Connection::Usb, mac2);
+        let r2 = rig(true, &[&bt2, &usb2]);
+        quick_charge(&r2.engine, &usb2);
+        assert_eq!(offs(mac2), 1);
+    }
+
+    #[test]
+    fn only_a_real_usb_connection_counts_as_plugged_in() {
+        // The app's own virtual DualSense answers with the physical
+        // controller's address; even if it were ever opened as a
+        // controller it is not a cable.
+        let mac = "A0-00-00-00-00-09";
+        let bt = Device::for_test(Connection::Bluetooth, mac);
+        on_cable(&bt);
+        let ours = Device::for_test_at(
+            Connection::Usb,
+            mac,
+            r"\\?\hid#vid_054c&pid_0ce6&mi_03#8&1&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+            "DSZV1",
+        );
+        let r = rig(true, &[&bt, &ours]);
+        quick_charge(&r.engine, &ours);
+        quick_charge(&r.engine, &bt);
+        assert_eq!(offs(mac), 0, "our virtual pad");
+
+        // A Bluetooth collection taken for USB (any input length but the
+        // Bluetooth one reads as USB).
+        let mac = "A0-00-00-00-00-0A";
+        let bt = Device::for_test(Connection::Bluetooth, mac);
+        on_cable(&bt);
+        let bt_as_usb = Device::for_test_at(
+            Connection::Usb,
+            mac,
+            r"\\?\HID#{00001124-0000-1000-8000-00805F9B34FB}_VID&0002054C_PID&0CE6#9&2&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+            mac,
+        );
+        let r = rig(true, &[&bt, &bt_as_usb]);
+        quick_charge(&r.engine, &bt_as_usb);
+        quick_charge(&r.engine, &bt);
+        assert_eq!(offs(mac), 0, "a Bluetooth path");
+
+        // A real USB path still works.
+        let mac = "A0-00-00-00-00-0B";
+        let bt = Device::for_test(Connection::Bluetooth, mac);
+        on_cable(&bt);
+        let usb = Device::for_test_at(
+            Connection::Usb,
+            mac,
+            r"\\?\hid#vid_054c&pid_0df2&mi_03#8&2a&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+            "",
+        );
+        let r = rig(true, &[&bt, &usb]);
+        quick_charge(&r.engine, &usb);
+        assert_eq!(offs(mac), 1);
     }
 }

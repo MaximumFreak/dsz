@@ -372,12 +372,7 @@ impl App {
                                         ui.label(RichText::new(crate::i18n::tr("Delete this profile?")).color(BAD));
                                         if danger_button(ui, crate::i18n::tr("Delete")).clicked() {
                                             if engine.profiles.delete(&prof.name) {
-                                                let first = engine
-                                                    .profiles
-                                                    .names()
-                                                    .first()
-                                                    .cloned()
-                                                    .unwrap_or_default();
+                                                let first = engine.profiles.fallback_name();
                                                 engine.rename_profile_refs(&prof.name, &first);
                                                 if self.edit_pin.as_deref()
                                                     == Some(prof.name.as_str())

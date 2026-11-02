@@ -100,6 +100,11 @@ pub struct Settings {
     pub idle_off_minutes: u32,
     /// Quick Charge: drop a controller's Bluetooth link when the same
     /// controller (by MAC) is plugged in over USB, so only USB is left.
+    /// On by default. Stored as `quick_charge_v2`: up to 0.4.4 it was off
+    /// by default and saved as `quick_charge`, so a saved `false` there
+    /// mostly meant "never touched". That old key is ignored, which turns
+    /// it on once for everyone; a choice saved after that is kept.
+    #[serde(rename = "quick_charge_v2")]
     pub quick_charge: bool,
     pub ui_scale: f32,
     /// Drop Bluetooth input reports whose CRC does not match.
@@ -109,7 +114,12 @@ pub struct Settings {
     /// Let the app use HidHide to hide a controller while a virtual one is up.
     pub hidhide_control: bool,
     /// Start every controller on `default_profile` when the app starts,
-    /// ignoring saved per-controller assignments until one is picked.
+    /// ignoring saved per-controller assignments until one is picked. On
+    /// by default. Stored as `default_on_start_v2`: up to 0.4.4 it was off
+    /// by default and saved as `default_on_start`, so a saved `false` there
+    /// mostly meant "never touched". That old key is ignored, which turns
+    /// it on once for everyone; a choice saved after that is kept.
+    #[serde(rename = "default_on_start_v2")]
     pub default_on_start: bool,
     /// Switch to `dualsense_profile` while a game with native DualSense
     /// support runs (found by scanning its exe), unless a game rule applies.
@@ -147,6 +157,10 @@ pub struct Settings {
     pub dsu_enabled: bool,
 }
 
+/// A fresh install's default profile, and the one to fall back on while it
+/// exists when the default is gone.
+pub const DEFAULT_PROFILE: &str = "Xbox";
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -155,7 +169,7 @@ impl Default for Settings {
             start_minimized: false,
             close_to_tray: true,
             minimize_to_tray: false,
-            default_profile: "Xbox".into(),
+            default_profile: DEFAULT_PROFILE.into(),
             device_profiles: BTreeMap::new(),
             device_names: BTreeMap::new(),
             udp_enabled: true,
@@ -163,12 +177,12 @@ impl Default for Settings {
             auto_profiles: true,
             games: Vec::new(),
             idle_off_minutes: 15,
-            quick_charge: false,
+            quick_charge: true,
             ui_scale: 1.0,
             check_input_crc: true,
             show_tips: true,
             hidhide_control: true,
-            default_on_start: false,
+            default_on_start: true,
             auto_dualsense: true,
             dualsense_profile: "DualSense".into(),
             fallback_pad: FallbackPad::Off,
@@ -229,21 +243,46 @@ mod tests {
     }
 
     #[test]
-    fn quick_charge_defaults_off_and_old_settings_load_with_it_off() {
-        assert!(!Settings::default().quick_charge);
+    fn quick_charge_defaults_on_once_and_a_new_choice_is_kept() {
+        assert!(Settings::default().quick_charge);
         let parsed: Settings = serde_json::from_str("{}").unwrap();
-        assert!(!parsed.quick_charge);
-        // A settings.json saved before the option existed.
-        let mut old = serde_json::to_value(Settings::default()).unwrap();
-        old.as_object_mut().unwrap().remove("quick_charge");
-        old["idle_off_minutes"] = 5.into();
-        let parsed: Settings = serde_json::from_value(old).unwrap();
-        assert!(!parsed.quick_charge);
-        assert_eq!(parsed, Settings { idle_off_minutes: 5, ..Settings::default() });
-        let parsed: Settings = serde_json::from_str(r#"{"quick_charge":true}"#).unwrap();
         assert!(parsed.quick_charge);
-        let back: Settings = serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
-        assert!(back.quick_charge);
+        // A settings.json from before the option existed, and one from
+        // 0.4.3 or 0.4.4 with the old key off (its default then).
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        let map = old.as_object_mut().unwrap();
+        map.remove("quick_charge_v2");
+        map.insert("idle_off_minutes".into(), 5.into());
+        let parsed: Settings = serde_json::from_value(old.clone()).unwrap();
+        assert!(parsed.quick_charge);
+        assert_eq!(parsed, Settings { idle_off_minutes: 5, ..Settings::default() });
+        old["quick_charge"] = false.into();
+        let parsed: Settings = serde_json::from_value(old).unwrap();
+        assert!(parsed.quick_charge, "the old key is ignored");
+        // Turned off from now on, it stays off, under the new key only.
+        let off = Settings { quick_charge: false, ..Settings::default() };
+        let saved = serde_json::to_value(&off).unwrap();
+        assert_eq!(saved["quick_charge_v2"], false);
+        assert!(saved.get("quick_charge").is_none());
+        let back: Settings = serde_json::from_value(saved).unwrap();
+        assert!(!back.quick_charge);
+    }
+
+    #[test]
+    fn default_profile_at_start_is_on_once_and_a_new_choice_is_kept() {
+        assert!(Settings::default().default_on_start);
+        assert_eq!(Settings::default().default_profile, "Xbox");
+        let parsed: Settings = serde_json::from_str("{}").unwrap();
+        assert!(parsed.default_on_start);
+        // 0.4.4 saved the old key off, its default then: ignored.
+        let parsed: Settings = serde_json::from_str(r#"{"default_on_start":false}"#).unwrap();
+        assert!(parsed.default_on_start, "the old key is ignored");
+        let off = Settings { default_on_start: false, ..Settings::default() };
+        let saved = serde_json::to_value(&off).unwrap();
+        assert_eq!(saved["default_on_start_v2"], false);
+        assert!(saved.get("default_on_start").is_none());
+        let back: Settings = serde_json::from_value(saved).unwrap();
+        assert!(!back.default_on_start, "turned off from now on, it stays off");
     }
 
     #[test]

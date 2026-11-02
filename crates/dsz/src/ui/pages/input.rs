@@ -617,8 +617,8 @@ impl App {
             if col == 0 {
                 card(
                     ui,
-                    crate::i18n::tr("Gyro mouse"),
-                    crate::i18n::tr("Tilt and turn the controller to move the cursor or aim"),
+                    crate::i18n::tr("Gyro"),
+                    crate::i18n::tr("Tilt and turn the controller to move the cursor or the right stick"),
                     |ui| {
                         let virtual_on = p.virtual_out.kind != VirtualKind::Off;
                         let g = &mut p.gyro;

@@ -423,7 +423,7 @@ impl App {
                             toggle_row(
                                 ui,
                                 crate::i18n::tr("Game haptics"),
-                                crate::i18n::tr("The game's haptic audio, to the actuators over Bluetooth"),
+                                crate::i18n::tr("The game's haptic audio, to the actuators (Bluetooth or USB)"),
                                 &mut vo.game_haptics,
                             );
                             if vo.game_haptics {

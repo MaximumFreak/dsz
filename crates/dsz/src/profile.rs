@@ -1133,6 +1133,19 @@ impl ProfileStore {
         self.list.read().iter().map(|p| p.name.clone()).collect()
     }
 
+    /// The profile to make the default when the default is gone (renamed
+    /// away, deleted, or missing from a backup): "Xbox" while there is one,
+    /// as on a fresh install, else the first. The list is sorted by name,
+    /// so the first is often "DualSense".
+    pub fn fallback_name(&self) -> String {
+        let l = self.list.read();
+        l.iter()
+            .find(|p| p.name.eq_ignore_ascii_case(crate::settings::DEFAULT_PROFILE))
+            .or_else(|| l.first())
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    }
+
     pub fn all(&self) -> Vec<Arc<Profile>> {
         self.list.read().clone()
     }
@@ -1362,6 +1375,20 @@ mod tests {
         assert_eq!(files, ["racing.json", "xbox.json"]);
         let again = ProfileStore::load(&dir);
         assert_eq!(again.names(), ["Racing", "xbox"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_default_falls_back_to_xbox_not_the_first_name() {
+        let dir = std::env::temp_dir().join(format!("dsz-fallback-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = ProfileStore::load(&dir);
+        store.replace_all(vec![Profile::named("DualSense"), Profile::named("Racing"), Profile::named("Xbox")]);
+        assert_eq!(store.fallback_name(), "Xbox");
+        store.replace_all(vec![Profile::named("DualSense"), Profile::named("xbox")]);
+        assert_eq!(store.fallback_name(), "xbox", "the stored spelling");
+        store.replace_all(vec![Profile::named("DualSense"), Profile::named("Racing")]);
+        assert_eq!(store.fallback_name(), "DualSense", "no Xbox: the first");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

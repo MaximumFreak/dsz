@@ -18,6 +18,90 @@ use crate::profile::*;
 // ------------------------------------------------------------------ gyro
 
 const COUNTS_PER_DPS: f32 = 16.0;
+/// Accelerometer counts per g.
+const COUNTS_PER_G: f32 = 8192.0;
+
+// Rest check: a second, bias-free way to find a resting controller, so a
+// bias that is already wrong can still be corrected. The quiet check in
+// `update_bias` measures readings against the current bias, so a bias
+// more than 2.5 deg/s off never looks quiet and never refines. This one
+// looks only at how far the raw readings spread over the run.
+
+/// Widest spread (max - min, per axis) of raw gyro readings over a run
+/// that still counts as resting: sensor noise, not a hand.
+const REST_GYRO_SPREAD: f32 = 2.5 * COUNTS_PER_DPS;
+/// Widest spread of each accelerometer axis over a run. Per axis, so the
+/// direction of gravity has to hold still, not just its length: turning
+/// about a level axis tips gravity, and 0.04 g is about 2.3 degrees.
+const REST_ACCEL_SPREAD: f32 = 0.04 * COUNTS_PER_G;
+/// How long a run has to rest before its mean may replace the bias.
+const REST_TIME: Duration = Duration::from_millis(2000);
+/// Turning about the axis gravity runs along leaves the accelerometer
+/// unchanged, so a fix on that axis (yaw, on a desk) has to rest longer.
+const REST_TIME_UPRIGHT_AXIS: Duration = Duration::from_millis(4000);
+const REST_MIN_SAMPLES: u32 = 100;
+/// The bias is replaced only when a run's mean is this far off on some
+/// axis; closer than that, the quiet check's blend keeps refining it as
+/// before. A level-axis turn slow enough to pass the accelerometer spread
+/// over `REST_TIME` (2.3 degrees in 2 s) is slower than this.
+const REST_FIX_OFF: f32 = 1.5 * COUNTS_PER_DPS;
+/// Means beyond this are not a plausible gyro bias.
+const REST_MAX_BIAS: f32 = 20.0 * COUNTS_PER_DPS;
+/// At most one info log line per this long for automatic fixes.
+const REST_LOG_EVERY: Duration = Duration::from_secs(60);
+
+/// A run of motion samples whose raw readings hold steady.
+#[derive(Default)]
+struct Rest {
+    since: Option<Instant>,
+    n: u32,
+    gyro_sum: [f64; 3],
+    gyro_lo: [f32; 3],
+    gyro_hi: [f32; 3],
+    accel_lo: [f32; 3],
+    accel_hi: [f32; 3],
+}
+
+impl Rest {
+    /// Add a sample. False when the run no longer holds steady with it.
+    fn add(&mut self, gyro: [f32; 3], accel: [f32; 3], now: Instant) -> bool {
+        if self.n == 0 {
+            self.since = Some(now);
+            self.gyro_lo = gyro;
+            self.gyro_hi = gyro;
+            self.accel_lo = accel;
+            self.accel_hi = accel;
+        }
+        self.n += 1;
+        for k in 0..3 {
+            self.gyro_sum[k] += gyro[k] as f64;
+            self.gyro_lo[k] = self.gyro_lo[k].min(gyro[k]);
+            self.gyro_hi[k] = self.gyro_hi[k].max(gyro[k]);
+            self.accel_lo[k] = self.accel_lo[k].min(accel[k]);
+            self.accel_hi[k] = self.accel_hi[k].max(accel[k]);
+        }
+        (0..3).all(|k| {
+            self.gyro_hi[k] - self.gyro_lo[k] <= REST_GYRO_SPREAD
+                && self.accel_hi[k] - self.accel_lo[k] <= REST_ACCEL_SPREAD
+        })
+    }
+
+    fn gyro_mean(&self) -> [f32; 3] {
+        let n = self.n.max(1) as f64;
+        [
+            (self.gyro_sum[0] / n) as f32,
+            (self.gyro_sum[1] / n) as f32,
+            (self.gyro_sum[2] / n) as f32,
+        ]
+    }
+
+    /// Accelerometer axes gravity mostly runs along over the run.
+    fn upright_axes(&self) -> [bool; 3] {
+        let mid: Vec<f32> = (0..3).map(|k| (self.accel_lo[k] + self.accel_hi[k]) * 0.5).collect();
+        let len = (mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2]).sqrt();
+        [0, 1, 2].map(|k| mid[k].abs() > 0.7 * len)
+    }
+}
 
 struct Gyro {
     bias: [f32; 3],
@@ -26,6 +110,11 @@ struct Gyro {
     still_sum: [f64; 3],
     still_n: u32,
     manual_until: Option<Instant>,
+    /// Bias-free rest check, see `REST_GYRO_SPREAD`.
+    rest: Rest,
+    /// Bias replacements by the rest check, and when one was last logged.
+    rest_fixes: u32,
+    rest_logged: Option<Instant>,
     last_ts: Option<u32>,
     last_at: Option<Instant>,
     smooth: [f32; 2],
@@ -41,6 +130,9 @@ impl Gyro {
             still_sum: [0.0; 3],
             still_n: 0,
             manual_until: None,
+            rest: Rest::default(),
+            rest_fixes: 0,
+            rest_logged: None,
             last_ts: None,
             last_at: None,
             smooth: [0.0; 2],
@@ -73,6 +165,7 @@ impl Gyro {
         .sqrt();
 
         if let Some(until) = self.manual_until {
+            self.rest = Rest::default();
             for k in 0..3 {
                 self.still_sum[k] += raw[k] as f64;
             }
@@ -126,6 +219,7 @@ impl Gyro {
             } else {
                 self.reset_still();
             }
+            self.rest_sample(raw, s, acc, now);
         }
         [
             (raw[0] - self.bias[0]) / COUNTS_PER_DPS,
@@ -138,6 +232,52 @@ impl Gyro {
         self.still_since = None;
         self.still_sum = [0.0; 3];
         self.still_n = 0;
+    }
+
+    /// Bias-free rest check. A run that rests long enough, whose mean is
+    /// well away from the bias, replaces it outright: the stored bias is
+    /// what is wrong, so blending toward the right one would only creep.
+    /// A bias already within `REST_FIX_OFF` is never touched here.
+    fn rest_sample(&mut self, raw: [f32; 3], s: &InputState, acc: f32, now: Instant) {
+        let accel = [s.accel[0] as f32, s.accel[1] as f32, s.accel[2] as f32];
+        // Held up against nothing but gravity, as in the quiet check.
+        if (acc - COUNTS_PER_G).abs() >= 900.0 {
+            self.rest = Rest::default();
+            return;
+        }
+        if !self.rest.add(raw, accel, now) {
+            // Moved: a new run starts from this sample.
+            self.rest = Rest::default();
+            self.rest.add(raw, accel, now);
+            return;
+        }
+        let held = now.duration_since(self.rest.since.unwrap_or(now));
+        if held < REST_TIME || self.rest.n < REST_MIN_SAMPLES {
+            return;
+        }
+        let mean = self.rest.gyro_mean();
+        let off = [0, 1, 2].map(|k| (mean[k] - self.bias[k]).abs() > REST_FIX_OFF);
+        if !off.iter().any(|&o| o) || mean.iter().any(|m| m.abs() > REST_MAX_BIAS) {
+            // The bias is fine (or the mean is implausible): check afresh.
+            self.rest = Rest::default();
+            return;
+        }
+        let upright = self.rest.upright_axes();
+        if (0..3).any(|k| off[k] && upright[k]) && held < REST_TIME_UPRIGHT_AXIS {
+            return;
+        }
+        let was = self.bias;
+        self.bias = mean;
+        self.calibrated = true;
+        self.rest_fixes += 1;
+        self.reset_still();
+        self.rest = Rest::default();
+        if self.rest_logged.map_or(true, |t| now.duration_since(t) >= REST_LOG_EVERY) {
+            self.rest_logged = Some(now);
+            log::info!("gyro auto-recalibrated: bias {:?} (was {:?})", self.bias, was);
+        } else {
+            log::debug!("gyro auto-recalibrated: bias {:?} (was {:?})", self.bias, was);
+        }
     }
 
     /// Turning speed after inversion, deadzone, and smoothing: horizontal
@@ -613,9 +753,9 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
             t.gyro = Some(on);
             drop(t);
             engine.toast(if on {
-                crate::i18n::tr("Gyro mouse on")
+                crate::i18n::tr("Gyro on")
             } else {
-                crate::i18n::tr("Gyro mouse off")
+                crate::i18n::tr("Gyro off")
             });
         }
         Action::ToggleTouchpadMouse => {
@@ -2205,5 +2345,187 @@ mod tests {
         profile.virtual_out.touch_passthrough = false;
         let pad = virtual_pad(&profile, &s, 0, 0, modes.0, modes.1, TouchMode::Mouse, [0.0; 2]);
         assert!(!pad.buttons.has(Button::Touchpad));
+    }
+}
+
+#[cfg(test)]
+mod gyro_calibration_tests {
+    use super::*;
+
+    /// 250 reports a second, like a DualSense.
+    const STEP: Duration = Duration::from_millis(4);
+
+    /// Small deterministic noise in -1..1.
+    struct Noise(u32);
+    impl Noise {
+        fn next(&mut self) -> f32 {
+            self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (self.0 >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+        }
+    }
+
+    /// A motion report: gyro in raw counts, accel in g.
+    fn imu(gyro: [f32; 3], accel: [f32; 3]) -> InputState {
+        InputState {
+            gyro: gyro.map(|v| v.round() as i16),
+            accel: accel.map(|v| (v * COUNTS_PER_G).round() as i16),
+            motion_valid: true,
+            full: true,
+            ..InputState::default()
+        }
+    }
+
+    /// The sensor's true resting reading in counts (pitch, yaw, roll).
+    const TRUE_BIAS: [f32; 3] = [6.0, -5.0, 3.0];
+
+    /// Feed `secs` of a controller lying flat (gravity along y), turning
+    /// at `turn` deg/s about pitch, yaw, roll, with sensor noise of about
+    /// +-0.25 deg/s and +-0.005 g. Pitch and roll tip gravity as they turn.
+    fn feed(g: &mut Gyro, t: &mut Instant, noise: &mut Noise, secs: f32, turn: [f32; 3], angle: &mut [f32; 2]) {
+        let n = (secs / STEP.as_secs_f32()).round() as u32;
+        for _ in 0..n {
+            angle[0] += turn[0].to_radians() * STEP.as_secs_f32();
+            angle[1] += turn[2].to_radians() * STEP.as_secs_f32();
+            let gyro = [0, 1, 2].map(|k| TRUE_BIAS[k] + turn[k] * COUNTS_PER_DPS + noise.next() * 4.0);
+            let accel = [
+                angle[1].sin() + noise.next() * 0.005,
+                angle[0].cos() * angle[1].cos() + noise.next() * 0.005,
+                angle[0].sin() + noise.next() * 0.005,
+            ];
+            *t += STEP;
+            g.update_bias(&imu(gyro, accel), *t);
+        }
+    }
+
+    fn rig(bias_dps: [f32; 3]) -> (Gyro, Instant, Noise, [f32; 2]) {
+        let mut g = Gyro::new();
+        g.bias = [0, 1, 2].map(|k| TRUE_BIAS[k] + bias_dps[k] * COUNTS_PER_DPS);
+        g.calibrated = true;
+        (g, Instant::now(), Noise(7), [0.0; 2])
+    }
+
+    fn error_dps(g: &Gyro) -> [f32; 3] {
+        [0, 1, 2].map(|k| (g.bias[k] - TRUE_BIAS[k]) / COUNTS_PER_DPS)
+    }
+
+    #[test]
+    fn a_bad_bias_is_replaced_while_resting() {
+        // 5 deg/s off on yaw (the axis gravity runs along on a desk, so the
+        // slow path) and on pitch: the quiet check alone never fixes this.
+        let (mut g, mut t, mut noise, mut angle) = rig([-5.0, 5.0, 0.0]);
+        feed(&mut g, &mut t, &mut noise, 4.5, [0.0; 3], &mut angle);
+        let e = error_dps(&g);
+        assert!(e.iter().all(|v| v.abs() < 0.1), "bias still off by {e:?} deg/s");
+        assert!(g.rest_fixes >= 1);
+        let dps = g.update_bias(&imu(TRUE_BIAS, [0.0, 1.0, 0.0]), t + STEP);
+        assert!(dps.iter().all(|v| v.abs() < 0.1), "resting reads {dps:?}");
+
+        // Off on pitch only: gravity can see that axis, so 2 s is enough.
+        let (mut g, mut t, mut noise, mut angle) = rig([0.0, 0.0, 0.0]);
+        g.bias[0] += 5.0 * COUNTS_PER_DPS;
+        feed(&mut g, &mut t, &mut noise, 2.2, [0.0; 3], &mut angle);
+        assert!(error_dps(&g)[0].abs() < 0.1, "{:?}", error_dps(&g));
+
+        // Never calibrated, with a bias past the old 10 deg/s limit.
+        let mut g = Gyro::new();
+        let (mut t, mut noise) = (Instant::now(), Noise(3));
+        let far = [TRUE_BIAS[0] + 12.0 * COUNTS_PER_DPS, TRUE_BIAS[1], TRUE_BIAS[2]];
+        for _ in 0..1200 {
+            t += STEP;
+            let gyro = [0, 1, 2].map(|k| far[k] + noise.next() * 4.0);
+            g.update_bias(&imu(gyro, [0.0, 1.0, 0.0]), t);
+        }
+        assert!(g.calibrated && (g.bias[0] - far[0]).abs() < 1.6, "{:?}", g.bias);
+    }
+
+    #[test]
+    fn a_slow_steady_turn_is_not_rest() {
+        // Tipping back at 3 deg/s: no jitter at all, but gravity moves.
+        let (mut g, mut t, mut noise, mut angle) = rig([0.0; 3]);
+        let before = g.bias;
+        feed(&mut g, &mut t, &mut noise, 10.0, [3.0, 0.0, 0.0], &mut angle);
+        assert_eq!(g.rest_fixes, 0);
+        assert_eq!(g.bias, before);
+
+        // Rolling slowly at 1.6 deg/s, just past the fix threshold: the rest
+        // check never replaces the bias. (The quiet check's blend, unchanged,
+        // still leans toward turns under 2.5 deg/s, as it always has; the
+        // next real rest puts it back.)
+        let (mut g, mut t, mut noise, mut angle) = rig([0.0; 3]);
+        feed(&mut g, &mut t, &mut noise, 10.0, [0.0, 0.0, 1.6], &mut angle);
+        assert_eq!(g.rest_fixes, 0);
+        feed(&mut g, &mut t, &mut noise, 10.0, [0.0; 3], &mut angle);
+        assert!(error_dps(&g).iter().all(|v| v.abs() < 0.1), "{:?}", error_dps(&g));
+
+        // Panning about gravity at 4 deg/s, held: the accelerometer can't
+        // see it, but a hand's tremor spreads the readings.
+        let (mut g, mut t, mut noise, _) = rig([0.0; 3]);
+        let before = g.bias;
+        for i in 0..2500 {
+            t += STEP;
+            let tremor = (i as f32 * STEP.as_secs_f32() * 8.0 * std::f32::consts::TAU).sin() * 1.5;
+            let gyro = [
+                TRUE_BIAS[0] + tremor * 0.5 * COUNTS_PER_DPS + noise.next() * 4.0,
+                TRUE_BIAS[1] + (4.0 + tremor) * COUNTS_PER_DPS + noise.next() * 4.0,
+                TRUE_BIAS[2] + noise.next() * 4.0,
+            ];
+            g.update_bias(&imu(gyro, [0.0, 1.0, 0.0]), t);
+        }
+        assert_eq!(g.rest_fixes, 0);
+        assert_eq!(g.bias, before);
+    }
+
+    #[test]
+    fn a_correct_bias_stays_put() {
+        let (mut g, mut t, mut noise, mut angle) = rig([0.0; 3]);
+        // Only the quiet check's blend moves it, exactly as before: compare
+        // with the same reports through the old update alone (the rest run
+        // cleared before every report, so it can never fire).
+        let mut old = Gyro::new();
+        old.bias = g.bias;
+        old.calibrated = true;
+        let (mut t_old, mut noise_old) = (t, Noise(7));
+        feed(&mut g, &mut t, &mut noise, 30.0, [0.0; 3], &mut angle);
+        for _ in 0..(30.0 / STEP.as_secs_f32()).round() as u32 {
+            let gyro = [0, 1, 2].map(|k| TRUE_BIAS[k] + noise_old.next() * 4.0);
+            let accel = [noise_old.next() * 0.005, 1.0 + noise_old.next() * 0.005, noise_old.next() * 0.005];
+            t_old += STEP;
+            old.rest = Rest::default();
+            old.update_bias(&imu(gyro, accel), t_old);
+        }
+        assert_eq!(g.rest_fixes, 0);
+        assert!(error_dps(&g).iter().all(|v| v.abs() < 0.05), "{:?}", error_dps(&g));
+        assert_eq!(g.bias, old.bias, "the rest check changed a correct bias");
+
+        // Slightly off (1 deg/s): left to the blend, never replaced.
+        let (mut g, mut t, mut noise, mut angle) = rig([1.0, -1.0, 1.0]);
+        feed(&mut g, &mut t, &mut noise, 20.0, [0.0; 3], &mut angle);
+        assert_eq!(g.rest_fixes, 0);
+        assert!(error_dps(&g).iter().all(|v| v.abs() < 0.05), "{:?}", error_dps(&g));
+    }
+
+    #[test]
+    fn manual_calibration_still_averages_its_two_seconds() {
+        let (mut g, mut t, mut noise, mut angle) = rig([5.0, -5.0, 5.0]);
+        // As the pipeline does on the Calibrate gyro button.
+        g.manual_until = Some(t + Duration::from_millis(2000));
+        g.reset_still();
+        // Even moving slowly, manual calibration takes the plain mean.
+        feed(&mut g, &mut t, &mut noise, 2.1, [0.0, 0.5, 0.0], &mut angle);
+        assert!(g.manual_until.is_none() && g.calibrated);
+        let e = error_dps(&g);
+        assert!((e[1] - 0.5).abs() < 0.05 && e[0].abs() < 0.05 && e[2].abs() < 0.05, "{e:?}");
+        assert_eq!(g.rest_fixes, 0);
+
+        // A fresh manual calibration at rest lands on the true bias and the
+        // rest check leaves it there.
+        g.manual_until = Some(t + Duration::from_millis(2000));
+        g.reset_still();
+        feed(&mut g, &mut t, &mut noise, 2.1, [0.0; 3], &mut angle);
+        assert!(error_dps(&g).iter().all(|v| v.abs() < 0.05), "{:?}", error_dps(&g));
+        let after = g.bias;
+        feed(&mut g, &mut t, &mut noise, 6.0, [0.0; 3], &mut angle);
+        assert_eq!(g.rest_fixes, 0);
+        assert!([0, 1, 2].iter().all(|&k| (g.bias[k] - after[k]).abs() < 0.05 * COUNTS_PER_DPS));
     }
 }

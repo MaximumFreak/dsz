@@ -18,7 +18,7 @@ use ds_proto::stream::{self, StreamCounters, BLOCKS, HAPTIC_FRAME, OPUS_FRAME, O
 use ds_proto::Buttons;
 
 use super::audio::Sub;
-use super::dsp::{resample_window, soft_clip, HapticFilter, Limiter, Squeeze};
+use super::dsp::{haptic_clip, resample_window, soft_clip, HapticFilter, Limiter, Squeeze};
 use super::game::WINDOW;
 use super::opus::{Encoder, Pcm};
 use super::synth::Synth;
@@ -36,10 +36,28 @@ const SPEAKER_GATE: f32 = 1.0 / 2048.0;
 /// get 8-bit samples over Bluetooth, which rounds the faint effects games
 /// write for a 16-bit USB DualSense down to nothing.
 pub const LEVEL_MAX: u8 = 200;
-/// Limiter ceilings: the actuators take full scale; the speaker stops a
-/// little lower, where `to_i16`'s soft clip only bends it gently.
-const HAPTICS_CEILING: f32 = 1.0;
+/// Limiter ceilings. The actuators' output stage reaches full scale at
+/// about 1.6 once a level is boosted ([`haptic_drive`]), so boosted game
+/// haptics are held there; the speaker stops a little lower, where
+/// `to_i16`'s soft clip only bends it gently.
+pub const HAPTICS_CEILING: f32 = 1.6;
 const SPEAKER_CEILING: f32 = 0.9;
+
+/// How far the actuators' output stage moves from `soft_clip` (0) to the
+/// full-range `full_clip` (1): by how much the game haptics level or the
+/// haptic rumble strength is past 100 %, all the way at 150 %. At or below
+/// 100 % it is 0, so the samples are bit for bit what they were.
+pub fn haptic_drive(game_haptics_level: Option<u8>, rumble_intensity: f32) -> f32 {
+    let game = game_haptics_level
+        .map(|l| (l.min(LEVEL_MAX) as f32 - 100.0) / 50.0)
+        .unwrap_or(0.0);
+    let rumble = if rumble_intensity.is_finite() {
+        (rumble_intensity - 1.0) / 0.5
+    } else {
+        0.0
+    };
+    game.max(rumble).clamp(0.0, 1.0)
+}
 /// Keep microphone-only control packets out of the active media clock.
 /// Each media/haptic payload already carries the microphone enable bit.
 struct MicrophoneClock {
@@ -244,6 +262,12 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     // earlier, so the stream joins it mid-sound: fade it in.
     let mut fade_in = false;
 
+    // Logged once per game session: the settings in force when a game
+    // opens the virtual pad's sound device, and whether it sends haptic
+    // audio at all (issue 29).
+    let mut was_audio_open = false;
+    let mut game_haptics_logged = false;
+
     // The stream keeps the actuators until this instant; anything that
     // needs it pushes the instant out by `IDLE_AFTER`.
     let mut stream_until = Instant::now();
@@ -294,6 +318,12 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         let microphone = capture_used.then_some(recording);
         let enabled = h.enabled && device.is_bluetooth();
         let game_src = device.game_audio.lock().clone();
+        let audio_open = game_src.is_some() && device.virt.status.lock().game_audio_open;
+        if audio_open && !was_audio_open {
+            game_haptics_logged = false;
+            super::log_game_settings(engine, device, &profile, "a game opened the virtual DualSense's sound device");
+        }
+        was_audio_open = audio_open;
         let game_speaker = game_src.is_some() && vo.game_speaker;
         let pc_speaker = h.pc_audio_on_speaker;
         let speaker_allowed = enabled && h.speaker_volume > 0 && (game_speaker || pc_speaker);
@@ -366,6 +396,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             let converting = game_src.is_some() && vo.game_haptics;
             if let Some(src) = game_src.filter(|_| vo.game_haptics) {
                 if let Some(w) = game.take(src.as_ref(), WINDOW) {
+                    if w.peak > 1e-3 && !game_haptics_logged {
+                        game_haptics_logged = true;
+                        log::info!("the game sends haptics as audio (actuator peak {:.0} %)", w.peak * 100.0);
+                    }
                     let (heavy, light) = to_rumble.convert(&w.haptics);
                     if heavy > 0 || light > 0 {
                         let until = Instant::now() + Duration::from_millis(40);
@@ -522,6 +556,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         spk.clear();
         let mut speaker_peak = 0f32;
         let mut any_haptics = false;
+        let drive = haptic_drive(
+            (game_src.is_some() && vo.game_haptics).then_some(vo.game_haptics_level),
+            h.rumble_intensity,
+        );
         for frame in frames.iter_mut().take(blocks) {
             // PC audio window
             pc_spk.clear();
@@ -537,6 +575,10 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             spk.resize(at + win, [0.0; 2]);
             if let Some(src) = game_src.as_ref() {
                 if let Some(w) = game.take(src.as_ref(), win) {
+                    if w.peak > 1e-3 && !game_haptics_logged {
+                        game_haptics_logged = true;
+                        log::info!("the game sends haptics as audio (actuator peak {:.0} %)", w.peak * 100.0);
+                    }
                     if vo.game_haptics {
                         let mut g = [[0f32; 2]; 32];
                         resample_window(&mut prev_g, &w.haptics, &mut g);
@@ -563,8 +605,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             synth.render(&mut hap);
             let mut peak = [0f32; 2];
             for (k, s) in hap.iter().enumerate() {
-                let l = soft_clip(s[0]);
-                let r = soft_clip(s[1]);
+                let l = haptic_clip(s[0], drive);
+                let r = haptic_clip(s[1], drive);
                 peak[0] = peak[0].max(l.abs());
                 peak[1] = peak[1].max(r.abs());
                 frame[2 * k] = stream::haptic_sample(l);
@@ -792,6 +834,78 @@ mod tests {
         let mut a = vec![[0.0f32; 2]; 1];
         add_level(&mut a, &mut [[0.1, 0.1]], 255, &mut Limiter::new(3000.0, 0.08, 1.0));
         assert!((a[0][0] - 0.2).abs() < 1e-6);
+    }
+
+    /// The actuator bytes for one window of game haptics at `level`, as
+    /// the stream builds them (no other sources).
+    fn game_bytes(input: &[[f32; 2]], level: u8, rumble: f32) -> Vec<u8> {
+        let mut hap = vec![[0f32; 2]; input.len()];
+        let mut lim = Limiter::new(3000.0, 0.08, HAPTICS_CEILING);
+        add_level(&mut hap, &mut input.to_vec(), level, &mut lim);
+        let drive = haptic_drive(Some(level), rumble);
+        hap.iter()
+            .flat_map(|s| [stream::haptic_sample(haptic_clip(s[0], drive)), stream::haptic_sample(haptic_clip(s[1], drive))])
+            .collect()
+    }
+
+    fn sine(amp: f32) -> Vec<[f32; 2]> {
+        (0..96).map(|i| {
+            let v = (i as f32 * std::f32::consts::TAU * 150.0 / 3000.0).sin() * amp;
+            [v, -v]
+        }).collect()
+    }
+
+    fn peak(bytes: &[u8]) -> i32 {
+        bytes.iter().map(|&b| (b as i8 as i32).abs()).max().unwrap()
+    }
+
+    #[test]
+    fn default_levels_give_the_same_bytes_as_before() {
+        // 0.4.4's output stage: plain sum, soft_clip, signed byte.
+        let old = |input: &[[f32; 2]], level: u8| -> Vec<u8> {
+            let lvl = level as f32 / 100.0;
+            input.iter()
+                .flat_map(|s| [stream::haptic_sample(soft_clip(s[0] * lvl)), stream::haptic_sample(soft_clip(s[1] * lvl))])
+                .collect()
+        };
+        for amp in [0.0f32, 0.01, 0.1, 0.5, 0.7, 0.9, 1.0] {
+            for level in [0u8, 50, 100] {
+                for rumble in [0.0f32, 0.5, 1.0] {
+                    assert_eq!(game_bytes(&sine(amp), level, rumble), old(&sine(amp), level), "{amp} {level} {rumble}");
+                }
+            }
+        }
+        assert_eq!(haptic_drive(Some(100), 1.0), 0.0);
+        assert_eq!(haptic_drive(None, 1.0), 0.0);
+        assert_eq!(haptic_drive(Some(0), 0.0), 0.0);
+        assert_eq!(haptic_drive(Some(100), f32::NAN), 0.0);
+    }
+
+    /// Issue 29: at 200 % loud effects came out at 85 % of full scale, as
+    /// at 100 % (the limiter took the boost back and `soft_clip` stops at
+    /// 0.85). Now the level is felt across the range.
+    #[test]
+    fn haptics_level_past_100_is_stronger_for_loud_and_faint_effects() {
+        let full = |level| peak(&game_bytes(&sine(1.0), level, 1.0));
+        assert_eq!(full(100), 108, "what 0.4.4 sent for a full-scale effect");
+        assert!(full(150) >= 126, "{}", full(150));
+        assert_eq!(full(200), 127);
+        let mid = |level| peak(&game_bytes(&sine(0.5), level, 1.0));
+        assert_eq!(mid(100), 64);
+        assert!(mid(200) >= 115, "{}", mid(200));
+        let faint = |level| peak(&game_bytes(&sine(0.05), level, 1.0));
+        assert!((faint(200) - 2 * faint(100)).abs() <= 1, "faint effects double: {} {}", faint(100), faint(200));
+        // Each step up is at least as strong.
+        let mut last = 0;
+        for level in (100..=200).step_by(10) {
+            let p = peak(&game_bytes(&sine(0.9), level, 1.0));
+            assert!(p >= last, "{level}: {p} < {last}");
+            last = p;
+        }
+        // Rumble strength past 100 % opens the same headroom.
+        assert_eq!(haptic_drive(Some(100), 1.5), 1.0);
+        assert!((haptic_drive(Some(125), 1.0) - 0.5).abs() < 1e-6);
+        assert_eq!(haptic_drive(Some(255), 1.0), 1.0);
     }
 
     #[test]

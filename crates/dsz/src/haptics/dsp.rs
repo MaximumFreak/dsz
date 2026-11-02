@@ -257,6 +257,31 @@ pub fn soft_clip(x: f32) -> f32 {
     }
 }
 
+/// [`soft_clip`]'s curve, but reaching full scale: the same below 0.7,
+/// a tanh knee above it that gives 0.93 for 1.0 and 0.998 for 1.6, where
+/// `soft_clip` stops at 0.85 and 0.93. A boosted level uses it, so loud
+/// effects get the actuators' whole range (±127) instead of 85 % of it.
+pub fn full_clip(x: f32) -> f32 {
+    let a = x.abs();
+    if a <= 0.7 {
+        x
+    } else {
+        (0.7 + 0.3 * ((a - 0.7) / 0.3).tanh()).copysign(x)
+    }
+}
+
+/// The actuators' output stage: [`soft_clip`] at `drive` 0, bit for bit,
+/// moving to [`full_clip`] as `drive` goes to 1 (a level boosted past
+/// 100 %; see `streamer::haptic_drive`).
+#[inline]
+pub fn haptic_clip(x: f32, drive: f32) -> f32 {
+    if drive <= 0.0 {
+        return soft_clip(x);
+    }
+    let soft = soft_clip(x);
+    soft + (full_clip(x) - soft) * drive.min(1.0)
+}
+
 /// Peak limiter for a level boosted past 100 %: quiet sound gets the whole
 /// boost, loud sound is held at the ceiling instead of being squashed by
 /// `soft_clip`. The gain drops at once, so no sample passes the ceiling,
@@ -295,6 +320,25 @@ impl Limiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn haptic_clip_is_soft_clip_at_no_drive_and_reaches_full_scale() {
+        for i in -300..=300 {
+            let x = i as f32 / 100.0;
+            assert_eq!(haptic_clip(x, 0.0).to_bits(), soft_clip(x).to_bits(), "{x}");
+            assert_eq!(full_clip(x).abs() <= 1.0, true);
+            // Monotonic at any drive.
+            for d in [0.25f32, 0.5, 1.0] {
+                assert!(haptic_clip(x + 0.01, d) >= haptic_clip(x, d) - 1e-6, "{x} {d}");
+            }
+        }
+        assert_eq!(full_clip(0.5), 0.5, "below the knee nothing changes");
+        assert!((soft_clip(1.0) - 0.85).abs() < 1e-6);
+        assert!(full_clip(1.0) > 0.92);
+        assert!(full_clip(1.6) > 0.998);
+        assert!(full_clip(-1.6) < -0.998);
+        assert!(haptic_clip(f32::NAN, 1.0).is_nan());
+    }
 
     #[test]
     fn limiter_holds_the_ceiling_and_recovers() {
