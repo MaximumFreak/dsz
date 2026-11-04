@@ -119,6 +119,9 @@ struct Gyro {
     last_at: Option<Instant>,
     smooth: [f32; 2],
     rem: [f32; 2],
+    /// Angle catch-up: turning the stick couldn't give yet, in seconds of
+    /// full tilt per axis.
+    owed: [f32; 2],
 }
 
 impl Gyro {
@@ -137,6 +140,7 @@ impl Gyro {
             last_at: None,
             smooth: [0.0; 2],
             rem: [0.0; 2],
+            owed: [0.0; 2],
         }
     }
 
@@ -343,7 +347,58 @@ impl Gyro {
         let full = g.stick_speed.max(1.0);
         [h * gain / full, v * gain * g.vertical_ratio / full]
     }
+
+    /// Angle catch-up on the gyro's stick push `want` (share of full tilt,
+    /// unclamped) over `dt` seconds. A push past full tilt is clamped to
+    /// the rim and the rest owed; owed turning is added while there is room
+    /// under full tilt, so the game ends up turned as far as the
+    /// controller was, just later. Turning back cancels what is owed on
+    /// that axis, and at most `CATCHUP_MAX` seconds of full tilt are kept.
+    fn catch_up(&mut self, want: [f32; 2], dt: f32) -> [f32; 2] {
+        let len = |v: [f32; 2]| (v[0] * v[0] + v[1] * v[1]).sqrt();
+        if !(dt > 0.0) || !want.iter().all(|v| v.is_finite()) {
+            self.owed = [0.0; 2];
+            return want;
+        }
+        for k in 0..2 {
+            if want[k] * self.owed[k] < 0.0 && want[k].abs() > CATCHUP_CANCEL {
+                self.owed[k] = 0.0;
+            }
+        }
+        let m = len(want);
+        if m > 1.0 {
+            let out = [want[0] / m, want[1] / m];
+            for k in 0..2 {
+                self.owed[k] += (want[k] - out[k]) * dt;
+            }
+            let o = len(self.owed);
+            if o > CATCHUP_MAX {
+                self.owed = [self.owed[0] * CATCHUP_MAX / o, self.owed[1] * CATCHUP_MAX / o];
+            }
+            return out;
+        }
+        if self.owed == [0.0; 2] {
+            return want;
+        }
+        let total = [want[0] + self.owed[0] / dt, want[1] + self.owed[1] / dt];
+        let tm = len(total);
+        let out = if tm > 1.0 { [total[0] / tm, total[1] / tm] } else { total };
+        for k in 0..2 {
+            self.owed[k] -= (out[k] - want[k]) * dt;
+        }
+        if len(self.owed) < 1e-5 {
+            self.owed = [0.0; 2];
+        }
+        out
+    }
 }
+
+/// Angle catch-up keeps at most this many seconds of full tilt owed, so a
+/// wild swing can't keep the camera turning for long.
+const CATCHUP_MAX: f32 = 1.0;
+/// A push the other way (share of full tilt) past this drops what is owed
+/// on that axis: the player has turned back.
+const CATCHUP_CANCEL: f32 = 0.05;
 
 /// Turning speed (deg/s, after steadiness and smoothing) that still reads
 /// as a resting hand for the gyro stick.
@@ -1071,9 +1126,13 @@ impl Pipeline {
                     if !self.gyro_was_active {
                         self.gyro.rem = [0.0; 2];
                         self.gyro.smooth = [0.0; 2];
+                        self.gyro.owed = [0.0; 2];
                     }
                     if mode == GyroMode::RightStick {
                         gyro_stick = self.gyro.stick(&profile.gyro, dps);
+                        if profile.gyro.angle_catchup {
+                            gyro_stick = self.gyro.catch_up(gyro_stick, gdt);
+                        }
                     } else {
                         self.gyro.mouse(&profile.gyro, dps, gdt);
                     }
@@ -2169,6 +2228,65 @@ mod tests {
         // The gyro turning against the stick slows it down.
         let [x, _] = gyro_mix([0.6, 0.0], [-0.1, 0.0], 0.2, 1.0);
         assert!((x - 0.52).abs() < 1e-4);
+    }
+
+    #[test]
+    fn angle_catchup_is_off_by_default_and_old_profiles_load_without_it() {
+        assert!(!crate::profile::Gyro::default().angle_catchup);
+        let g: crate::profile::Gyro =
+            serde_json::from_str(r#"{"mode":"RightStick","stick_speed":90.0}"#).unwrap();
+        assert!(!g.angle_catchup);
+    }
+
+    #[test]
+    fn angle_catchup_plays_out_a_turn_past_full_tilt() {
+        let mut gyro = Gyro::new();
+        let dt = 0.004;
+        // 0.1 s at twice full tilt: the stick gives full tilt, and owes
+        // 0.1 s more of it.
+        for _ in 0..25 {
+            assert_eq!(gyro.catch_up([2.0, 0.0], dt), [1.0, 0.0]);
+        }
+        let mut given = 0.0;
+        let mut ticks = 0;
+        while gyro.owed != [0.0; 2] && ticks < 1000 {
+            let [x, y] = gyro.catch_up([0.0, 0.0], dt);
+            assert!(x <= 1.0 + 1e-6 && y == 0.0);
+            given += x * dt;
+            ticks += 1;
+        }
+        assert!((given - 0.1).abs() < 1e-3, "paid out {given}");
+        assert_eq!(gyro.catch_up([0.3, 0.0], dt), [0.3, 0.0], "nothing left owed");
+    }
+
+    #[test]
+    fn angle_catchup_leaves_turns_under_full_tilt_alone() {
+        let mut gyro = Gyro::new();
+        for v in [[0.0, 0.0], [0.5, -0.2], [-0.99, 0.0], [0.6, 0.8]] {
+            assert_eq!(gyro.catch_up(v, 0.004), v);
+        }
+        assert_eq!(gyro.owed, [0.0; 2]);
+    }
+
+    #[test]
+    fn angle_catchup_stops_when_turning_back_and_is_capped() {
+        let mut gyro = Gyro::new();
+        for _ in 0..25 {
+            gyro.catch_up([3.0, 0.0], 0.004);
+        }
+        assert!(gyro.owed[0] > 0.0);
+        let [x, _] = gyro.catch_up([-0.5, 0.0], 0.004);
+        assert_eq!(x, -0.5, "turning back cancels the catch-up");
+        assert_eq!(gyro.owed, [0.0; 2]);
+        // A long, wild swing keeps at most CATCHUP_MAX owed.
+        for _ in 0..2000 {
+            gyro.catch_up([0.0, 50.0], 0.004);
+        }
+        let o = (gyro.owed[0].powi(2) + gyro.owed[1].powi(2)).sqrt();
+        assert!((o - CATCHUP_MAX).abs() < 1e-4);
+        // Bad input or time drops it.
+        assert_eq!(gyro.catch_up([f32::NAN, 0.0], 0.004)[1], 0.0);
+        assert_eq!(gyro.owed, [0.0; 2]);
     }
 
     #[test]
