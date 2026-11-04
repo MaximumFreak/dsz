@@ -185,6 +185,7 @@
   "Couldn't add the controller microphone to Windows; trying again in 30 seconds.": "No se pudo añadir el micrófono del mando a Windows; se reintentará en 30 segundos.",
   "Four rising notes, then a steady tone. The controller's microphone listens for clicks.": "Cuatro notas ascendentes y luego un tono constante. El micrófono del mando detecta chasquidos.",
   "A game is using the virtual DualSense; its speaker sound plays here.": "Un juego está usando el DualSense virtual; el sonido de su altavoz se reproduce aquí.",
+  "A game is using the virtual DualSense; its haptics play here.": "Un juego está usando el DualSense virtual; su háptica se reproduce aquí.",
   "A DualShock 4 has rumble motors, not the DualSense voice coils. Rumble and button clicks use classic rumble. The haptic stream is DualSense only.": "El DualShock 4 usa motores de vibración distintos a los del DualSense. La vibración y las pulsaciones usan vibración clásica. La transmisión háptica solo funciona con DualSense.",
   "This controller is on USB. PCM haptics stream over Bluetooth only, so rumble and button clicks use classic rumble here.": "Este mando está conectado por USB. La háptica PCM solo se transmite por Bluetooth, así que la vibración y las pulsaciones usan vibración clásica.",
   "Resistance and vibration for L2 and R2. Pull a trigger to feel it while you edit.": "Resistencia y vibración para L2 y R2. Pulsa un gatillo para sentir los cambios mientras editas.",

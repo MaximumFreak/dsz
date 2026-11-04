@@ -249,6 +249,9 @@ pub struct Device {
     /// Game audio for the haptics thread: a virtual DualSense's PCM ring,
     /// or the test signal.
     pub game_audio: Mutex<Option<Arc<dyn crate::haptics::game::PcmSource>>>,
+    /// A running test signal in `game_audio`, and what it set aside: the
+    /// virtual DualSense's own stream, put back when the test ends.
+    game_audio_test: Mutex<Option<GameAudioTest>>,
     pub force_output: AtomicBool,
     pub stop: AtomicBool,
     pub dead: AtomicBool,
@@ -366,6 +369,48 @@ impl Device {
         })
     }
 
+    /// Play a test signal through the game-audio path. A virtual
+    /// DualSense's own stream is set aside while no game has its sound
+    /// device open, and put back by `end_game_audio_test`. False while a
+    /// game or another test is using the path.
+    pub fn begin_game_audio_test(&self, src: Arc<dyn crate::haptics::game::PcmSource>) -> bool {
+        let open = self.virt.status.lock().game_audio_open;
+        let mut g = self.game_audio.lock();
+        let mut test = self.game_audio_test.lock();
+        if open || test.is_some() {
+            return false;
+        }
+        let set_aside = g.replace(src.clone());
+        *test = Some(GameAudioTest { src, set_aside });
+        drop(test);
+        drop(g);
+        let _ = self.haptics_wake_tx.try_send(());
+        true
+    }
+
+    /// End the test `begin_game_audio_test` started with `src`. What it
+    /// set aside comes back, unless the virtual pad changed meanwhile and
+    /// the path already holds the new pad's stream.
+    pub fn end_game_audio_test(&self, src: &Arc<dyn crate::haptics::game::PcmSource>) {
+        let mut g = self.game_audio.lock();
+        let mut test = self.game_audio_test.lock();
+        if !test.as_ref().is_some_and(|t| same_source(&t.src, src)) {
+            return;
+        }
+        let t = test.take().unwrap();
+        if g.as_ref().is_some_and(|x| same_source(x, src)) {
+            *g = t.set_aside;
+        }
+        drop(test);
+        drop(g);
+        let _ = self.haptics_wake_tx.try_send(());
+    }
+
+    /// A game or a test is using the game-audio path.
+    pub fn game_audio_busy(&self) -> bool {
+        self.virt.status.lock().game_audio_open || self.game_audio_test.lock().is_some()
+    }
+
     /// Play the speaker test through the game-audio path and listen to it
     /// with the controller's own microphone; the result is logged and kept
     /// in `speaker_test_result`, and the microphone audio is saved as
@@ -375,12 +420,8 @@ impl Device {
         use crate::haptics::game::{TestSignal, TestSource};
         let len = Duration::from_millis(4000);
         let src = Arc::new(TestSource::new(len, TestSignal::Speaker));
-        {
-            let mut g = self.game_audio.lock();
-            if g.is_some() {
-                return false;
-            }
-            *g = Some(src.clone());
+        if !self.begin_game_audio_test(src.clone()) {
+            return false;
         }
         *self.mic_tap.lock() = Some(Vec::with_capacity(512));
         self.microphone.clear();
@@ -391,16 +432,7 @@ impl Device {
         std::thread::spawn(move || {
             // The sound plus the cushion and the radio's delay.
             std::thread::sleep(len + Duration::from_millis(900));
-            {
-                let mut g = d.game_audio.lock();
-                let ours = g
-                    .as_ref()
-                    .map(|x| Arc::as_ptr(x) as *const () == Arc::as_ptr(&src) as *const ())
-                    .unwrap_or(false);
-                if ours {
-                    *g = None;
-                }
-            }
+            d.end_game_audio_test(&(src as Arc<dyn crate::haptics::game::PcmSource>));
             let packets = d.mic_tap.lock().take().unwrap_or_default();
             d.microphone.clear();
             d.kick();
@@ -902,6 +934,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         mirror: Mutex::new(mirror),
         virt: Default::default(),
         game_audio: Mutex::new(None),
+        game_audio_test: Mutex::new(None),
         force_output: AtomicBool::new(true),
         stop: AtomicBool::new(false),
         dead: AtomicBool::new(false),
@@ -1587,6 +1620,7 @@ impl Device {
             mirror: Mutex::new(Mirror::default()),
             virt: Default::default(),
             game_audio: Mutex::new(None),
+            game_audio_test: Mutex::new(None),
             force_output: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             dead: AtomicBool::new(false),
@@ -1594,6 +1628,16 @@ impl Device {
             flight: Default::default(),
         })
     }
+}
+
+/// See `Device::begin_game_audio_test`.
+struct GameAudioTest {
+    src: Arc<dyn crate::haptics::game::PcmSource>,
+    set_aside: Option<Arc<dyn crate::haptics::game::PcmSource>>,
+}
+
+fn same_source(a: &Arc<dyn crate::haptics::game::PcmSource>, b: &Arc<dyn crate::haptics::game::PcmSource>) -> bool {
+    Arc::as_ptr(a) as *const () == Arc::as_ptr(b) as *const ()
 }
 
 #[cfg(test)]
@@ -1911,5 +1955,85 @@ mod quick_charge_tests {
         let r = rig(true, &[&bt, &usb]);
         quick_charge(&r.engine, &usb);
         assert_eq!(offs(mac), 1);
+    }
+}
+
+#[cfg(test)]
+mod game_audio_test_tests {
+    use super::*;
+    use crate::haptics::game::{PcmSource, TestSignal, TestSource};
+
+    fn test_signal() -> Arc<dyn PcmSource> {
+        Arc::new(TestSource::new(Duration::from_secs(3), TestSignal::Actuators))
+    }
+
+    fn holds(d: &Device, src: &Arc<dyn PcmSource>) -> bool {
+        d.game_audio.lock().as_ref().is_some_and(|x| same_source(x, src))
+    }
+
+    #[test]
+    fn plays_with_no_virtual_dualsense() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let t = test_signal();
+        assert!(d.begin_game_audio_test(t.clone()));
+        assert!(holds(&d, &t));
+        assert!(d.game_audio_busy());
+        d.end_game_audio_test(&t);
+        assert!(d.game_audio.lock().is_none());
+        assert!(!d.game_audio_busy());
+    }
+
+    #[test]
+    fn sets_an_idle_virtual_dualsense_aside_and_puts_it_back() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let pad = test_signal();
+        *d.game_audio.lock() = Some(pad.clone());
+        let t = test_signal();
+        assert!(d.begin_game_audio_test(t.clone()));
+        assert!(holds(&d, &t));
+        // A second test waits for the first.
+        assert!(!d.begin_game_audio_test(test_signal()));
+        d.end_game_audio_test(&t);
+        assert!(holds(&d, &pad));
+        assert!(!d.game_audio_busy());
+    }
+
+    #[test]
+    fn leaves_a_game_playing_alone() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let pad = test_signal();
+        *d.game_audio.lock() = Some(pad.clone());
+        d.virt.status.lock().game_audio_open = true;
+        assert!(d.game_audio_busy());
+        let t = test_signal();
+        assert!(!d.begin_game_audio_test(t.clone()));
+        assert!(holds(&d, &pad));
+        d.end_game_audio_test(&t);
+        assert!(holds(&d, &pad));
+    }
+
+    #[test]
+    fn a_new_virtual_pad_during_the_test_keeps_its_stream() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let old = test_signal();
+        *d.game_audio.lock() = Some(old.clone());
+        let t = test_signal();
+        assert!(d.begin_game_audio_test(t.clone()));
+        let new = test_signal();
+        *d.game_audio.lock() = Some(new.clone());
+        d.end_game_audio_test(&t);
+        assert!(holds(&d, &new));
+        assert!(!d.game_audio_busy());
+    }
+
+    #[test]
+    fn a_virtual_pad_removed_during_the_test_stays_removed() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        *d.game_audio.lock() = Some(test_signal());
+        let t = test_signal();
+        assert!(d.begin_game_audio_test(t.clone()));
+        *d.game_audio.lock() = None;
+        d.end_game_audio_test(&t);
+        assert!(d.game_audio.lock().is_none());
     }
 }

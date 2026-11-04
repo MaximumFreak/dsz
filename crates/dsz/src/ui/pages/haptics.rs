@@ -378,7 +378,7 @@ impl App {
                             });
                             if bt && h.enabled && h.speaker_volume > 0 {
                                 ui.add_space(6.0);
-                                let busy = d.game_audio.lock().is_some();
+                                let busy = d.game_audio_busy();
                                 if button(ui, crate::i18n::tr("Test speaker")).clicked() && !busy {
                                     d.start_speaker_test();
                                 }
