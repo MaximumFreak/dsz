@@ -29,8 +29,16 @@
 //! controller in DualSense mode.
 //!
 //! Results are cached by path, size, and modification time in
-//! `dualsense-detect.json`, so each exe is read once. A cached "no" from an
-//! older scan ([`SCAN_VERSION`]) is checked again.
+//! `dualsense-detect.json`, so each exe is read once. A cached answer from
+//! an older scan ([`SCAN_VERSION`]) is checked again, "yes" as well as "no",
+//! so a sign the scan stops trusting stops counting.
+//!
+//! Rewired's driver is a weak sign: every recent `Rewired_Core.dll` has it,
+//! and whether the game shows PlayStation prompts or uses the light usually
+//! lives in its Unity scene data (a list of Rewired pad types it compares
+//! the pad against), which the scan doesn't read. Most Rewired games do use
+//! a DualSense; one that doesn't (KeyWe) needs a per-game rule. Reading
+//! that scene data would tell them apart (not done yet).
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -69,8 +77,7 @@ const SDL_OPENERS: &[&str] = &[
 /// Rewired's DualSense driver, in `Rewired_Core.dll`.
 const REWIRED_DS: &str = "DualSenseExtension";
 
-/// Bumped when the scan learns new signs, so programs it said no to are
-/// read again.
+/// Bumped when the scan's signs change, so every program is read again.
 const SCAN_VERSION: u32 = 3;
 
 /// Reported for a UTF-16 "DualSense" next to `hid.dll`.
@@ -134,10 +141,7 @@ impl Detector {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         if let Some(e) = self.cache.lock().get(&key) {
-            if e.size == size
-                && e.modified == modified
-                && (e.found.is_some() || e.version >= SCAN_VERSION)
-            {
+            if e.size == size && e.modified == modified && e.version >= SCAN_VERSION {
                 return e.found.clone();
             }
         }

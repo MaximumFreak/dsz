@@ -539,7 +539,15 @@ impl App {
                             );
                         }
                     }
-                    let found = engine.dsdetect.detected();
+                    let mut found = engine.dsdetect.detected();
+                    // Found by older versions, or by the virtual pad's checks.
+                    found.retain(|(path, _)| {
+                        let name = std::path::Path::new(path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        !crate::games::is_helper(&name, Some(path))
+                    });
                     ui.add_space(4.0);
                     if found.is_empty() {
                         muted(ui, crate::i18n::tr("No DualSense games seen yet. They show up here the first time they run."));

@@ -6,7 +6,6 @@
   "mappings": [
     {
       "button": "Ps",
-      "mute": true,
       "action": { "kind": "xbox", "button": "Guide" }
     },
     {

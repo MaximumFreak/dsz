@@ -153,7 +153,7 @@ impl App {
     /// Feed a test signal through the game-audio path of `d`, unless a game
     /// is already using it or a test is running.
     pub(crate) fn start_game_test(&mut self, d: &Arc<Device>, signal: TestSignal) {
-        if self.game_test.is_some() || d.game_audio.lock().is_some() {
+        if self.game_test.is_some() {
             return;
         }
         let len = match signal {
@@ -161,8 +161,9 @@ impl App {
             TestSignal::Speaker => 4,
         };
         let src = Arc::new(TestSource::new(Duration::from_secs(len), signal));
-        *d.game_audio.lock() = Some(src.clone());
-        self.game_test = Some((d.id, src));
+        if d.begin_game_audio_test(src.clone()) {
+            self.game_test = Some((d.id, src));
+        }
     }
 
     /// Detach a finished test signal. Called every frame, whatever page is
@@ -171,13 +172,7 @@ impl App {
         if let Some((id, src)) = &self.game_test {
             if src.finished() {
                 if let Some(d) = self.engine.device_list().into_iter().find(|d| d.id == *id) {
-                    let mut g = d.game_audio.lock();
-                    if g.as_ref()
-                        .map(|x| Arc::as_ptr(x) as *const () == Arc::as_ptr(src) as *const ())
-                        .unwrap_or(false)
-                    {
-                        *g = None;
-                    }
+                    d.end_game_audio_test(&(src.clone() as Arc<dyn crate::haptics::game::PcmSource>));
                 }
                 self.game_test = None;
             }
@@ -439,7 +434,7 @@ impl App {
                             toggle_row(
                                 ui,
                                 crate::i18n::tr("Game speaker"),
-                                crate::i18n::tr("The game's controller-speaker sound, to the speaker over Bluetooth"),
+                                crate::i18n::tr("The game's controller-speaker sound, to the speaker (Bluetooth or USB)"),
                                 &mut vo.game_speaker,
                             );
                             if vo.game_speaker {
@@ -492,6 +487,9 @@ impl App {
                                 self.start_game_test(d, TestSignal::Actuators);
                             }
                             muted(ui, crate::i18n::tr("Plays a sweep on the left grip, then the right, through the game-haptics path."));
+                            if !testing && d.virt.status.lock().game_audio_open {
+                                muted(ui, crate::i18n::tr("A game is using the virtual DualSense; its haptics play here."));
+                            }
                         }
                     },
                 );

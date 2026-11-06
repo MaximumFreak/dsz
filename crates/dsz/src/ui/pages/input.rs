@@ -709,11 +709,17 @@ impl App {
                                 }
                                 slider_row(
                                     ui,
-                                    crate::i18n::tr("Game curve"),
-                                    crate::i18n::tr("Raise if slow turns feel sluggish in the game"),
+                                    crate::i18n::tr("Game stick response"),
+                                    crate::i18n::tr("Matches the game's stick response. Raise if slow turns feel sluggish in the game"),
                                     &mut g.stick_curve,
                                     1.0..=3.0,
                                     "",
+                                );
+                                toggle_row(
+                                    ui,
+                                    crate::i18n::tr("Angle catch-up"),
+                                    crate::i18n::tr("After a turn faster than full tilt, keeps the stick pushed until the game has turned as far as you did"),
+                                    &mut g.angle_catchup,
                                 );
                             } else {
                                 slider_row(

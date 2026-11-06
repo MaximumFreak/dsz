@@ -41,7 +41,7 @@ pub const LEVEL_MAX: u8 = 200;
 /// haptics are held there; the speaker stops a little lower, where
 /// `to_i16`'s soft clip only bends it gently.
 pub const HAPTICS_CEILING: f32 = 1.6;
-const SPEAKER_CEILING: f32 = 0.9;
+pub(super) const SPEAKER_CEILING: f32 = 0.9;
 
 /// How far the actuators' output stage moves from `soft_clip` (0) to the
 /// full-range `full_clip` (1): by how much the game haptics level or the
@@ -191,13 +191,13 @@ impl PcAudio {
 }
 
 /// Speaker volume 1..=100 as the output report's volume byte.
-fn volume_byte(v: u8) -> u8 {
+pub(super) fn volume_byte(v: u8) -> u8 {
     let span = (SPEAKER_VOLUME_MAX - SPEAKER_VOLUME_MIN) as u32;
     SPEAKER_VOLUME_MIN + ((v.clamp(1, 100) as u32 - 1) * span / 99) as u8
 }
 
 /// Headphone volume byte for a 0..=100 profile volume.
-fn headset_volume_byte(v: u8) -> u8 {
+pub(super) fn headset_volume_byte(v: u8) -> u8 {
     (v.min(100) as u32 * ds_proto::output::HEADSET_VOLUME_MAX as u32 / 100) as u8
 }
 

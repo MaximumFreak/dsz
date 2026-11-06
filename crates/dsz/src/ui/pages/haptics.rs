@@ -151,7 +151,7 @@ impl App {
         if !bt && !ds4 {
             note(
                 ui,
-                crate::i18n::tr("This controller is on USB. PCM haptics stream over Bluetooth only, so rumble and button clicks use classic rumble here."),
+                crate::i18n::tr("This controller is on USB. A game's haptics and speaker sound through the virtual DualSense play on it; rumble and button clicks use classic rumble."),
                 WARN,
             );
             ui.add_space(10.0);
@@ -316,7 +316,7 @@ impl App {
                 card(
                     ui,
                     crate::i18n::tr("Controller speaker / headset"),
-                    crate::i18n::tr("Speaker sound over Bluetooth: a game's own speaker sounds through the virtual DualSense, and PC audio if you want it"),
+                    crate::i18n::tr("A game's own speaker sounds through the virtual DualSense, and PC audio over Bluetooth if you want it"),
                     |ui| {
                         let h = &mut p.haptics;
                         slider_row(
@@ -378,7 +378,7 @@ impl App {
                             });
                             if bt && h.enabled && h.speaker_volume > 0 {
                                 ui.add_space(6.0);
-                                let busy = d.game_audio.lock().is_some();
+                                let busy = d.game_audio_busy();
                                 if button(ui, crate::i18n::tr("Test speaker")).clicked() && !busy {
                                     d.start_speaker_test();
                                 }
@@ -391,7 +391,9 @@ impl App {
                                 }
                             }
                         }
-                        if !bt || !p.haptics.enabled {
+                        if dev.is_some() && !bt {
+                            muted(ui, crate::i18n::tr("Over USB, a game's speaker sound plays here. PC audio and the test need Bluetooth."));
+                        } else if !bt || !p.haptics.enabled {
                             muted(ui, crate::i18n::tr("Needs Bluetooth and haptics streaming on."));
                         }
                     },

@@ -482,6 +482,10 @@ pub struct Gyro {
     /// Right stick output: 1..=3, the game's stick response curve to undo,
     /// so slow turns aren't slowed further. 1 = linear.
     pub stick_curve: f32,
+    /// Right stick output: the part of a turn faster than full tilt is
+    /// kept and played out at full tilt afterwards, so the game turns as
+    /// far as the controller did. Off = the stick just stays at full tilt.
+    pub angle_catchup: bool,
 }
 
 impl Default for Gyro {
@@ -500,6 +504,7 @@ impl Default for Gyro {
             stick_speed: 120.0,
             stick_min: 0.0,
             stick_curve: 1.0,
+            angle_catchup: false,
         }
     }
 }
@@ -1400,7 +1405,10 @@ mod tests {
         assert_eq!(set[0].virtual_out.kind, VirtualKind::Xbox360);
         assert_eq!(set[0].touchpad.mode, TouchMode::Mouse);
         assert_eq!(set[1].virtual_out.kind, VirtualKind::DualSense);
+        // PS presses the Xbox button and still reaches the game's pad, so
+        // other apps that read it (an overlay's open button) see it too.
         assert!(set[1].mappings.iter().any(|m| m.button == Button::Ps
+            && !m.mute
             && m.action == Action::Xbox { button: XboxPadButton::Guide }));
         // The files hold only what differs from the defaults; the rest is
         // filled in from them.
