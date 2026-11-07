@@ -181,6 +181,68 @@ pub fn probe(what: &str) {
                 Err(e) => println!("virtual {} failed: {e}", model.name()),
             }
         }
+        "replug-race" => {
+            // `replug-race <rounds>`: plug in an Xbox 360 pad, then replug it
+            // from two threads at once each round (an unpark and the
+            // raw-input check racing, as on a DualSense to Xbox profile
+            // switch), and press Guide after each. Every round must finish
+            // in a few seconds with the pad still alive and on a slot.
+            let rounds = std::env::args()
+                .skip_while(|a| a != "replug-race")
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3u32);
+            let slot: u32 = std::env::var("DSZ_PROBE_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+            usbip::reserve_slots_below(slot);
+            let sink = usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            let t0 = Instant::now();
+            let pad = match usbip::UsbPad::create(usbip::Model::Xbox360, sink) {
+                Ok(p) => std::sync::Arc::new(p),
+                Err(e) => {
+                    println!("attach failed: {e}");
+                    return;
+                }
+            };
+            let _ = pad.submit_idle();
+            let lit = |pad: &usbip::UsbPad| {
+                let t = Instant::now();
+                while !(6..=9).contains(&pad.led()) && t.elapsed() < Duration::from_secs(5) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                pad.xinput_slot()
+            };
+            println!("+{:>5} ms attached, slot {:?}", t0.elapsed().as_millis(), lit(&pad));
+            let mut ok = true;
+            for round in 1..=rounds {
+                let t = Instant::now();
+                let racers: Vec<_> = (0..2)
+                    .map(|_| {
+                        let p = pad.clone();
+                        std::thread::spawn(move || p.replug().map_err(|e| e.to_string()))
+                    })
+                    .collect();
+                let results: Vec<_> = racers.into_iter().map(|h| h.join().unwrap()).collect();
+                let _ = pad.submit_idle();
+                let slot = lit(&pad);
+                let mut p = ds_proto::virtual_pad::PadState::default();
+                p.buttons.set(ds_proto::input::Button::Ps, true);
+                let down = ds_proto::virtual_pad::x360_usb_input(&ds_proto::virtual_pad::xusb_report(&p));
+                let sent = pad.submit(&down);
+                std::thread::sleep(Duration::from_millis(300));
+                let _ = pad.submit_idle();
+                let took = t.elapsed();
+                let good = results.iter().all(|r| r.is_ok()) && pad.alive() && slot.is_some() && sent.is_ok() && took < Duration::from_secs(8);
+                ok &= good;
+                println!(
+                    "round {round}: {} in {} ms, replugs {results:?}, alive {}, slot {slot:?}, guide {sent:?}",
+                    if good { "ok" } else { "FAILED" },
+                    took.as_millis(),
+                    pad.alive()
+                );
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+            println!("{}", if ok { "all rounds ok" } else { "some rounds FAILED" });
+        }
         "x360-guide" => {
             // `x360-guide <hold ms> <wait ms>`: plug in an Xbox 360 pad,
             // wait `wait` ms after attach, hold Guide for `hold` ms.

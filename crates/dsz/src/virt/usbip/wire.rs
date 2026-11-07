@@ -8,6 +8,10 @@ pub const OP_REQ_IMPORT: u16 = 0x8003;
 pub const OP_REP_IMPORT: u16 = 0x0003;
 pub const OP_REQ_DEVLIST: u16 = 0x8005;
 pub const OP_REP_DEVLIST: u16 = 0x0005;
+/// Import reply status: the device is taken (already attached).
+pub const ST_DEV_BUSY: u32 = 2;
+/// Import reply status: no such device.
+pub const ST_NODEV: u32 = 4;
 
 pub const CMD_SUBMIT: u32 = 1;
 pub const CMD_UNLINK: u32 = 2;

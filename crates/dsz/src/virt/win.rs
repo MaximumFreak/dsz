@@ -96,12 +96,35 @@ pub fn open_overlapped(path: &str) -> io::Result<Handle> {
 
 /// Manual-reset event plus an OVERLAPPED that points at it. Boxed so the
 /// kernel's pointer stays valid while a request is pending.
+///
+/// A request the driver never gives back (it ignores the cancel) leaves the
+/// kernel holding pointers to the OVERLAPPED, its event and the output
+/// buffer. Those are then leaked rather than freed, so the caller can go on
+/// instead of waiting forever, and the late completion lands in valid memory.
 pub struct Overlapped {
-    pub ov: Box<OVERLAPPED>,
-    ev: Handle,
+    ov: std::mem::ManuallyDrop<Box<OVERLAPPED>>,
+    ev: std::mem::ManuallyDrop<Handle>,
+    /// Output buffer of the request in flight ([`Overlapped::call`]).
+    out: Vec<u8>,
+    stuck: bool,
 }
 
 unsafe impl Send for Overlapped {}
+
+/// How long a cancelled request may take to come back.
+const CANCEL_WAIT_MS: u32 = 2_000;
+
+impl Drop for Overlapped {
+    fn drop(&mut self) {
+        if self.stuck {
+            return;
+        }
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut self.ov);
+            std::mem::ManuallyDrop::drop(&mut self.ev);
+        }
+    }
+}
 
 impl Overlapped {
     pub fn new() -> io::Result<Overlapped> {
@@ -112,12 +135,17 @@ impl Overlapped {
         let ev = Handle::from_raw(h);
         let mut ov: Box<OVERLAPPED> = Box::new(unsafe { std::mem::zeroed() });
         ov.hEvent = ev.raw();
-        Ok(Overlapped { ov, ev })
+        Ok(Overlapped {
+            ov: std::mem::ManuallyDrop::new(ov),
+            ev: std::mem::ManuallyDrop::new(ev),
+            out: Vec::new(),
+            stuck: false,
+        })
     }
 
     fn reset(&mut self) {
         let ev = self.ev.raw();
-        *self.ov = unsafe { std::mem::zeroed() };
+        **self.ov = unsafe { std::mem::zeroed() };
         self.ov.hEvent = ev;
         unsafe { ResetEvent(ev) };
     }
@@ -130,6 +158,9 @@ impl Overlapped {
         input: &[u8],
         output: &mut [u8],
     ) -> io::Result<Option<u32>> {
+        if self.stuck {
+            return Err(stuck_error());
+        }
         self.reset();
         let mut got = 0u32;
         let ok = unsafe {
@@ -149,7 +180,7 @@ impl Overlapped {
                 },
                 output.len() as u32,
                 &mut got,
-                &mut *self.ov,
+                &mut **self.ov,
             )
         };
         if ok != 0 {
@@ -170,23 +201,31 @@ impl Overlapped {
             return Ok(None);
         }
         let mut got = 0u32;
-        let ok = unsafe { GetOverlappedResult(h, &*self.ov, &mut got, 0) };
+        let ok = unsafe { GetOverlappedResult(h, &**self.ov, &mut got, 0) };
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(Some(got))
     }
 
-    /// Cancel a pending request and wait for the cancel to land.
-    pub fn cancel(&mut self, h: HANDLE) {
+    /// Cancel a pending request and wait (a little) for the cancel to land.
+    /// False when the driver kept the request: the caller must not reuse or
+    /// free anything the request points at.
+    pub fn cancel(&mut self, h: HANDLE) -> bool {
         unsafe {
-            CancelIoEx(h, &*self.ov);
+            CancelIoEx(h, &**self.ov);
+            if WaitForSingleObject(self.ev.raw(), CANCEL_WAIT_MS) == WAIT_TIMEOUT {
+                return false;
+            }
             let mut got = 0u32;
-            GetOverlappedResult(h, &*self.ov, &mut got, 1);
+            GetOverlappedResult(h, &**self.ov, &mut got, 0);
         }
+        true
     }
 
-    /// Synchronous IOCTL on an overlapped handle, with a timeout.
+    /// Synchronous IOCTL on an overlapped handle, with a timeout. The
+    /// output goes through a buffer of our own, which is leaked with the
+    /// OVERLAPPED if the driver ignores the cancel (see [`Overlapped`]).
     pub fn call(
         &mut self,
         h: HANDLE,
@@ -195,20 +234,37 @@ impl Overlapped {
         output: &mut [u8],
         timeout_ms: u32,
     ) -> io::Result<u32> {
-        if let Some(n) = self.start(h, code, input, output)? {
-            return Ok(n);
-        }
-        match self.wait(h, timeout_ms)? {
-            Some(n) => Ok(n),
-            None => {
-                self.cancel(h);
-                Err(io::Error::new(
+        let mut out = std::mem::take(&mut self.out);
+        out.clear();
+        out.resize(output.len(), 0);
+        let r = match self.start(h, code, input, &mut out) {
+            Ok(Some(n)) => Ok(n),
+            Err(e) => Err(e),
+            Ok(None) => match self.wait(h, timeout_ms) {
+                Ok(Some(n)) => Ok(n),
+                Err(e) => Err(e),
+                Ok(None) if self.cancel(h) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "driver request timed out",
-                ))
-            }
-        }
+                )),
+                Ok(None) => {
+                    self.stuck = true;
+                    std::mem::forget(out);
+                    return Err(stuck_error());
+                }
+            },
+        };
+        output.copy_from_slice(&out);
+        self.out = out;
+        r
     }
+}
+
+fn stuck_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        "driver request timed out and the driver kept it after the cancel",
+    )
 }
 
 /// Synchronous IOCTL on a non-overlapped handle.

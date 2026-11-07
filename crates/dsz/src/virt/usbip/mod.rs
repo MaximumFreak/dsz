@@ -605,6 +605,9 @@ struct Shared {
     /// A replug is under way: the server waits for the driver to connect
     /// again instead of ending when the connection closes.
     replug: AtomicBool,
+    /// A connection from the driver is being served (set at its import,
+    /// cleared once its session has cleaned up).
+    serving: AtomicBool,
     /// When Windows last got the device.
     attached: Mutex<Instant>,
 }
@@ -634,6 +637,9 @@ pub struct UsbPad {
     port: AtomicI32,
     slot: u32,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    /// Held across a replug, so two (the raw-input check and an unpark)
+    /// never attach this pad at once.
+    plugging: Mutex<()>,
 }
 
 impl UsbPad {
@@ -711,6 +717,7 @@ impl UsbPad {
             urbs: AtomicU64::new(0),
             led: Default::default(),
             replug: AtomicBool::new(false),
+            serving: AtomicBool::new(false),
             attached: Mutex::new(Instant::now()),
         });
         // From here on Drop releases the slot, detaches, and joins.
@@ -720,6 +727,7 @@ impl UsbPad {
             port: AtomicI32::new(0),
             slot,
             threads: Mutex::new(Vec::new()),
+            plugging: Mutex::new(()),
         };
         {
             let s = shared.clone();
@@ -836,6 +844,10 @@ impl UsbPad {
     }
 }
 
+/// How long the driver may take to connect, import and plug a pad in.
+/// A few hundred milliseconds is normal.
+const ATTACH_TIMEOUT_MS: u32 = 15_000;
+
 /// Ask the driver to connect to the server at `addr` for `busid`; the
 /// usbip-win2 port it got.
 fn plug_in(vhci_path: &str, busid: &str, addr: SocketAddr) -> io::Result<i32> {
@@ -855,16 +867,31 @@ fn plug_in(vhci_path: &str, busid: &str, addr: SocketAddr) -> io::Result<i32> {
             IOCTL_PLUGIN_HARDWARE_ONCE,
             &req,
             &mut out[..layout.size],
-            15_000,
+            ATTACH_TIMEOUT_MS,
         ) {
             Ok(_) => {
                 last = None;
+                break;
+            }
+            // A timeout is the driver busy or stuck, not a layout it
+            // rejects: the next layout would only wait as long again.
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                last = Some(e);
                 break;
             }
             Err(e) => last = Some(e),
         }
     }
     if let Some(e) = last {
+        if e.kind() == io::ErrorKind::TimedOut {
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "the usbip-win2 driver didn't answer the attach request within {} s                      ({e}). If this keeps happening, restart Windows to reset the driver.",
+                    ATTACH_TIMEOUT_MS / 1000
+                ),
+            ));
+        }
         return Err(io::Error::new(e.kind(), format!("usbip-win2 attach: {e}")));
     }
     let port = i32::from_le_bytes([out[4], out[5], out[6], out[7]]);
@@ -881,25 +908,55 @@ impl UsbPad {
         let Some(vhci_path) = win::interface_paths(&GUID_VHCI).into_iter().next() else {
             return Err(io::Error::new(io::ErrorKind::NotFound, "usbip-win2 is not installed"));
         };
-        self.shared.replug.store(true, Ordering::Release);
-        self.detach_now();
-        // The server takes the closed connection as a replug and listens.
-        let t = Instant::now();
-        while self.shared.conn.lock().is_some() && t.elapsed() < Duration::from_secs(3) {
-            std::thread::sleep(Duration::from_millis(20));
+        let asked = *self.shared.attached.lock();
+        let _one = self.plugging.lock();
+        if *self.shared.attached.lock() != asked {
+            // Another replug finished while this one waited: that is the
+            // fresh arrival this one wanted.
+            return Ok(());
         }
-        match plug_in(&vhci_path, &self.shared.busid, self.addr) {
-            Ok(port) => {
-                *self.shared.attached.lock() = Instant::now();
-                self.port.store(port, Ordering::Release);
-                Ok(())
+        if !self.alive() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "virtual controller was detached",
+            ));
+        }
+        let mut last: Option<io::Error> = None;
+        for attempt in 0..2 {
+            if attempt > 0 {
+                if let Some(e) = &last {
+                    log::info!("virtual {}: attach failed ({e}), trying once more", self.shared.model.name());
+                }
+                std::thread::sleep(Duration::from_millis(500));
             }
-            Err(e) => {
-                self.shared.replug.store(false, Ordering::Release);
-                self.shared.ended.store(true, Ordering::Release);
-                Err(e)
+            self.shared.replug.store(true, Ordering::Release);
+            self.detach_now();
+            // The server takes the closed connection as a replug and
+            // listens; the driver's next connection is refused until the
+            // old session has finished.
+            let t = Instant::now();
+            while self.shared.serving.load(Ordering::Acquire) && t.elapsed() < Duration::from_secs(3) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            match plug_in(&vhci_path, &self.shared.busid, self.addr) {
+                Ok(port) => {
+                    *self.shared.attached.lock() = Instant::now();
+                    self.port.store(port, Ordering::Release);
+                    return Ok(());
+                }
+                Err(e) => {
+                    let timed_out = e.kind() == io::ErrorKind::TimedOut;
+                    last = Some(e);
+                    // A stuck driver won't answer a second try either.
+                    if timed_out {
+                        break;
+                    }
+                }
             }
         }
+        self.shared.replug.store(false, Ordering::Release);
+        self.shared.ended.store(true, Ordering::Release);
+        Err(last.unwrap_or_else(|| io::Error::other("usbip-win2 attach failed")))
     }
 
     /// How long Windows has had the device.
@@ -977,76 +1034,124 @@ fn device_info(s: &Shared) -> Vec<u8> {
     })
 }
 
-/// Accept the driver's connection, do the import handshake, then read
-/// URBs until it goes away.
+/// Accept the driver's connections and do the import handshake on each,
+/// then serve the imported one on a thread of its own until it goes away.
+///
+/// Only one connection is served at a time. An import while one is served
+/// (two attaches racing for this pad) or after the pad ended is refused at
+/// once: usbip-win2 waits for the import reply with no timeout and takes no
+/// other attach meanwhile, so a connection left unanswered would stop every
+/// virtual pad from attaching until Windows restarts.
 fn serve(s: &Arc<Shared>, listener: TcpListener) {
+    let mut current: Option<(JoinHandle<()>, TcpStream)> = None;
     loop {
-        if !session(s, &listener) {
-            return;
-        }
-    }
-}
-
-/// Serve one connection from the driver. True when a replug wants the next.
-fn session(s: &Arc<Shared>, listener: &TcpListener) -> bool {
-    let stream = loop {
         let (mut st, peer) = match listener.accept() {
             Ok(x) => x,
             Err(e) => {
-                log::warn!("virtual {}: accept: {e}", s.model.name());
-                s.ended.store(true, Ordering::Release);
-                return false;
+                if !s.stop.load(Ordering::Acquire) {
+                    log::warn!("virtual {}: accept: {e}", s.model.name());
+                }
+                break;
             }
         };
         if s.stop.load(Ordering::Acquire) {
-            s.ended.store(true, Ordering::Release);
-            return false;
+            break;
         }
         if !peer.ip().is_loopback() {
             continue;
         }
-        let _ = st.set_read_timeout(Some(Duration::from_secs(5)));
-        let mut op = [0u8; 8];
-        if st.read_exact(&mut op).is_err() {
+        let Some(stream) = handshake(s, &mut st) else {
             continue;
+        };
+        if let Some((t, _)) = current.take() {
+            let _ = t.join();
         }
-        let code = u16::from_be_bytes([op[2], op[3]]);
-        match code {
-            wire::OP_REQ_DEVLIST => {
-                let mut r = wire::op_common(wire::OP_REP_DEVLIST, 0).to_vec();
-                r.extend_from_slice(&1u32.to_be_bytes());
-                r.extend_from_slice(&device_info(s));
-                for &(class, sub, proto) in s.model.interfaces() {
-                    r.extend_from_slice(&[class, sub, proto, 0]);
-                }
-                let _ = st.write_all(&r);
+        let Ok(kill) = stream.try_clone() else {
+            s.serving.store(false, Ordering::Release);
+            s.ended.store(true, Ordering::Release);
+            continue;
+        };
+        let s2 = s.clone();
+        match std::thread::Builder::new()
+            .name(format!("usbip-{}-conn", s.busid))
+            .spawn(move || session(&s2, stream))
+        {
+            Ok(t) => current = Some((t, kill)),
+            Err(e) => {
+                log::warn!("virtual {}: {e}", s.model.name());
+                s.serving.store(false, Ordering::Release);
+                s.ended.store(true, Ordering::Release);
             }
-            wire::OP_REQ_IMPORT => {
-                let mut busid = [0u8; 32];
-                if st.read_exact(&mut busid).is_err() {
-                    continue;
-                }
-                let want = String::from_utf8_lossy(&busid)
-                    .trim_end_matches('\0')
-                    .to_string();
-                if want != s.busid {
-                    let _ = st.write_all(&wire::op_common(wire::OP_REP_IMPORT, 4));
-                    continue;
-                }
-                let mut r = wire::op_common(wire::OP_REP_IMPORT, 0).to_vec();
-                r.extend_from_slice(&device_info(s));
-                if st.write_all(&r).is_ok() {
-                    break st;
-                }
-            }
-            _ => {}
         }
-    };
+    }
+    s.ended.store(true, Ordering::Release);
+    if let Some((t, kill)) = current {
+        let _ = kill.shutdown(Shutdown::Both);
+        let _ = t.join();
+    }
+}
+
+/// One connection's handshake: a device list, or an import. The stream to
+/// serve when this pad was imported (and `serving` is then set).
+fn handshake(s: &Shared, st: &mut TcpStream) -> Option<TcpStream> {
+    let _ = st.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut op = [0u8; 8];
+    st.read_exact(&mut op).ok()?;
+    match u16::from_be_bytes([op[2], op[3]]) {
+        wire::OP_REQ_DEVLIST => {
+            let mut r = wire::op_common(wire::OP_REP_DEVLIST, 0).to_vec();
+            r.extend_from_slice(&1u32.to_be_bytes());
+            r.extend_from_slice(&device_info(s));
+            for &(class, sub, proto) in s.model.interfaces() {
+                r.extend_from_slice(&[class, sub, proto, 0]);
+            }
+            let _ = st.write_all(&r);
+            None
+        }
+        wire::OP_REQ_IMPORT => {
+            let mut busid = [0u8; 32];
+            st.read_exact(&mut busid).ok()?;
+            let want = String::from_utf8_lossy(&busid)
+                .trim_end_matches('\0')
+                .to_string();
+            if want != s.busid {
+                let _ = st.write_all(&wire::op_common(wire::OP_REP_IMPORT, wire::ST_NODEV));
+                return None;
+            }
+            let ended = s.ended.load(Ordering::Acquire);
+            if ended || s.serving.swap(true, Ordering::AcqRel) {
+                log::warn!(
+                    "virtual {}: refused a second attach while {}",
+                    s.model.name(),
+                    if ended { "the pad is gone" } else { "the first is served" }
+                );
+                let _ = st.write_all(&wire::op_common(wire::OP_REP_IMPORT, wire::ST_DEV_BUSY));
+                return None;
+            }
+            let mut r = wire::op_common(wire::OP_REP_IMPORT, 0).to_vec();
+            r.extend_from_slice(&device_info(s));
+            if st.write_all(&r).is_err() {
+                s.serving.store(false, Ordering::Release);
+                return None;
+            }
+            st.try_clone().ok().or_else(|| {
+                s.serving.store(false, Ordering::Release);
+                None
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Serve one imported connection: read URBs until the driver goes away.
+/// A replug under way leaves the pad alive for the next connection.
+fn session(s: &Arc<Shared>, stream: TcpStream) {
     let _ = stream.set_read_timeout(None);
     let _ = stream.set_nodelay(true);
     let Ok(w) = stream.try_clone() else {
         s.ended.store(true, Ordering::Release);
-        return false;
+        s.serving.store(false, Ordering::Release);
+        return;
     };
     *s.conn.lock() = Some(Conn {
         w,
@@ -1085,13 +1190,14 @@ fn session(s: &Arc<Shared>, listener: &TcpListener) -> bool {
         s.ctl.lock().alt[i as usize] = 0;
     }
     if !s.stop.load(Ordering::Acquire) && s.replug.swap(false, Ordering::AcqRel) {
-        return true;
+        s.serving.store(false, Ordering::Release);
+        return;
     }
     s.ended.store(true, Ordering::Release);
     if !s.stop.load(Ordering::Acquire) {
         log::warn!("virtual {}: the driver closed the connection", s.model.name());
     }
-    false
+    s.serving.store(false, Ordering::Release);
 }
 
 fn unlink(s: &Shared, seq: u32, victim: u32) {
@@ -1547,6 +1653,7 @@ mod tests {
             urbs: AtomicU64::new(0),
             led: Default::default(),
             replug: AtomicBool::new(false),
+            serving: AtomicBool::new(false),
             attached: Mutex::new(Instant::now()),
         }
     }
@@ -2012,5 +2119,75 @@ mod tests {
             assert_eq!(control(&s, &mic), None, "{model:?} has no audio function");
         }
         assert_eq!(Model::DualSense.capture_interface(), Some(d::IF_CAPTURE));
+    }
+
+    /// Two attaches racing for one pad: the driver's second connection gets
+    /// an answer at once instead of waiting forever (which stalls every
+    /// later usbip-win2 attach), and a replug's import is taken afterwards.
+    #[test]
+    fn a_second_import_is_refused_at_once_while_one_is_served() {
+        let s = Arc::new(test_pad(Model::Xbox360));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = {
+            let s = s.clone();
+            std::thread::spawn(move || serve(&s, listener))
+        };
+        let import = |busid: &str| {
+            let mut c = TcpStream::connect(addr).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut req = wire::op_common(wire::OP_REQ_IMPORT, 0).to_vec();
+            let mut b = [0u8; 32];
+            b[..busid.len()].copy_from_slice(busid.as_bytes());
+            req.extend_from_slice(&b);
+            c.write_all(&req).unwrap();
+            let mut rep = [0u8; 8];
+            c.read_exact(&mut rep).unwrap();
+            (c, u32::from_be_bytes([rep[4], rep[5], rep[6], rep[7]]))
+        };
+        let wait_idle = || {
+            let t = Instant::now();
+            while s.serving.load(Ordering::Acquire) && t.elapsed() < Duration::from_secs(3) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            !s.serving.load(Ordering::Acquire)
+        };
+
+        let (first, st) = import("1-1");
+        assert_eq!(st, 0);
+        assert!(s.serving.load(Ordering::Acquire));
+        let t = Instant::now();
+        let (_second, st) = import("1-1");
+        assert_eq!(st, wire::ST_DEV_BUSY);
+        assert!(t.elapsed() < Duration::from_secs(1), "refused at once");
+        let (_other, st) = import("1-7");
+        assert_eq!(st, wire::ST_NODEV);
+        assert!(s.alive_for_test(), "the first connection is still served");
+
+        // A replug: the first connection closes, the next import is taken.
+        s.replug.store(true, Ordering::Release);
+        drop(first);
+        assert!(wait_idle());
+        assert!(s.alive_for_test());
+        let (third, st) = import("1-1");
+        assert_eq!(st, 0);
+
+        // The driver closing it without a replug ends the pad, and later
+        // imports are refused rather than served.
+        drop(third);
+        assert!(wait_idle());
+        assert!(!s.alive_for_test());
+        let (_late, st) = import("1-1");
+        assert_eq!(st, wire::ST_DEV_BUSY);
+
+        s.stop.store(true, Ordering::Release);
+        let _ = TcpStream::connect(addr);
+        srv.join().unwrap();
+    }
+
+    impl Shared {
+        fn alive_for_test(&self) -> bool {
+            !self.ended.load(Ordering::Acquire)
+        }
     }
 }

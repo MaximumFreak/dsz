@@ -614,6 +614,14 @@ impl Pool {
         }
         if let (Some(why), true) = (why, pad.alive()) {
             log::info!("virtual Xbox 360 controller shown again; {why}: plugging it in again so games see it arrive");
+            // Claimed before the replug starts, so the raw-input check on
+            // the maintenance thread ([`Pool::heal`]) leaves this pad alone
+            // instead of replugging it at the same time.
+            {
+                let mut rc = pad.raw_check.lock();
+                rc.replugged = Some(Instant::now());
+                rc.next = Instant::now() + RAW_SETTLE;
+            }
             match pad.target.replug() {
                 Ok(()) => {
                     let mut rc = pad.raw_check.lock();
