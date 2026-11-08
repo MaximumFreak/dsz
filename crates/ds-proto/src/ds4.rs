@@ -498,6 +498,11 @@ fn buttons(hat_face: u8, shoulders: u8, special: u8, l2: u8, r2: u8) -> Buttons 
     b
 }
 
+#[cfg(test)]
+pub(crate) fn battery_for_test(status0: u8) -> (u8, BatteryStatus) {
+    battery(status0)
+}
+
 fn battery(status0: u8) -> (u8, BatteryStatus) {
     let cap = status0 & 0x0F;
     let cable = status0 & 0x10 != 0;

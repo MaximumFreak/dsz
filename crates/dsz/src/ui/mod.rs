@@ -379,7 +379,7 @@ impl App {
                 let link = d.link.lock().clone();
                 let name = d.display_name(&self.engine);
                 let conn = if d.is_bluetooth() { "BT" } else { "USB" };
-                let mut text = format!("{name}  ·  {conn}  ·  {}%", live.battery_percent);
+                let mut text = format!("{name}  ·  {conn}  ·  {}%", live.battery_shown());
                 if let Some(k) = d.virt.active() {
                     text.push_str(&crate::localized_format!("  ·  as {}", "  ·  como {}", "  ·  como {}", k.label()));
                 }
