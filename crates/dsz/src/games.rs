@@ -9,7 +9,7 @@
 
 use crate::settings::FallbackPad;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -149,6 +149,30 @@ pub fn pick_target(
     None
 }
 
+/// The profile last picked by hand for the game replaces its rule's or the
+/// DualSense profile. Swapped in before the switch, so a launch goes
+/// straight to the pick instead of through the rule's profile first.
+pub fn with_pick(
+    target: Option<GameTarget>,
+    enabled: bool,
+    picks: &BTreeMap<String, String>,
+    exists: impl Fn(&str) -> bool,
+) -> Option<GameTarget> {
+    match target {
+        Some(GameTarget::Profile { profile, exe }) if enabled => {
+            let pick = picks
+                .get(&exe.to_ascii_lowercase())
+                .filter(|p| exists(p))
+                .cloned();
+            Some(GameTarget::Profile {
+                profile: pick.unwrap_or(profile),
+                exe,
+            })
+        }
+        other => other,
+    }
+}
+
 /// Store apps that are not games and often run all the time (a wallpaper,
 /// a frame-generation overlay, VR runtime, redistributable installers).
 /// Folder names under `steamapps\common\`, lowercase.
@@ -282,6 +306,10 @@ pub fn run(engine: Arc<Engine>) {
             engine.profiles.exists(&ds_profile),
             &plain_exes,
         );
+        let target = {
+            let s = engine.settings.read();
+            with_pick(target, s.remember_game_picks, &s.game_picks, |p| engine.profiles.exists(p))
+        };
         // A game the user switched away from keeps its rule off until it closes.
         let target = {
             let mut dismissed = engine.game_dismissed.lock();
@@ -575,5 +603,45 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_remembered_pick_replaces_the_games_profile() {
+        let picks: BTreeMap<String, String> = [
+            ("eldenring.exe".to_string(), "Mine".to_string()),
+            ("gone.exe".to_string(), "Deleted".to_string()),
+        ]
+        .into();
+        let exists = |p: &str| p != "Deleted";
+        let profile = |p: &str, exe: &str| {
+            Some(GameTarget::Profile {
+                profile: p.into(),
+                exe: exe.into(),
+            })
+        };
+        // Matched however the exe is spelled.
+        assert_eq!(
+            with_pick(profile("DualSense", "EldenRing.exe"), true, &picks, exists),
+            profile("Mine", "EldenRing.exe")
+        );
+        assert_eq!(
+            with_pick(profile("DualSense", "EldenRing.exe"), false, &picks, exists),
+            profile("DualSense", "EldenRing.exe"),
+            "Remember picks off"
+        );
+        assert_eq!(
+            with_pick(profile("Xbox", "gone.exe"), true, &picks, exists),
+            profile("Xbox", "gone.exe"),
+            "a deleted profile falls back to the rule"
+        );
+        assert_eq!(
+            with_pick(profile("Xbox", "other.exe"), true, &picks, exists),
+            profile("Xbox", "other.exe")
+        );
+        let fallback = Some(GameTarget::Fallback {
+            exe: "eldenring.exe".into(),
+        });
+        assert_eq!(with_pick(fallback.clone(), true, &picks, exists), fallback);
+        assert_eq!(with_pick(None, true, &picks, exists), None);
     }
 }

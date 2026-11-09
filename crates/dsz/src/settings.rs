@@ -96,6 +96,12 @@ pub struct Settings {
     pub udp_port: u16,
     pub auto_profiles: bool,
     pub games: Vec<GameRule>,
+    /// Save a profile picked by hand while a game runs in `game_picks`, and
+    /// use the saved picks.
+    pub remember_game_picks: bool,
+    /// Game exe (lowercase) -> the profile last picked by hand while it ran.
+    /// Used instead of the automatic choice the next time it starts.
+    pub game_picks: BTreeMap<String, String>,
     /// Power off a Bluetooth controller after this many idle minutes (0 = never).
     pub idle_off_minutes: u32,
     /// Quick Charge: drop a controller's Bluetooth link when the same
@@ -176,6 +182,8 @@ impl Default for Settings {
             udp_port: 6969,
             auto_profiles: true,
             games: Vec::new(),
+            remember_game_picks: true,
+            game_picks: BTreeMap::new(),
             idle_off_minutes: 15,
             quick_charge: true,
             ui_scale: 1.0,

@@ -295,7 +295,7 @@ pub fn start(engine: Arc<Engine>, on_show: impl Fn() + Send + Sync + 'static) {
                                 format!(
                                     "{} {}%",
                                     d.model.name(),
-                                    d.live.lock().input.battery_percent
+                                    d.live.lock().input.battery_shown()
                                 )
                             })
                             .collect();

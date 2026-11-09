@@ -227,7 +227,7 @@ impl Engine {
         match held.then.filter(|p| self.profiles.exists(p)) {
             Some(next) => {
                 let next = self.profiles.get_or_first(&next).name.clone();
-                self.set_device_profile(device, &next);
+                self.switch_device_profile(device, &next, false);
                 self.toast(crate::localized_format!("Profile: {next}", "Perfil: {next}", "Perfil: {next}"));
                 device.identify_light();
             }
@@ -286,6 +286,12 @@ impl Engine {
     }
 
     pub fn set_device_profile(&self, device: &Device, name: &str) {
+        self.switch_device_profile(device, name, true);
+    }
+
+    /// `by_hand` is false for a held profile's release profile, which
+    /// follows from a mapping rather than a choice for the game.
+    fn switch_device_profile(&self, device: &Device, name: &str, by_hand: bool) {
         // A pick made while a profile is held stays after the release.
         device.held_profile.lock().take();
         let mac = device.mac.lock().clone();
@@ -300,10 +306,11 @@ impl Engine {
         }
         // A manual pick beats a running game's profile, or its fallback
         // pad, until that game closes.
-        let dismissed = self
-            .game_override
-            .write()
-            .take()
+        let overridden = self.game_override.write().take();
+        if by_hand {
+            self.remember_game_pick(name, overridden.as_ref());
+        }
+        let dismissed = overridden
             .map(|(_, exe)| exe)
             .or_else(|| self.fallback_exe.write().take());
         if let Some(exe) = dismissed {
@@ -317,6 +324,41 @@ impl Engine {
         *device.overrides.lock() = Default::default();
         self.settings_changed();
         device.kick();
+    }
+
+    /// Save a pick made while a game's profile was in use, for the game's
+    /// next launch. `overridden` is the game's profile this pick replaced;
+    /// without one, a later pick in the same run (the game's profile
+    /// already off) updates the saved pick quietly.
+    fn remember_game_pick(&self, name: &str, overridden: Option<&(String, String)>) {
+        let dismissed = self.game_dismissed.lock().clone();
+        let mut s = self.settings.write();
+        if !s.remember_game_picks {
+            return;
+        }
+        let (exe, first) = match overridden {
+            // Picking the profile already in use changes nothing for the game.
+            Some((p, _)) if p.eq_ignore_ascii_case(name) => return,
+            Some((_, exe)) => (exe.clone(), true),
+            None => match dismissed {
+                Some(e) if s.game_picks.contains_key(&e.to_ascii_lowercase()) => (e, false),
+                _ => return,
+            },
+        };
+        let key = exe.to_ascii_lowercase();
+        if s.game_picks.get(&key).map(String::as_str) == Some(name) {
+            return;
+        }
+        s.game_picks.insert(key, name.to_string());
+        drop(s);
+        log::info!("profile \"{name}\" remembered for {exe}");
+        if first {
+            self.toast(crate::localized_format!(
+                "\"{name}\" remembered for {exe}",
+                "\"{name}\" salvo para {exe}",
+                "\"{name}\" guardado para {exe}"
+            ));
+        }
     }
 
     pub fn cycle_profile(&self, device: &Device, delta: i32) {
@@ -342,6 +384,11 @@ impl Engine {
         }
         if s.default_profile == old {
             s.default_profile = new.to_string();
+        }
+        for v in s.game_picks.values_mut() {
+            if v == old {
+                *v = new.to_string();
+            }
         }
         for g in s.games.iter_mut() {
             if g.profile == old {

@@ -130,11 +130,17 @@ impl App {
             Some(d) => engine.profile_name_for(d),
             None => engine.settings.read().default_profile.clone(),
         };
-        let (default, games, ds_auto) = {
+        let (default, games, picks, ds_auto) = {
             let s = engine.settings.read();
             (
                 s.default_profile.clone(),
                 s.games.clone(),
+                // The picks in use: a missing profile leaves its game's rule on.
+                s.game_picks
+                    .iter()
+                    .filter(|(_, p)| s.remember_game_picks && engine.profiles.exists(p))
+                    .map(|(e, p)| (e.clone(), p.clone()))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
                 s.auto_dualsense.then(|| s.dualsense_profile.clone()),
             )
         };
@@ -261,10 +267,17 @@ impl App {
                                             if ds_auto.as_deref() == Some(prof.name.as_str()) {
                                                 pill(ui, crate::i18n::tr("DualSense games"), ACCENT);
                                             }
+                                            // A remembered pick replaces its game's rule.
                                             let n = games
                                                 .iter()
-                                                .filter(|g| g.profile == prof.name)
-                                                .count();
+                                                .filter(|g| {
+                                                    g.profile == prof.name
+                                                        && !picks.contains_key(
+                                                            &g.exe.trim().to_ascii_lowercase(),
+                                                        )
+                                                })
+                                                .count()
+                                                + picks.values().filter(|p| **p == prof.name).count();
                                             if n > 0 {
                                                 pill(
                                                     ui,
@@ -373,6 +386,9 @@ impl App {
                                         if danger_button(ui, crate::i18n::tr("Delete")).clicked() {
                                             if engine.profiles.delete(&prof.name) {
                                                 let first = engine.profiles.fallback_name();
+                                                // A game picked onto this profile goes back to its rule,
+                                                // not to whatever profile is first.
+                                                engine.settings.write().game_picks.retain(|_, p| *p != prof.name);
                                                 engine.rename_profile_refs(&prof.name, &first);
                                                 if self.edit_pin.as_deref()
                                                     == Some(prof.name.as_str())
@@ -451,6 +467,9 @@ impl App {
                     muted(ui, crate::i18n::tr("No games yet. Add one while it runs, or browse for its .exe."));
                 }
                 let mut remove = None;
+                // Rules whose profile was changed by hand: a profile picked
+                // earlier during that game would otherwise still win.
+                let mut forget: Vec<String> = Vec::new();
                 for (i, g) in s.games.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         changed |= toggle(ui, &mut g.enabled).changed();
@@ -470,7 +489,10 @@ impl App {
                                     ui.selectable_value(&mut g.profile, n.clone(), n);
                                 }
                             });
-                        changed |= before != g.profile;
+                        if before != g.profile {
+                            changed = true;
+                            forget.push(g.exe.trim().to_ascii_lowercase());
+                        }
                         if !names.contains(&g.profile) {
                             pill(ui, crate::i18n::tr("missing"), WARN);
                         }
@@ -492,7 +514,69 @@ impl App {
                     });
                 }
                 if let Some(i) = remove {
-                    s.games.remove(i);
+                    let g = s.games.remove(i);
+                    forget.push(g.exe.trim().to_ascii_lowercase());
+                    changed = true;
+                }
+                for exe in forget {
+                    s.game_picks.remove(&exe);
+                }
+
+                // Profiles picked by hand while a game ran, used the next time
+                // it starts. Games without a rule appear here too.
+                ui.add_space(10.0);
+                changed |= toggle_row(
+                    ui,
+                    crate::i18n::tr("Remember picks"),
+                    crate::i18n::tr("Switch profile by hand while a game runs and DSZ uses that profile for the game next time, over its rule or the DualSense profile."),
+                    &mut s.remember_game_picks,
+                );
+                if s.remember_game_picks && s.game_picks.is_empty() {
+                    muted(ui, crate::i18n::tr("None yet."));
+                }
+                let mut forget_pick: Option<String> = None;
+                let picks: Vec<String> = if s.remember_game_picks {
+                    s.game_picks.keys().cloned().collect()
+                } else {
+                    Vec::new()
+                };
+                for (i, exe) in picks.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(exe).strong());
+                        ui.label(RichText::new("→").color(MUTED));
+                        let cur = s.game_picks.get(exe).cloned().unwrap_or_default();
+                        let mut sel = cur.clone();
+                        egui::ComboBox::from_id_salt(("game-pick", i))
+                            .width(180.0)
+                            .selected_text(&sel)
+                            .show_ui(ui, |ui| {
+                                for n in &names {
+                                    ui.selectable_value(&mut sel, n.clone(), n);
+                                }
+                            });
+                        if sel != cur {
+                            s.game_picks.insert(exe.clone(), sel);
+                            changed = true;
+                        }
+                        if !names.contains(&cur) {
+                            pill(ui, crate::i18n::tr("missing"), WARN);
+                        }
+                        if running.iter().any(|r| r.eq_ignore_ascii_case(exe)) {
+                            pill(ui, crate::i18n::tr("running"), GOOD);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(egui::Button::new(RichText::new("✕").color(MUTED)).frame(false))
+                                .on_hover_text(crate::i18n::tr("Forget this pick"))
+                                .clicked()
+                            {
+                                forget_pick = Some(exe.clone());
+                            }
+                        });
+                    });
+                }
+                if let Some(exe) = forget_pick {
+                    s.game_picks.remove(&exe);
                     changed = true;
                 }
                 drop(s);

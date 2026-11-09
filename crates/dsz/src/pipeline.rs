@@ -2088,6 +2088,68 @@ mod hold_profile_tests {
         assert_eq!(r.profile(), "Game", "no release profile after a pick");
     }
 
+    fn remembered(r: &Rig) -> Vec<String> {
+        r.engine
+            .toasts
+            .lock()
+            .iter()
+            .map(|t| t.text.clone())
+            .filter(|t| t.contains("remembered"))
+            .collect()
+    }
+
+    #[test]
+    fn a_pick_over_a_games_profile_is_remembered() {
+        let _g = gate();
+        let mut r = rig(vec![]);
+        *r.engine.game_override.write() = Some(("Game".into(), "Game.exe".into()));
+        r.engine.bump_config();
+        r.step(&[]);
+        assert_eq!(r.profile(), "Game");
+        r.engine.set_device_profile(&r.device, "After");
+        assert_eq!(r.profile(), "After");
+        assert_eq!(r.engine.game_dismissed.lock().as_deref(), Some("Game.exe"));
+        let picks = || r.engine.settings.read().game_picks.clone();
+        assert_eq!(picks().get("game.exe").map(String::as_str), Some("After"));
+        assert_eq!(remembered(&r), vec!["\"After\" remembered for Game.exe"]);
+        // Another pick in the same run updates it, without another toast.
+        r.engine.set_device_profile(&r.device, "Chord");
+        assert_eq!(picks().get("game.exe").map(String::as_str), Some("Chord"));
+        assert_eq!(remembered(&r).len(), 1);
+        // With no game running, a pick is only the controller's.
+        *r.engine.game_dismissed.lock() = None;
+        r.engine.set_device_profile(&r.device, "Base");
+        assert_eq!(picks().get("game.exe").map(String::as_str), Some("Chord"));
+        assert_eq!(picks().len(), 1);
+    }
+
+    #[test]
+    fn a_held_profiles_release_isnt_remembered() {
+        let _g = gate();
+        let mut r = rig(vec![hold(Button::Create, &[], "Chord", "After", true)]);
+        r.step(&[Button::Create]);
+        *r.engine.game_override.write() = Some(("Game".into(), "game.exe".into()));
+        r.engine.bump_config();
+        r.step(&[Button::Create]);
+        assert_eq!(r.profile(), "Chord");
+        r.step(&[]);
+        assert_eq!(r.profile(), "After");
+        assert!(r.engine.settings.read().game_picks.is_empty());
+        assert!(remembered(&r).is_empty());
+    }
+
+    #[test]
+    fn remember_picks_off_saves_nothing() {
+        let _g = gate();
+        let r = rig(vec![]);
+        r.engine.settings.write().remember_game_picks = false;
+        *r.engine.game_override.write() = Some(("Game".into(), "game.exe".into()));
+        r.engine.set_device_profile(&r.device, "After");
+        assert_eq!(r.engine.game_dismissed.lock().as_deref(), Some("game.exe"));
+        assert!(r.engine.settings.read().game_picks.is_empty());
+        assert!(remembered(&r).is_empty());
+    }
+
     #[test]
     fn disconnect_while_held_drops_the_hold() {
         let _g = gate();

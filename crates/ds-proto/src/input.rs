@@ -291,6 +291,25 @@ pub struct InputState {
     pub full: bool,
 }
 
+impl InputState {
+    /// The battery level to show people. The controller reports it in 10 %
+    /// steps (9 means 90-99 %), so a full pad on battery never reaches
+    /// 100 %. Linux and SDL (Steam) show the middle of the step, and Linux
+    /// notes that Sony's own platform does the same. `battery_percent`
+    /// keeps the step's floor, which lighting, the virtual controllers and
+    /// DSU go by.
+    pub fn battery_shown(&self) -> u8 {
+        match self.battery_status {
+            BatteryStatus::Discharging | BatteryStatus::Charging
+                if self.full && self.battery_percent < 100 =>
+            {
+                self.battery_percent + 5
+            }
+            _ => self.battery_percent,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseError {
     TooShort,
@@ -535,6 +554,42 @@ mod tests {
         r[37] = 0x80; // second finger up
         r[53] = 0x17; // charging, 70%
         r
+    }
+
+    #[test]
+    fn battery_shown_is_the_middle_of_the_step() {
+        let mut r = usb_report();
+        for (byte, floor, shown) in [
+            (0x00u8, 0u8, 5u8),
+            (0x01, 10, 15),
+            (0x09, 90, 95),
+            (0x0A, 100, 100),
+            (0x13, 30, 35),
+            (0x1A, 100, 100),
+            (0x25, 100, 100),
+            (0xF4, 40, 40),
+        ] {
+            r[53] = byte;
+            let s = parse(&r, Connection::Usb, Model::DualSense, false).unwrap();
+            // Lighting, the virtual pads and DSU keep reading the floor.
+            assert_eq!(s.battery_percent, floor, "{byte:#04x}");
+            assert_eq!(s.battery_shown(), shown, "{byte:#04x}");
+        }
+        // No full report yet: nothing was read, so nothing is made up.
+        assert_eq!(InputState::default().battery_shown(), 0);
+    }
+
+    #[test]
+    fn dualshock4_battery_shown() {
+        for (status0, shown) in [(0x03u8, 35u8), (0x0A, 100), (0x14, 45), (0x1B, 100)] {
+            let s = InputState {
+                full: true,
+                battery_percent: crate::ds4::battery_for_test(status0).0,
+                battery_status: crate::ds4::battery_for_test(status0).1,
+                ..Default::default()
+            };
+            assert_eq!(s.battery_shown(), shown, "{status0:#04x}");
+        }
     }
 
     #[test]
