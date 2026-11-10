@@ -76,6 +76,9 @@ pub struct HeldProfile {
     pub hide: u32,
     /// Profile switched to on release; none goes back.
     pub then: Option<String>,
+    /// Buttons the held profile's own mappings see go down once, on its
+    /// first report (the mapping's "Also in that profile"). Taken then.
+    pub press: u32,
 }
 
 /// Cached profile for a hot loop: refetched only when something changed.

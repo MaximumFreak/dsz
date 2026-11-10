@@ -239,6 +239,7 @@ impl App {
                                     Action::HoldProfile {
                                         name: profile_names.iter().find(|n| **n != p_name).cloned().unwrap_or_default(),
                                         then: String::new(),
+                                        press: false,
                                     }
                                 }
                                 AKind::Gamepad => Action::Gamepad { button: m.button.physical() },
@@ -307,7 +308,7 @@ impl App {
                                         }
                                     });
                             }
-                            Action::HoldProfile { name, then } => {
+                            Action::HoldProfile { name, then, press } => {
                                 fit(ui, 170.0);
                                 egui::ComboBox::from_id_salt(("map-hold", i))
                                     .width(170.0)
@@ -333,6 +334,8 @@ impl App {
                                         .response
                                         .on_hover_text(crate::i18n::tr("What happens when the button is let go: go back to the profile from before, or stay on another profile."));
                                 });
+                                ui.checkbox(press, crate::i18n::tr("Also in that profile"))
+                                    .on_hover_text(crate::i18n::tr("The button also does its own mapping in the held profile, as if just pressed. For example, hold L2 for a gyro aim profile that maps L2 to the game's aim key."));
                             }
                             Action::Gamepad { button } => {
                                 fit(ui, 130.0);

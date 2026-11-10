@@ -340,6 +340,8 @@
   "Use profile while held": "Usar perfil enquanto pressionado",
   "on release": "ao soltar",
   "Go back": "Voltar",
+  "Also in that profile": "Também nesse perfil",
+  "The button also does its own mapping in the held profile, as if just pressed. For example, hold L2 for a gyro aim profile that maps L2 to the game's aim key.": "O botão também faz o próprio mapeamento no perfil mantido, como se tivesse acabado de ser pressionado. Por exemplo, segure L2 para um perfil de mira com giroscópio que mapeia L2 para a tecla de mirar do jogo.",
   "What happens when the button is let go: go back to the profile from before, or stay on another profile.": "O que acontece ao soltar o botão: voltar ao perfil anterior ou ficar em outro perfil.",
   "While held": "Enquanto pressionado",
   "Together with": "Junto com",

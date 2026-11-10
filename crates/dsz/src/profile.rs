@@ -654,6 +654,12 @@ pub enum Action {
         /// Profile to switch to on release; empty goes back.
         #[serde(default)]
         then: String,
+        /// The held buttons also do their own mappings in the held profile,
+        /// as if pressed when it starts. Off keeps the press from leaking
+        /// into the held profile; left out of the JSON while off, so saved
+        /// profiles stay as they were.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        press: bool,
     },
     /// Press a button on the virtual controller (needs one active).
     Gamepad {
@@ -1543,6 +1549,7 @@ mod tests {
         let a = Action::HoldProfile {
             name: "Chord".into(),
             then: String::new(),
+            press: false,
         };
         let j = serde_json::to_string(&a).unwrap();
         assert_eq!(j, r#"{"kind":"hold_profile","name":"Chord","then":""}"#);
@@ -1550,6 +1557,15 @@ mod tests {
         // Without a release profile it goes back.
         let b: Action = serde_json::from_str(r#"{"kind":"hold_profile","name":"Chord"}"#).unwrap();
         assert_eq!(b, a);
+        // Pressing the button in the held profile too is saved only when on.
+        let c = Action::HoldProfile {
+            name: "Chord".into(),
+            then: String::new(),
+            press: true,
+        };
+        let j = serde_json::to_string(&c).unwrap();
+        assert_eq!(j, r#"{"kind":"hold_profile","name":"Chord","then":"","press":true}"#);
+        assert_eq!(serde_json::from_str::<Action>(&j).unwrap(), c);
     }
 
     #[test]
