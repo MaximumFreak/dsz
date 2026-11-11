@@ -122,6 +122,9 @@ pub struct Settings {
     pub check_input_crc: bool,
     /// Show the welcome card on the overview page.
     pub show_tips: bool,
+    /// Show controller batteries as three bars instead of a percentage.
+    /// Off by default, so the percentage stays as it was.
+    pub battery_bars: bool,
     /// Let the app use HidHide to hide a controller while a virtual one is up.
     pub hidhide_control: bool,
     /// Start every controller on `default_profile` when the app starts,
@@ -195,6 +198,7 @@ impl Default for Settings {
             ui_scale: 1.0,
             check_input_crc: true,
             show_tips: true,
+            battery_bars: false,
             hidhide_control: true,
             default_on_start: true,
             auto_dualsense: true,
@@ -213,6 +217,17 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// A controller's battery as the window's controller list and the tray
+    /// show it: the percentage, or bars when `battery_bars` is on.
+    pub fn battery_label(&self, input: &ds_proto::InputState) -> String {
+        if self.battery_bars {
+            let n = input.battery_bars() as usize;
+            format!("{}{}", "■".repeat(n), "□".repeat(3 - n))
+        } else {
+            format!("{}%", input.battery_shown())
+        }
+    }
+
     pub fn path(dir: &Path) -> PathBuf {
         dir.join("settings.json")
     }
@@ -254,6 +269,33 @@ mod tests {
         assert_eq!(parsed.fallback_pad, FallbackPad::Off);
         let parsed: Settings = serde_json::from_str(r#"{"fallback_pad":"DualShock4"}"#).unwrap();
         assert_eq!(parsed.fallback_pad, FallbackPad::DualShock4);
+    }
+
+    #[test]
+    fn battery_bars_default_off_and_old_files_load_unchanged() {
+        assert!(!Settings::default().battery_bars);
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        old.as_object_mut().unwrap().remove("battery_bars");
+        let parsed: Settings = serde_json::from_value(old).unwrap();
+        assert_eq!(parsed, Settings::default());
+        let parsed: Settings = serde_json::from_str(r#"{"battery_bars":true}"#).unwrap();
+        assert!(parsed.battery_bars);
+    }
+
+    #[test]
+    fn battery_label_is_the_percentage_unless_bars_are_on() {
+        let input = ds_proto::InputState {
+            full: true,
+            battery_percent: 80,
+            battery_status: ds_proto::BatteryStatus::Discharging,
+            ..Default::default()
+        };
+        assert_eq!(Settings::default().battery_label(&input), "85%");
+        let bars = Settings { battery_bars: true, ..Settings::default() };
+        assert_eq!(bars.battery_label(&input), "■■■");
+        let low = ds_proto::InputState { battery_percent: 20, ..input };
+        assert_eq!(bars.battery_label(&low), "■□□");
+        assert_eq!(bars.battery_label(&ds_proto::InputState::default()), "□□□");
     }
 
     #[test]

@@ -308,6 +308,25 @@ impl InputState {
             _ => self.battery_percent,
         }
     }
+
+    /// The battery as 0 to 3 bars, for people who'd rather not read the
+    /// 10 % steps as an exact number. Same bands as SDL (Steam): step 0 is
+    /// empty, 1-2 low, 3-7 medium, 8-10 full. A pad on USB that says it is
+    /// full shows full.
+    pub fn battery_bars(&self) -> u8 {
+        if !self.full {
+            return 0;
+        }
+        match self.battery_status {
+            BatteryStatus::Full => 3,
+            _ => match self.battery_percent {
+                0..=9 => 0,
+                10..=29 => 1,
+                30..=79 => 2,
+                _ => 3,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -577,6 +596,29 @@ mod tests {
         }
         // No full report yet: nothing was read, so nothing is made up.
         assert_eq!(InputState::default().battery_shown(), 0);
+    }
+
+    #[test]
+    fn battery_bars_follow_sdl_bands() {
+        let mut r = usb_report();
+        for (byte, bars) in [
+            (0x00u8, 0u8),
+            (0x01, 1),
+            (0x02, 1),
+            (0x03, 2),
+            (0x07, 2),
+            (0x08, 3),
+            (0x0A, 3),
+            (0x13, 2),
+            (0x18, 3),
+            (0x25, 3),
+            (0x22, 3),
+        ] {
+            r[53] = byte;
+            let s = parse(&r, Connection::Usb, Model::DualSense, false).unwrap();
+            assert_eq!(s.battery_bars(), bars, "{byte:#04x}");
+        }
+        assert_eq!(InputState::default().battery_bars(), 0);
     }
 
     #[test]

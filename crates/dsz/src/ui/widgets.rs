@@ -222,6 +222,21 @@ pub fn meter(ui: &mut Ui, v: f32, color: Color32, width: f32) -> Response {
     resp
 }
 
+/// `filled` of three bars, for a battery shown as bars.
+pub fn bars_meter(ui: &mut Ui, filled: u8, color: Color32, width: f32) -> Response {
+    let width = width.min(ui.available_width()).max(24.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 8.0), Sense::hover());
+    let p = ui.painter();
+    let gap = 3.0;
+    let w = (rect.width() - 2.0 * gap) / 3.0;
+    for i in 0..3u8 {
+        let x = rect.left() + i as f32 * (w + gap);
+        let bar = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(w, rect.height()));
+        p.rect_filled(bar, CornerRadius::same(2), if i < filled { color } else { FIELD });
+    }
+    resp
+}
+
 pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
     ui.add(
         egui::Button::new(RichText::new(text).color(Color32::WHITE))
