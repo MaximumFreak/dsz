@@ -64,6 +64,10 @@ pub struct Engine {
     pub companion: crate::virt::companion::Companion,
 }
 
+/// How often HidHide's settings are checked against what DSZ set up. A
+/// check only reads three short lists from the driver.
+const HIDE_CHECK_EVERY: Duration = Duration::from_secs(5);
+
 /// A profile a controller uses only while a mapping's buttons are held.
 /// Kept on the device, never saved: a restart or a reconnect starts
 /// without it.
@@ -76,6 +80,9 @@ pub struct HeldProfile {
     pub hide: u32,
     /// Profile switched to on release; none goes back.
     pub then: Option<String>,
+    /// Buttons the held profile's own mappings see go down once, on its
+    /// first report (the mapping's "Also in that profile"). Taken then.
+    pub press: u32,
 }
 
 /// Cached profile for a hot loop: refetched only when something changed.
@@ -453,6 +460,7 @@ impl Engine {
         let pad_nodes: Vec<String> =
             self.settings.read().helper_nodes.values().flatten().cloned().collect();
         self.hider.clear_stale_pads(&pad_nodes);
+        self.repair_hidhide();
         let e = self.clone();
         std::thread::Builder::new()
             .name("hotplug".into())
@@ -519,6 +527,7 @@ impl Engine {
 
     fn hotplug_loop(self: Arc<Self>) {
         let mut running: HashMap<String, std::thread::JoinHandle<()>> = HashMap::new();
+        let mut last_hide_check = Instant::now();
         // Before any controller: the virtual pad takes the first free slot.
         self.pads.startup(&self);
         while !self.shutdown.load(Ordering::Acquire) {
@@ -548,6 +557,10 @@ impl Engine {
                 self.open_failures.lock().retain(|p, _| !live.contains(p));
             }
             self.pads.maintain(&self);
+            if last_hide_check.elapsed() >= HIDE_CHECK_EVERY {
+                last_hide_check = Instant::now();
+                self.repair_hidhide();
+            }
             std::thread::sleep(Duration::from_millis(700));
         }
         for d in self.device_list() {
@@ -555,6 +568,24 @@ impl Engine {
         }
         for (_, h) in running {
             let _ = h.join();
+        }
+    }
+
+    /// Put back HidHide settings changed outside DSZ (see
+    /// [`crate::virt::Hider::repair`]) and say so.
+    fn repair_hidhide(&self) {
+        let (allowed, pad_nodes) = {
+            let s = self.settings.read();
+            let nodes: Vec<String> = s.helper_nodes.values().flatten().cloned().collect();
+            (s.hidhide_control, nodes)
+        };
+        let warned = self.hider.health().warning.is_some();
+        let done = self.hider.repair(allowed, &pad_nodes);
+        if !done.is_empty() {
+            self.toast(crate::i18n::tr("HidHide was changed outside DSZ. DSZ put back what it needs."));
+        }
+        if let (false, Some(w)) = (warned, self.hider.health().warning) {
+            self.warn_toast(w);
         }
     }
 

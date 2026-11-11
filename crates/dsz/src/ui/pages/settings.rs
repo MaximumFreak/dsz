@@ -127,6 +127,14 @@ impl App {
                                 .changed();
                         },
                     );
+                    if s.idle_off_minutes > 0 {
+                        changed |= toggle_row(
+                            ui,
+                            crate::i18n::tr("Dim the lightbar first"),
+                            crate::i18n::tr("Fades out over the last minutes before it turns off, so you can see it coming. Any press brings it back. A game's own light isn't dimmed"),
+                            &mut s.idle_dim,
+                        );
+                    }
                     changed |= toggle_row(
                         ui,
                         crate::i18n::tr("Drop corrupted radio packets"),

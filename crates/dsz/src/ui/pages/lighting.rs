@@ -170,6 +170,39 @@ impl App {
                             l.speed = sp / 100.0;
                         }
                     }
+                    if matches!(
+                        l.mode,
+                        LightMode::Static | LightMode::Breathing | LightMode::Strobe
+                    ) {
+                        ui.add_space(4.0);
+                        toggle_row(
+                            ui,
+                            crate::i18n::tr("Shift color as the battery drains"),
+                            crate::i18n::tr("Blends into the color below as it runs down, e.g. blue to purple to red"),
+                            &mut l.battery_fade,
+                        );
+                        if l.battery_fade {
+                            row(ui, crate::i18n::tr("Color when empty"), crate::i18n::tr("Shown at 0 %"), |ui| {
+                                color_picker::color_edit_button_srgb(ui, &mut l.battery_fade_color);
+                            });
+                            slider_row(
+                                ui,
+                                crate::i18n::tr("Brightness when empty"),
+                                crate::i18n::tr("Higher than the brightness above makes a low battery stand out"),
+                                &mut l.battery_fade_brightness,
+                                0..=100,
+                                "%",
+                            );
+                            slider_row(
+                                ui,
+                                crate::i18n::tr("Start below"),
+                                crate::i18n::tr("100 % blends across the whole charge"),
+                                &mut l.battery_fade_from,
+                                10..=100,
+                                "%",
+                            );
+                        }
+                    }
                 });
                 ui.add_space(12.0);
                 card(

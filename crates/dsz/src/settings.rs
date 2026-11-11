@@ -104,6 +104,11 @@ pub struct Settings {
     pub game_picks: BTreeMap<String, String>,
     /// Power off a Bluetooth controller after this many idle minutes (0 = never).
     pub idle_off_minutes: u32,
+    /// Fade the lightbar out over the last minutes before an idle power-off
+    /// (see `composer::idle_fade`). Only does anything while
+    /// `idle_off_minutes` is set, and on by default: it is a warning for
+    /// people who use the power-off, not a new look.
+    pub idle_dim: bool,
     /// Quick Charge: drop a controller's Bluetooth link when the same
     /// controller (by MAC) is plugged in over USB, so only USB is left.
     /// On by default. Stored as `quick_charge_v2`: up to 0.4.4 it was off
@@ -185,6 +190,7 @@ impl Default for Settings {
             remember_game_picks: true,
             game_picks: BTreeMap::new(),
             idle_off_minutes: 15,
+            idle_dim: true,
             quick_charge: true,
             ui_scale: 1.0,
             check_input_crc: true,
@@ -291,6 +297,16 @@ mod tests {
         assert!(saved.get("default_on_start").is_none());
         let back: Settings = serde_json::from_value(saved).unwrap();
         assert!(!back.default_on_start, "turned off from now on, it stays off");
+    }
+
+    #[test]
+    fn idle_dim_is_on_for_older_settings_and_a_choice_is_kept() {
+        let parsed: Settings = serde_json::from_str(r#"{"idle_off_minutes":10}"#).unwrap();
+        assert!(parsed.idle_dim);
+        assert_eq!(parsed.idle_off_minutes, 10);
+        let off = Settings { idle_dim: false, ..Settings::default() };
+        let back: Settings = serde_json::from_value(serde_json::to_value(&off).unwrap()).unwrap();
+        assert!(!back.idle_dim);
     }
 
     #[test]

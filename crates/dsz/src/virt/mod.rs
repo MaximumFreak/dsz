@@ -229,6 +229,104 @@ impl Slot {
 pub struct Hider {
     file: PathBuf,
     state: Mutex<HiderState>,
+    /// What [`Hider::repair`] last found, for the Virtual controller page.
+    health: Mutex<HideHealth>,
+}
+
+/// HidHide settings DSZ put back, or can't, after a change made outside it
+/// (usually in HidHide's own window).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HideHealth {
+    /// A setting DSZ can't safely change for the user, in their language.
+    pub warning: Option<String>,
+    /// The last repair: when, and what was put back (English, for the log
+    /// and translated where shown).
+    pub repaired: Option<(Instant, Vec<&'static str>)>,
+}
+
+/// What [`Hider::repair`] would change in HidHide's lists, worked out from
+/// a snapshot so it can be tested without the driver.
+#[derive(Debug, Default, PartialEq)]
+struct RepairPlan {
+    /// Nodes DSZ hides that are no longer on the block list.
+    hide: Vec<String>,
+    /// Device hiding was switched off while DSZ hides something.
+    activate: bool,
+    /// DSZ is off the app list while it hides something, or while a
+    /// PlayStation controller is hidden, so it can't open the controller.
+    allow_self: bool,
+    /// Inverse mode is on and DSZ is on the list, which then blocks it.
+    disallow_self: bool,
+    /// Apps DSZ let through for the helper Xbox pad that are gone.
+    allow_apps: Vec<String>,
+    /// DSZ's own virtual pads on the block list that nothing in DSZ hides:
+    /// games couldn't see the pad they should use.
+    unhide: Vec<String>,
+    inverse: bool,
+}
+
+impl RepairPlan {
+    fn is_empty(&self) -> bool {
+        self.hide.is_empty()
+            && !self.activate
+            && !self.allow_self
+            && !self.disallow_self
+            && self.allow_apps.is_empty()
+            && self.unhide.is_empty()
+    }
+}
+
+/// A block-list entry for a physical Sony controller (USB or Bluetooth
+/// instance id), not one of DSZ's own virtual pads.
+fn playstation_entry(id: &str) -> bool {
+    let up = id.to_ascii_uppercase();
+    (up.contains("VID_054C") || up.contains("VID&0002054C")) && !usbip::has_our_serial(&up)
+}
+
+fn contains(list: &[String], item: &str) -> bool {
+    list.iter().any(|x| x.eq_ignore_ascii_case(item))
+}
+
+/// What to put back so HidHide does what DSZ set up: `wanted` hidden with
+/// hiding on, DSZ (`self_dos`) and the helper pad's readers (`apps`) let
+/// through, and DSZ's own pads (`pad_nodes`, or a DSZ serial) visible
+/// unless DSZ hides them itself. Nothing else on the lists is touched:
+/// other controllers, other apps' virtual pads, and apps the user let
+/// through stay as they are.
+fn repair_plan(
+    snap: &hidhide::Snapshot,
+    wanted: &[String],
+    self_dos: Option<&str>,
+    apps: &[String],
+    pad_nodes: &[String],
+) -> RepairPlan {
+    let hiding = !wanted.is_empty();
+    let mut plan = RepairPlan {
+        inverse: snap.inverse,
+        ..Default::default()
+    };
+    plan.hide = wanted.iter().filter(|w| !contains(&snap.devices, w)).cloned().collect();
+    plan.activate = hiding && !snap.active;
+    if let Some(me) = self_dos {
+        let listed = contains(&snap.apps, me);
+        if snap.inverse {
+            plan.disallow_self = listed;
+        } else {
+            let needed = hiding || snap.devices.iter().any(|d| playstation_entry(d));
+            plan.allow_self = needed && !listed;
+        }
+    }
+    if !snap.inverse && hiding {
+        plan.allow_apps = apps.iter().filter(|a| !contains(&snap.apps, a)).cloned().collect();
+    }
+    plan.unhide = snap
+        .devices
+        .iter()
+        .filter(|d| usbip::has_our_serial(d) || contains(pad_nodes, d))
+        .filter(|d| !contains(wanted, d))
+        .cloned()
+        .collect();
+    plan
 }
 
 #[derive(Default)]
@@ -270,7 +368,157 @@ impl Hider {
         Hider {
             file,
             state: Mutex::new(state),
+            health: Mutex::new(HideHealth::default()),
         }
+    }
+
+    pub fn health(&self) -> HideHealth {
+        self.health.lock().clone()
+    }
+
+    /// Put HidHide back the way DSZ set it up, after a change made outside
+    /// DSZ (HidHide's own window, another tool): the real controllers DSZ
+    /// hides hidden again with hiding on, DSZ and the helper pad's readers
+    /// let through, and DSZ's own virtual pads visible unless DSZ hides
+    /// them itself. Returns what was put back, empty when all was well.
+    /// Runs at startup and every few seconds; only reads HidHide unless
+    /// something is off. Does nothing while "Use HidHide" is off, and
+    /// leaves inverse mode, other devices and other apps alone.
+    pub fn repair(&self, allowed: bool, pad_nodes: &[String]) -> Vec<&'static str> {
+        if !allowed || !hidhide::available() {
+            *self.health.lock() = HideHealth::default();
+            return Vec::new();
+        }
+        let mut st = self.state.lock();
+        // Held by HidHide's window or another tool right now: next time.
+        let Ok(snap) = hidhide::snapshot() else {
+            return Vec::new();
+        };
+        let exe = std::env::current_exe().ok();
+        let self_dos = exe.as_ref().and_then(|e| win::dos_device_path(&e.display().to_string()));
+        let apps: Vec<String> = st
+            .applied_apps
+            .iter()
+            .filter_map(|a| win::dos_device_path(&a.display().to_string()))
+            .collect();
+        let plan = repair_plan(&snap, &st.applied_for, self_dos.as_deref(), &apps, pad_nodes);
+        let done = if plan.is_empty() {
+            Vec::new()
+        } else {
+            self.apply_repair(&mut st, &plan, exe.as_deref())
+        };
+        drop(st);
+        let warning = plan.inverse.then(|| {
+            crate::i18n::tr("HidHide's \"Inverse application cloak\" is on, so games can still see the real controller. Turn it off in HidHide to hide it.").to_string()
+        });
+        let mut h = self.health.lock();
+        if warning.is_some() && h.warning.is_none() {
+            log::warn!("HidHide: inverse application cloak is on; hiding can't keep the controller from games");
+        }
+        h.warning = warning;
+        if !done.is_empty() {
+            h.repaired = Some((Instant::now(), done.clone()));
+        }
+        done
+    }
+
+    fn apply_repair(
+        &self,
+        st: &mut HiderState,
+        plan: &RepairPlan,
+        exe: Option<&std::path::Path>,
+    ) -> Vec<&'static str> {
+        let mut done = Vec::new();
+        let fail = |what: &str, e: std::io::Error| log::warn!("HidHide repair, {what}: {e}");
+        if plan.disallow_self {
+            if let Some(exe) = exe {
+                match hidhide::set_app(exe, false) {
+                    Ok(_) => done.push("took DSZ off the inverse app list, which blocked it"),
+                    Err(e) => fail("app list", e),
+                }
+            }
+        }
+        if plan.allow_self {
+            if let Some(exe) = exe {
+                match hidhide::set_app(exe, true) {
+                    Ok(Some(dos)) => {
+                        if st.applied.app_added.is_none() {
+                            st.applied.app_added = Some(dos);
+                        }
+                        done.push("let DSZ see the hidden controller again");
+                    }
+                    Ok(None) => {}
+                    Err(e) => fail("app list", e),
+                }
+            }
+        }
+        if !plan.allow_apps.is_empty() {
+            for a in st.applied_apps.clone() {
+                let Some(dos) = win::dos_device_path(&a.display().to_string()) else {
+                    continue;
+                };
+                if !contains(&plan.allow_apps, &dos) {
+                    continue;
+                }
+                match hidhide::set_app(&a, true) {
+                    Ok(Some(dos)) => {
+                        if !contains(&st.applied.apps_added, &dos) {
+                            st.applied.apps_added.push(dos);
+                        }
+                        if !done.contains(&"let Windows see the helper Xbox controller again") {
+                            done.push("let Windows see the helper Xbox controller again");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => fail("app list", e),
+                }
+            }
+        }
+        if !plan.hide.is_empty() {
+            match exe.map(|exe| hidhide::hide(&plan.hide, exe)) {
+                Some(Ok(ch)) => {
+                    for d in ch.devices_added {
+                        if !contains(&st.applied.devices_added, &d) {
+                            st.applied.devices_added.push(d);
+                        }
+                    }
+                    st.applied.activated |= ch.activated;
+                    if st.applied.app_added.is_none() {
+                        st.applied.app_added = ch.app_added;
+                    }
+                    done.push("hid the real controller from games again");
+                }
+                Some(Err(e)) => fail("block list", e),
+                None => {}
+            }
+        } else if plan.activate {
+            match hidhide::set_active(true) {
+                Ok(()) => {
+                    st.applied.activated = true;
+                    done.push("turned HidHide's device hiding back on");
+                }
+                Err(e) => fail("hiding on", e),
+            }
+        }
+        if !plan.unhide.is_empty() {
+            let undo = hidhide::Changes {
+                devices_added: plan.unhide.clone(),
+                ..Default::default()
+            };
+            match hidhide::restore(&undo) {
+                Ok(()) => done.push("made DSZ's virtual controller visible to games again"),
+                Err(e) => fail("block list", e),
+            }
+        }
+        if !st.applied.is_empty() {
+            if let Ok(t) = serde_json::to_string_pretty(&st.applied) {
+                let _ = std::fs::write(&self.file, t);
+            }
+        }
+        if !done.is_empty() {
+            log::info!("HidHide was changed outside DSZ; put back: {}", done.join(", "));
+        }
+        done
     }
 
     /// At startup, before any virtual pad exists: take this app's virtual
@@ -864,6 +1112,90 @@ mod tests {
         let stale = stale_pad_entries(&list, &pad_nodes, &pending);
         assert_eq!(stale, list[1..4].to_vec());
         assert!(stale_pad_entries(&list[4..], &[], &[]).is_empty());
+    }
+
+    fn snap(active: bool, inverse: bool, apps: &[&str], devices: &[&str]) -> hidhide::Snapshot {
+        hidhide::Snapshot {
+            active,
+            inverse,
+            apps: apps.iter().map(|s| s.to_string()).collect(),
+            devices: devices.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    const ME: &str = r"\Device\HarddiskVolume3\Tools\DSZ\dsz.exe";
+    const PAD_BT: &str = r"HID\{00001124-0000-1000-8000-00805f9b34fb}_VID&0002054c_PID&0df2&Col01\9&2b1e4b2&0&0000";
+    const PAD_BT_PARENT: &str = r"BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&0002054c_PID&0df2\8&1a2b3c&0&A0AB51C0FFEE_C00000000";
+    const OUR_XBOX: &str = r"USB\VID_045E&PID_028E\DSZV2";
+    const OTHER_PAD: &str = r"HID\VID_057E&PID_2009&Col01\7&1111&0&0000";
+
+    #[test]
+    fn repair_leaves_a_healthy_setup_alone() {
+        let wanted = vec![PAD_BT_PARENT.to_string(), PAD_BT.to_string()];
+        let s = snap(true, false, &[ME, r"\Device\HarddiskVolume3\Steam\steam.exe"], &[PAD_BT_PARENT, PAD_BT, OTHER_PAD]);
+        assert!(repair_plan(&s, &wanted, Some(ME), &[], &[]).is_empty());
+        // Case doesn't matter, as in HidHide.
+        let s = snap(true, false, &[&ME.to_lowercase()], &[&PAD_BT_PARENT.to_uppercase(), &PAD_BT.to_lowercase()]);
+        assert!(repair_plan(&s, &wanted, Some(ME), &[], &[]).is_empty());
+        // Nothing hidden by DSZ and nothing of Sony's on the list: nothing to do.
+        let s = snap(false, false, &[], &[OTHER_PAD]);
+        assert!(repair_plan(&s, &[], Some(ME), &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn repair_puts_back_what_hidhides_window_undid() {
+        let wanted = vec![PAD_BT_PARENT.to_string(), PAD_BT.to_string()];
+        // The real controller unticked, hiding switched off, DSZ taken off
+        // the app list, and the virtual Xbox pad ticked.
+        let s = snap(false, false, &[], &[PAD_BT_PARENT, OUR_XBOX, OTHER_PAD]);
+        let plan = repair_plan(&s, &wanted, Some(ME), &[], &[]);
+        assert_eq!(plan.hide, vec![PAD_BT.to_string()]);
+        assert!(plan.activate && plan.allow_self && !plan.disallow_self);
+        assert_eq!(plan.unhide, vec![OUR_XBOX.to_string()]);
+        // The other controller someone hid stays hidden.
+        assert!(!plan.unhide.iter().any(|d| d == OTHER_PAD));
+    }
+
+    #[test]
+    fn repair_keeps_what_dsz_itself_hides() {
+        // A parked or helper Xbox pad DSZ hides on purpose stays hidden.
+        let wanted = vec![OUR_XBOX.to_string()];
+        let helper_node = r"HID\VID_045E&PID_028E&IG_00\3&aaaa&0&0000";
+        let s = snap(true, false, &[ME], &[OUR_XBOX, helper_node]);
+        let plan = repair_plan(&s, &wanted, Some(ME), &[], &[helper_node.to_string()]);
+        assert_eq!(plan.unhide, vec![helper_node.to_string()], "only what no request wants");
+        assert!(plan.hide.is_empty());
+        // Its readers come back onto the app list.
+        let explorer = r"\Device\HarddiskVolume3\Windows\explorer.exe".to_string();
+        let plan = repair_plan(&s, &wanted, Some(ME), std::slice::from_ref(&explorer), &[]);
+        assert_eq!(plan.allow_apps, vec![explorer]);
+    }
+
+    #[test]
+    fn repair_lets_dsz_see_a_controller_hidden_by_hand() {
+        // "Use HidHide" on, no virtual pad hiding anything, but the user
+        // hid the controller in HidHide's window: DSZ must still open it.
+        let s = snap(true, false, &[], &[PAD_BT]);
+        let plan = repair_plan(&s, &[], Some(ME), &[], &[]);
+        assert!(plan.allow_self);
+        assert!(plan.hide.is_empty() && !plan.activate && plan.unhide.is_empty());
+        // Only DSZ itself: its own virtual DualSense isn't a real controller.
+        let our_ds = r"USB\VID_054C&PID_0CE6\DSZV3";
+        assert!(!playstation_entry(our_ds));
+        assert!(playstation_entry(PAD_BT) && playstation_entry(r"USB\VID_054C&PID_0DF2\5&1&0&2"));
+    }
+
+    #[test]
+    fn repair_does_not_fight_inverse_mode() {
+        let wanted = vec![PAD_BT.to_string()];
+        // Inverse mode makes the app list a block list: DSZ comes off it,
+        // nothing is added to it, and the mode itself stays the user's.
+        let s = snap(true, true, &[ME], &[PAD_BT]);
+        let plan = repair_plan(&s, &wanted, Some(ME), &[r"\Device\x\explorer.exe".into()], &[]);
+        assert!(plan.inverse && plan.disallow_self && !plan.allow_self);
+        assert!(plan.allow_apps.is_empty());
+        let s = snap(true, true, &[], &[PAD_BT]);
+        assert!(!repair_plan(&s, &wanted, Some(ME), &[], &[]).disallow_self);
     }
 
     #[test]

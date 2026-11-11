@@ -167,7 +167,10 @@ pub fn hide(instance_ids: &[String], exe: &Path) -> io::Result<Changes> {
     let mut ch = Changes::default();
 
     // Whitelist ourselves first, or a reconnect would lose the controller.
-    if let Some(dos) = dos_device_path(&exe.display().to_string()) {
+    // Not with HidHide's inverse mode on: its list then names the apps that
+    // may *not* see hidden devices.
+    let inverse = get_bool(&h, GET_INVERSE).unwrap_or(false);
+    if let Some(dos) = dos_device_path(&exe.display().to_string()).filter(|_| !inverse) {
         let mut apps = get_list(&h, GET_WHITELIST)?;
         if !apps.iter().any(|a| eq(a, &dos)) {
             apps.push(dos.clone());
@@ -212,6 +215,12 @@ pub fn set_app(exe: &Path, allow: bool) -> io::Result<Option<String>> {
     } else {
         Ok(None)
     }
+}
+
+/// Turn HidHide's device hiding on or off.
+pub fn set_active(on: bool) -> io::Result<()> {
+    let h = open()?;
+    set_bool(&h, SET_ACTIVE, on)
 }
 
 /// The device block list as it stands.

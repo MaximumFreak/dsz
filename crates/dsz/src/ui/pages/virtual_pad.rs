@@ -347,6 +347,25 @@ impl App {
                         self.engine.settings.write().hidhide_control = ctl;
                         self.engine.settings_changed();
                     }
+                    if ctl && drivers.hidhide {
+                        let health = self.engine.hider.health();
+                        if let Some(w) = &health.warning {
+                            note(ui, w, WARN);
+                        }
+                        if let Some((at, what)) = &health.repaired {
+                            if at.elapsed() < Duration::from_secs(15 * 60) {
+                                let what = what.iter().map(|w| crate::i18n::tr(w)).collect::<Vec<_>>().join("; ");
+                                note(
+                                    ui,
+                                    &crate::localized_format!(
+                                        "HidHide was changed outside DSZ, so DSZ {what}.", "O HidHide foi alterado fora do DSZ, então o DSZ {what}.", "HidHide se cambió fuera de DSZ, así que DSZ {what}."
+                                    ),
+                                    ACCENT,
+                                );
+                            }
+                        }
+                        muted(ui, crate::i18n::tr("DSZ checks HidHide every few seconds and puts back what it needs if it was changed in HidHide's own window: the real controller hidden, the virtual one visible, DSZ allowed to see the controller. Other devices and apps there are left alone."));
+                    }
                 });
                 ui.add_space(12.0);
                 card(

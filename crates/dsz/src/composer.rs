@@ -20,6 +20,12 @@ pub struct Composer {
     low_since: Option<Instant>,
     /// The last report ran the classic motors.
     motors_on: bool,
+    /// The battery blend shown, eased toward the battery's level so a 10 %
+    /// step doesn't jump; see [`battery_blend`].
+    blend: Option<f32>,
+    /// Lightbar level for the idle power-off countdown, 1 while in use;
+    /// see [`idle_fade`]. Set by the writer before each report.
+    pub idle_level: f32,
 }
 
 pub fn hsv(h: f32, s: f32, v: f32) -> [u8; 3] {
@@ -67,6 +73,50 @@ pub fn battery_color(percent: u8) -> [u8; 3] {
     }
 }
 
+/// How far toward the empty color the battery blend is (0 = the set color,
+/// 1 = the empty color): none at or above `from` percent, all of it at
+/// 0 %, in a straight line between, as DS4Windows blends its "color by
+/// battery" from 100 % down. None while the level is unknown (the short
+/// Bluetooth report).
+pub fn battery_blend(input: &InputState, from: u8) -> Option<f32> {
+    if !input.full {
+        return None;
+    }
+    let from = from.clamp(10, 100) as f32;
+    let pct = input.battery_percent.min(100) as f32;
+    Some(((from - pct) / from).clamp(0.0, 1.0))
+}
+
+/// The blend moves at most this much a second, so a 10 % step of the
+/// whole-charge blend takes two seconds.
+const BLEND_RATE: f32 = 0.05;
+
+/// Longest stretch the lightbar takes to fade out before an idle power-off.
+const IDLE_FADE_MAX: Duration = Duration::from_secs(5 * 60);
+/// The fade moves in this many steps, each a single report with the new
+/// color: a few seconds apart over five minutes, too small to see as steps,
+/// and no more reports than the keepalive sends while the pad lies idle.
+const IDLE_FADE_STEPS: f32 = 32.0;
+
+/// Lightbar level (1 = as set, 0 = dark) after `idle` without input, when
+/// the controller turns itself off after `timeout`. Like DS4Windows' idle
+/// fade, it eases out to dark over the second half of the timeout, so the
+/// first dimming shows soonest and the bar is dark as the controller turns
+/// off, but over five minutes at most, so a long timeout keeps the bar lit
+/// for most of the wait. Rounded up to [`IDLE_FADE_STEPS`].
+pub fn idle_fade(idle: Duration, timeout: Duration) -> f32 {
+    if timeout.is_zero() {
+        return 1.0;
+    }
+    let window = (timeout / 2).min(IDLE_FADE_MAX);
+    let start = timeout - window;
+    if idle <= start {
+        return 1.0;
+    }
+    let e = ((idle - start).as_secs_f32() / window.as_secs_f32()).min(1.0);
+    ((1.0 - e * (2.0 - e)) * IDLE_FADE_STEPS).ceil() / IDLE_FADE_STEPS
+}
+
 /// Low-battery warning: two short blinks of the warning color, then a
 /// pause, every 2.5 s.
 fn low_battery_blink(t: Duration) -> bool {
@@ -101,6 +151,8 @@ impl Composer {
             last: now,
             low_since: None,
             motors_on: false,
+            blend: None,
+            idle_level: 1.0,
         }
     }
 
@@ -121,6 +173,41 @@ impl Composer {
         self.last = now;
         let bright = l.brightness.min(100) as f32 / 100.0;
         let speed = l.speed.clamp(0.0, 1.0);
+        let color = self.mode_color(l, input, loudness, now, dt, bright, speed);
+        if !l.battery_fade
+            || !matches!(l.mode, LightMode::Static | LightMode::Breathing | LightMode::Strobe)
+        {
+            self.blend = None;
+            return color;
+        }
+        let Some(target) = battery_blend(input, l.battery_fade_from) else {
+            return color;
+        };
+        let shown = match self.blend {
+            Some(b) if (target - b).abs() > BLEND_RATE * dt => {
+                b + (target - b).signum() * BLEND_RATE * dt
+            }
+            _ => target,
+        };
+        self.blend = Some(shown);
+        let empty = scale(
+            l.battery_fade_color,
+            l.battery_fade_brightness.min(100) as f32 / 100.0,
+        );
+        lerp(color, empty, shown)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mode_color(
+        &mut self,
+        l: &crate::profile::Lighting,
+        input: &InputState,
+        loudness: f32,
+        now: Instant,
+        dt: f32,
+        bright: f32,
+        speed: f32,
+    ) -> [u8; 3] {
         match l.mode {
             LightMode::Off => [0, 0, 0],
             LightMode::Static => scale(l.color, bright),
@@ -202,6 +289,11 @@ impl Composer {
         let vo = &p.virtual_out;
         let game = &feedback.game;
         let mut color = self.lightbar(p, input, loudness, now);
+        if self.idle_level < 1.0 {
+            // Only the profile's own light fades: a game's or a mod's color,
+            // the low-battery blink and the identify flash stay as sent.
+            color = scale(color, self.idle_level);
+        }
         if let (true, Some(rgb)) = (vo.game_leds, game.rgb) {
             color = rgb;
         }
@@ -331,6 +423,136 @@ mod tests {
         assert_eq!(leds(89), 0x0F);
         assert_eq!(leds(90), 0x1F);
         assert_eq!(leds(100), 0x1F);
+    }
+
+    #[test]
+    fn idle_fade_eases_out_over_the_end_of_the_timeout() {
+        let m = |x: u64| Duration::from_secs(x * 60);
+        let s = |x: u64| Duration::from_secs(x);
+        // 15 minutes: lit for 10, then five minutes to dark.
+        assert_eq!(idle_fade(m(0), m(15)), 1.0);
+        assert_eq!(idle_fade(m(10), m(15)), 1.0);
+        let half = idle_fade(m(10) + s(150), m(15));
+        assert_eq!(half, 0.25);
+        assert_eq!(idle_fade(m(10) + s(1), m(15)), 1.0, "a step at a time");
+        assert_eq!(idle_fade(m(15), m(15)), 0.0);
+        assert_eq!(idle_fade(m(20), m(15)), 0.0);
+        // Short timeouts fade over their second half, as DS4Windows does.
+        assert_eq!(idle_fade(s(30), m(1)), 1.0);
+        assert!(idle_fade(s(45), m(1)) < 0.3);
+        // Steadily darker, never brighter, along the way, in few steps.
+        let mut last = 1.0;
+        let mut steps = 0;
+        for t in 0..=900 {
+            let v = idle_fade(s(t), m(15));
+            assert!(v <= last && (0.0..=1.0).contains(&v));
+            steps += (v != last) as u32;
+            last = v;
+        }
+        assert!(steps <= IDLE_FADE_STEPS as u32, "{steps}");
+        assert_eq!(idle_fade(m(5), Duration::ZERO), 1.0);
+    }
+
+    #[test]
+    fn idle_fade_dims_only_the_profile_light() {
+        let mut c = Composer::new();
+        let mut p = Profile::default();
+        p.lighting.brightness = 100;
+        p.lighting.color = [200, 100, 40];
+        let input = InputState::default();
+        let none = crate::device::Overrides::default();
+        let toggles = crate::device::Toggles::default();
+        let now = Instant::now();
+        let fb = crate::device::Feedback::default();
+        let lit = c.compose(&p, &input, &none, &fb, &toggles, false, 0.0, now);
+        assert_eq!(lit.lightbar, [200, 100, 40], "in use: as set");
+        c.idle_level = 0.5;
+        let dim = c.compose(&p, &input, &none, &fb, &toggles, false, 0.0, now);
+        assert_eq!(dim.lightbar, [100, 50, 20]);
+        assert_eq!(OutputState { lightbar: lit.lightbar, ..dim }, lit, "nothing else changes");
+        // A game's color stays as the game sent it.
+        p.virtual_out.game_leds = true;
+        let mut game = crate::device::Feedback::default();
+        game.game.rgb = Some([10, 20, 30]);
+        assert_eq!(c.compose(&p, &input, &none, &game, &toggles, false, 0.0, now).lightbar, [10, 20, 30]);
+        // The low-battery blink shows at full strength.
+        let low = InputState {
+            full: true,
+            battery_percent: 10,
+            battery_status: BatteryStatus::Discharging,
+            ..Default::default()
+        };
+        let blink = c.compose(&p, &low, &none, &fb, &toggles, false, 0.0, now);
+        assert_eq!(blink.lightbar, p.lighting.low_battery_color);
+    }
+
+    #[test]
+    fn battery_blend_follows_the_charge() {
+        let at = |pct: u8, from: u8| {
+            let input = InputState {
+                full: true,
+                battery_percent: pct,
+                battery_status: BatteryStatus::Discharging,
+                ..Default::default()
+            };
+            battery_blend(&input, from).unwrap()
+        };
+        assert_eq!(at(100, 100), 0.0);
+        assert_eq!(at(50, 100), 0.5);
+        assert_eq!(at(0, 100), 1.0);
+        assert_eq!(at(60, 50), 0.0, "not yet below the start");
+        assert_eq!(at(50, 50), 0.0);
+        assert_eq!(at(20, 50), 0.6);
+        assert_eq!(at(0, 50), 1.0);
+        assert_eq!(battery_blend(&InputState::default(), 100), None, "level unknown");
+    }
+
+    #[test]
+    fn battery_fade_mixes_toward_the_empty_color_only_when_on() {
+        let mut p = Profile::default();
+        p.lighting.brightness = 100;
+        p.lighting.color = [0, 0, 255];
+        let half = InputState {
+            full: true,
+            battery_percent: 50,
+            battery_status: BatteryStatus::Discharging,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        // Off (every existing profile): the color as set, at any level.
+        let mut c = Composer::new();
+        assert_eq!(c.lightbar(&p, &half, 0.0, now), [0, 0, 255]);
+        for mode in [LightMode::Rainbow, LightMode::Battery, LightMode::Audio, LightMode::Off] {
+            let mut q = p.clone();
+            q.lighting.mode = mode;
+            let plain = Composer::new().lightbar(&q, &half, 0.0, now);
+            q.lighting.battery_fade = true;
+            assert_eq!(Composer::new().lightbar(&q, &half, 0.0, now), plain, "{mode:?} ignores it");
+        }
+        // On: blue to purple to red.
+        p.lighting.battery_fade = true;
+        p.lighting.battery_fade_color = [255, 0, 0];
+        assert_eq!(c.lightbar(&p, &half, 0.0, now), [128, 0, 128]);
+        // The empty end has its own brightness.
+        p.lighting.brightness = 50;
+        let empty = InputState { battery_percent: 0, ..half };
+        let mut c = Composer::new();
+        assert_eq!(c.lightbar(&p, &empty, 0.0, now), [255, 0, 0]);
+        // A step down eases over rather than jumping.
+        let mut c = Composer::new();
+        p.lighting.brightness = 100;
+        let full = InputState { battery_percent: 100, ..half };
+        assert_eq!(c.lightbar(&p, &full, 0.0, now), [0, 0, 255]);
+        let ninety = InputState { battery_percent: 90, ..half };
+        let soon = c.lightbar(&p, &ninety, 0.0, now + Duration::from_millis(100));
+        assert!(soon[0] < 26 && soon[0] > 0, "{soon:?}");
+        let mut t = now + Duration::from_millis(100);
+        for _ in 0..30 {
+            t += Duration::from_millis(100);
+            c.lightbar(&p, &ninety, 0.0, t);
+        }
+        let end = c.lightbar(&p, &ninety, 0.0, t);
+        assert!(end[0].abs_diff(26) <= 1 && end[1] == 0 && end[2].abs_diff(230) <= 1, "{end:?}");
     }
 
     #[test]
