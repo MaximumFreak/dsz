@@ -546,7 +546,12 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 heavy = heavy.max(gh);
                 light = light.max(gl);
             }
-            synth.rumble(heavy, light, h.rumble_intensity);
+            if profile.rumble.always_classic {
+                // The firmware's rumble emulation plays it (composer).
+                synth.rumble(0, 0, 1.0);
+            } else {
+                synth.rumble(heavy, light, h.rumble_intensity);
+            }
             pulses.extend(fb.pulses.drain(..));
         }
         for p in pulses.drain(..) {
@@ -556,9 +561,11 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         spk.clear();
         let mut speaker_peak = 0f32;
         let mut any_haptics = false;
+        // Rumble strength opens limiter headroom only while rumble plays on
+        // the stream.
         let drive = haptic_drive(
             (game_src.is_some() && vo.game_haptics).then_some(vo.game_haptics_level),
-            h.rumble_intensity,
+            if profile.rumble.always_classic { 1.0 } else { h.rumble_intensity },
         );
         for frame in frames.iter_mut().take(blocks) {
             // PC audio window

@@ -575,8 +575,18 @@ impl App {
                         crate::i18n::tr("Smoother rumble emulation (firmware 2.24 and later)"),
                         &mut r.enhanced,
                     );
+                    if !ds4 {
+                        toggle_row(
+                            ui,
+                            crate::i18n::tr("Classic rumble always"),
+                            crate::i18n::tr("Rumble uses the controller's own emulation even while haptics play; game haptics pause while it rumbles"),
+                            &mut r.always_classic,
+                        );
+                    }
+                    let classic = r.always_classic && !ds4;
                     if bt && p.haptics.enabled {
                         let h = &mut p.haptics;
+                        ui.add_enabled_ui(!classic, |ui| {
                         toggle_row(
                             ui,
                             crate::i18n::tr("Rumble as haptics"),
@@ -594,6 +604,7 @@ impl App {
                         ) {
                             h.rumble_intensity = pct / 100.0;
                         }
+                        });
                     }
                     if let Some(d) = dev {
                         ui.horizontal(|ui| {

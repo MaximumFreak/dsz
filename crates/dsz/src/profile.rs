@@ -167,6 +167,14 @@ pub struct Rumble {
     pub power_reduction: u8,
     /// Firmware "improved rumble emulation".
     pub enhanced: bool,
+    /// Classic rumble (a game's or a test's) always goes to the
+    /// controller's own rumble emulation, even while haptics stream, where
+    /// it would otherwise be played as haptics (issue 43). The firmware
+    /// takes the actuators while it rumbles, so streamed haptics pause
+    /// until the rumble stops. Left out of the JSON while off, so saved
+    /// profiles stay as they were.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub always_classic: bool,
 }
 
 impl Default for Rumble {
@@ -174,6 +182,7 @@ impl Default for Rumble {
         Rumble {
             power_reduction: 0,
             enhanced: true,
+            always_classic: false,
         }
     }
 }
@@ -1368,6 +1377,24 @@ mod tests {
             let q: Profile = serde_json::from_str(&s).unwrap();
             assert_eq!(p, q);
         }
+    }
+
+    #[test]
+    fn classic_rumble_always_is_off_and_left_out_until_turned_on() {
+        let p: Profile =
+            serde_json::from_str(r#"{"name":"Old","rumble":{"power_reduction":2,"enhanced":false}}"#).unwrap();
+        assert!(!p.rumble.always_classic);
+        assert_eq!(p.rumble.power_reduction, 2);
+        for p in Profile::starter_set() {
+            assert!(!p.rumble.always_classic, "{}", p.name);
+            let json = serde_json::to_string(&p).unwrap();
+            assert!(!json.contains("always_classic"), "{}", p.name);
+        }
+        let mut on = Profile::default();
+        on.rumble.always_classic = true;
+        let json = serde_json::to_string(&on).unwrap();
+        assert!(json.contains(r#""always_classic":true"#));
+        assert_eq!(serde_json::from_str::<Profile>(&json).unwrap(), on);
     }
 
     #[test]
