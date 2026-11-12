@@ -83,6 +83,12 @@ impl App {
                     );
                     changed |=
                         toggle_row(ui, crate::i18n::tr("Show tips"), crate::i18n::tr("On the Overview page"), &mut s.show_tips);
+                    changed |= toggle_row(
+                        ui,
+                        crate::i18n::tr("Battery as bars"),
+                        crate::i18n::tr("Three bars, like Steam and PlayStation, instead of a percentage"),
+                        &mut s.battery_bars,
+                    );
                     let mut scale = s.ui_scale;
                     let moved = row(ui, crate::i18n::tr("Interface size"), crate::i18n::tr("On top of the Windows display scale"), |ui| {
                         ui.add(

@@ -289,13 +289,14 @@ pub fn start(engine: Arc<Engine>, on_show: impl Fn() + Send + Sync + 'static) {
                     let tip = if devs.is_empty() {
                         "DSZ — no controller".to_string()
                     } else {
+                        let settings = engine.settings.read();
                         let parts: Vec<String> = devs
                             .iter()
                             .map(|d| {
                                 format!(
-                                    "{} {}%",
+                                    "{} {}",
                                     d.model.name(),
-                                    d.live.lock().input.battery_shown()
+                                    settings.battery_label(&d.live.lock().input)
                                 )
                             })
                             .collect();

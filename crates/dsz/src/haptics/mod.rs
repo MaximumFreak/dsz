@@ -34,12 +34,13 @@ pub fn log_game_settings(
 ) {
     let vo = &p.virtual_out;
     log::info!(
-        "{what}; profile \"{}\": game haptics {} at {} %, haptic rumble strength {} %, game rumble {}, on {}",
+        "{what}; profile \"{}\": game haptics {} at {} %, haptic rumble strength {} %, game rumble {}{}, on {}",
         engine.profile_name_for(device),
         if vo.game_haptics { "on" } else { "off" },
         vo.game_haptics_level,
         (p.haptics.rumble_intensity * 100.0).round(),
         if vo.game_rumble { "on" } else { "off" },
+        if p.rumble.always_classic { " (classic rumble always)" } else { "" },
         if device.is_bluetooth() { "Bluetooth" } else { "USB" },
     );
 }

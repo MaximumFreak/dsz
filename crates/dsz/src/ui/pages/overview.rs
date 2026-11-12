@@ -123,6 +123,7 @@ impl App {
                 });
             });
         };
+        let battery_bars = self.engine.settings.read().battery_bars;
         let draw_stats = |ui: &mut egui::Ui| {
             card(ui, crate::i18n::tr("Status"), "", |ui| {
                 let link = d.link.lock().clone();
@@ -150,8 +151,20 @@ impl App {
                             ds_proto::BatteryStatus::Error => crate::i18n::tr(" · error"),
                             _ => "",
                         };
-                        ui.label(RichText::new(format!("{bat}%{status}")).color(TEXT));
-                        meter(ui, bat as f32 / 100.0, bcol, 90.0);
+                        if battery_bars {
+                            let status = status.trim_start_matches(" · ");
+                            ui.label(RichText::new(status).color(TEXT));
+                            let n = input.battery_bars();
+                            let col = match n {
+                                0 => BAD,
+                                1 => WARN,
+                                _ => GOOD,
+                            };
+                            bars_meter(ui, n, col, 90.0);
+                        } else {
+                            ui.label(RichText::new(format!("{bat}%{status}")).color(TEXT));
+                            meter(ui, bat as f32 / 100.0, bcol, 90.0);
+                        }
                     });
                 });
                 let s = &d.stats;
