@@ -150,6 +150,36 @@ pub fn build_audio_with_microphone<'a>(
     microphone: Option<bool>,
     out: &'a mut [u8],
 ) -> &'a [u8] {
+    audio_report(counters, opus, Some(haptics), headset, microphone, out)
+}
+
+/// A speaker report with the haptic packet left out: the config packet and
+/// the two Opus frames, then zeros, which end the packet list as the zero
+/// tail of a `0x32` report does. The actuators get no PCM from it, so they
+/// stay with whatever last took them, such as the firmware's rumble
+/// emulation after a `0x31` report with the rumble bits set; a haptic
+/// packet, even a silent one, takes them back. The speaker plays as usual.
+/// DS4Windows' fork sends speaker audio with no haptic packet at all (its
+/// `0x35` report carries only an Opus packet), so the firmware takes speaker
+/// audio on its own. Counters advance as for [`build_audio`].
+pub fn build_audio_without_haptics<'a>(
+    counters: &mut StreamCounters,
+    opus: &[[u8; OPUS_FRAME]; BLOCKS],
+    headset: bool,
+    microphone: Option<bool>,
+    out: &'a mut [u8],
+) -> &'a [u8] {
+    audio_report(counters, opus, None, headset, microphone, out)
+}
+
+fn audio_report<'a>(
+    counters: &mut StreamCounters,
+    opus: &[[u8; OPUS_FRAME]; BLOCKS],
+    haptics: Option<&[[u8; HAPTIC_FRAME]; BLOCKS]>,
+    headset: bool,
+    microphone: Option<bool>,
+    out: &'a mut [u8],
+) -> &'a [u8] {
     let r = &mut out[..AUDIO_REPORT_LEN];
     r.fill(0);
     r[0] = AUDIO_REPORT_ID;
@@ -165,11 +195,13 @@ pub fn build_audio_with_microphone<'a>(
         let at = OPUS_AT + 2 + k * OPUS_FRAME;
         r[at..at + OPUS_FRAME].copy_from_slice(f);
     }
-    r[AUDIO_HAPTICS_AT] = 0x80 | 0x40 | 0x12;
-    r[AUDIO_HAPTICS_AT + 1] = HAPTIC_FRAME as u8;
-    for (k, f) in haptics.iter().enumerate() {
-        let at = AUDIO_HAPTICS_AT + 2 + k * HAPTIC_FRAME;
-        r[at..at + HAPTIC_FRAME].copy_from_slice(f);
+    if let Some(haptics) = haptics {
+        r[AUDIO_HAPTICS_AT] = 0x80 | 0x40 | 0x12;
+        r[AUDIO_HAPTICS_AT + 1] = HAPTIC_FRAME as u8;
+        for (k, f) in haptics.iter().enumerate() {
+            let at = AUDIO_HAPTICS_AT + 2 + k * HAPTIC_FRAME;
+            r[at..at + HAPTIC_FRAME].copy_from_slice(f);
+        }
     }
     crc::seal(crc::PREFIX_OUTPUT, r);
 
@@ -283,6 +315,37 @@ mod tests {
         let r = build_audio(&mut c, &opus, &[h, h], true, &mut buf);
         assert_eq!(&r[10..12], &[0xD6, 0xC8], "headset audio type");
         assert!(crc::verify(crc::PREFIX_OUTPUT, r));
+    }
+
+    #[test]
+    fn audio_without_haptics_leaves_only_the_haptic_packet_out() {
+        let mut opus = [[0u8; OPUS_FRAME]; BLOCKS];
+        opus[0][0] = 0xF4;
+        opus[1][0] = 0xF4;
+        opus[1][199] = 0xAB;
+        let h = pattern();
+        for headset in [false, true] {
+            for microphone in [None, Some(false), Some(true)] {
+                let mut a = StreamCounters::new();
+                let mut b = StreamCounters::new();
+                let mut buf = [0u8; MAX_REPORT];
+                let mut buf2 = [0xEEu8; MAX_REPORT];
+                for _ in 0..3 {
+                    let with = build_audio_with_microphone(&mut a, &opus, &[h, h], headset, microphone, &mut buf).to_vec();
+                    let without = build_audio_without_haptics(&mut b, &opus, headset, microphone, &mut buf2).to_vec();
+                    assert_eq!(without.len(), AUDIO_REPORT_LEN);
+                    // Config, counter and Opus frames as with haptics.
+                    assert_eq!(&without[..AUDIO_HAPTICS_AT], &with[..AUDIO_HAPTICS_AT]);
+                    // No haptic packet: zeros up to the CRC end the packets.
+                    assert!(without[AUDIO_HAPTICS_AT..AUDIO_REPORT_LEN - 4].iter().all(|&x| x == 0));
+                    assert!(crc::verify(crc::PREFIX_OUTPUT, &without));
+                }
+                // The counters moved the same way.
+                let with = build_audio(&mut a, &opus, &[h, h], headset, &mut buf).to_vec();
+                let without = build_audio_without_haptics(&mut b, &opus, headset, None, &mut buf2).to_vec();
+                assert_eq!(&with[..AUDIO_HAPTICS_AT], &without[..AUDIO_HAPTICS_AT]);
+            }
+        }
     }
 
     #[test]

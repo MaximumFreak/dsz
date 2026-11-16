@@ -412,7 +412,8 @@ impl TriggerEffect {
     /// plus its parameters. Modes 0..=18 and their parameters are as game
     /// mods define them; 19..=26 follow Nielk1's trigger effect generator
     /// (MIT), which the mods that send them use. `None` for an unknown mode
-    /// or a custom mode without a public definition (see [`custom_mode_byte`]).
+    /// or a custom mode without a public definition (see [`custom_mode_byte`]),
+    /// except VibrateResistance, which mods use for grip loss.
     pub fn from_mod_legacy(kind: i64, p: &[u8]) -> Option<TriggerEffect> {
         let g = |i: usize, d: u8| p.get(i).copied().unwrap_or(d);
         let zones10 = || {
@@ -459,6 +460,15 @@ impl TriggerEffect {
             },
             11 => TriggerEffect::Preset {
                 preset: TriggerPreset::VibratePulse,
+            },
+            // VibrateResistance (plain, A, B, A+B): [frequency, stiffness,
+            // start]. Nothing public gives its firmware bytes, so it is DSZ's
+            // own vibration: the mod's frequency from its start (0-255 of the
+            // travel), stiffness 0-255 as the strength.
+            12 if (9..=12).contains(&g(0, 0)) => TriggerEffect::Vibration {
+                position: (g(3, 0) as u16 * 10 / 256) as u8,
+                amplitude: ((g(2, 0) as u16 * 8 + 254) / 255).max(1) as u8,
+                frequency: g(1, 0),
             },
             12 => {
                 let mut forces = [0u8; 7];

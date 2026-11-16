@@ -20,6 +20,12 @@ pub struct Composer {
     low_since: Option<Instant>,
     /// The last report ran the classic motors.
     motors_on: bool,
+    /// "Classic rumble always": the firmware's rumble emulation keeps the
+    /// actuators until this instant, [`CLASSIC_HOLD`] after the last rumble.
+    classic_until: Option<Instant>,
+    /// The last report left the actuators to the firmware's rumble
+    /// emulation while the haptic stream runs; see [`Composer::classic_owns`].
+    classic: bool,
     /// The battery blend shown, eased toward the battery's level so a 10 %
     /// step doesn't jump; see [`battery_blend`].
     blend: Option<f32>,
@@ -91,6 +97,13 @@ pub fn battery_blend(input: &InputState, from: u8) -> Option<f32> {
 /// whole-charge blend takes two seconds.
 const BLEND_RATE: f32 = 0.05;
 
+/// With "Classic rumble always", how long the firmware's rumble emulation
+/// keeps the actuators after a game's rumble drops to zero, so the short
+/// gaps between rumble effects (a game often sends zero for a frame or two
+/// between them) don't hand the actuators to the stream and back each time.
+/// Short enough that game haptics and clicks come back without a felt delay.
+pub const CLASSIC_HOLD: Duration = Duration::from_millis(150);
+
 /// Longest stretch the lightbar takes to fade out before an idle power-off.
 const IDLE_FADE_MAX: Duration = Duration::from_secs(5 * 60);
 /// The fade moves in this many steps, each a single report with the new
@@ -151,9 +164,20 @@ impl Composer {
             last: now,
             low_since: None,
             motors_on: false,
+            classic_until: None,
+            classic: false,
             blend: None,
             idle_level: 1.0,
         }
+    }
+
+    /// Whether the last composed report left the actuators to the firmware's
+    /// rumble emulation while haptics stream ("Classic rumble always", while
+    /// rumble plays and [`CLASSIC_HOLD`] after). The stream leaves its haptic
+    /// packet out meanwhile so it doesn't take them back (issue 43). Always
+    /// false with the option off.
+    pub fn classic_owns(&self) -> bool {
+        self.classic
     }
 
     /// Lightbar color for the profile at `now`, without overrides.
@@ -381,8 +405,13 @@ impl Composer {
         // motors sends one more valid report with them at zero first, so the
         // firmware's rumble stops rather than holding its last level.
         // With "Classic rumble always" the firmware's emulation plays rumble
-        // even then: it takes the actuators while rumble lasts and hands
-        // them back to the stream the same way.
+        // even then: it takes the actuators while rumble lasts, and for
+        // CLASSIC_HOLD after (the motors at zero, so a short gap between
+        // effects doesn't flip the actuators back and forth), then hands
+        // them back to the stream. Meanwhile the stream leaves its haptic
+        // packet out (`classic_owns`): every haptic packet, even a silent
+        // one, takes the actuators back from the emulation, which made the
+        // rumble jitter and skip while the speaker stream ran (issue 43).
         out.rumble_reduction = p.rumble.power_reduction.min(7);
         out.enhanced_rumble = p.rumble.enhanced;
         let (mut lo, mut hi) = feedback.rumble_now(now);
@@ -392,7 +421,15 @@ impl Composer {
             hi = hi.max(gl);
         }
         let rumbling = lo > 0 || hi > 0;
-        if pcm_haptics && !(p.rumble.always_classic && rumbling) {
+        if !p.rumble.always_classic {
+            self.classic_until = None;
+        } else if rumbling {
+            self.classic_until = Some(now + CLASSIC_HOLD);
+        }
+        self.classic = pcm_haptics
+            && p.rumble.always_classic
+            && (rumbling || self.classic_until.is_some_and(|u| now < u));
+        if pcm_haptics && !self.classic {
             out.rumble_valid = self.motors_on;
             self.motors_on = false;
         } else {
@@ -669,22 +706,135 @@ mod tests {
         let on = c.compose(&p, &input, &none, &fb, &toggles, true, 0.0, now);
         assert!(on.rumble_valid);
         assert_eq!((on.rumble_left, on.rumble_right), (200, 90));
-        // On stopping, one report with the motors at zero, then the
-        // actuators go back to the stream.
+        assert!(c.classic_owns());
+        // On stopping, the motors at zero, kept by the firmware for
+        // CLASSIC_HOLD, then the actuators go back to the stream.
         fb.game.rumble = None;
         let stop = c.compose(&p, &input, &none, &fb, &toggles, true, 0.0, now);
         assert!(stop.rumble_valid);
         assert_eq!((stop.rumble_left, stop.rumble_right), (0, 0));
-        let back = c.compose(&p, &input, &none, &fb, &toggles, true, 0.0, now);
+        assert!(c.classic_owns());
+        let later = now + CLASSIC_HOLD;
+        let back = c.compose(&p, &input, &none, &fb, &toggles, true, 0.0, later);
         assert!(!back.rumble_valid);
+        assert!(!c.classic_owns());
         // Game rumble turned off in the profile still doesn't play.
         p.virtual_out.game_rumble = false;
         fb.game.rumble = Some((200, 90));
-        assert!(!c.compose(&p, &input, &none, &fb, &toggles, true, 0.0, now).rumble_valid);
+        assert!(!c.compose(&p, &input, &none, &fb, &toggles, true, 0.0, later).rumble_valid);
+        assert!(!c.classic_owns());
         // A test rumble plays the same way.
-        fb.rumbles.push((255, 0, now + Duration::from_millis(450)));
-        let test = c.compose(&p, &input, &none, &fb, &toggles, true, 0.0, now);
+        fb.rumbles.push((255, 0, later + Duration::from_millis(450)));
+        let test = c.compose(&p, &input, &none, &fb, &toggles, true, 0.0, later);
         assert!(test.rumble_valid);
         assert_eq!((test.rumble_left, test.rumble_right), (255, 0));
+        assert!(c.classic_owns());
+    }
+
+    #[test]
+    fn classic_rumble_always_rides_out_short_gaps() {
+        let mut p = Profile::default();
+        p.rumble.always_classic = true;
+        let input = InputState::default();
+        let none = crate::device::Overrides::default();
+        let toggles = crate::device::Toggles::default();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut c = Composer::new();
+        let mut fb = crate::device::Feedback::default();
+        let step = |c: &mut Composer, fb: &crate::device::Feedback, ms: u64| {
+            let o = c.compose(&p, &input, &none, fb, &toggles, true, 0.0, at(ms));
+            (o.rumble_valid, o.rumble_left, o.rumble_right, c.classic_owns())
+        };
+        fb.game.rumble = Some((111, 0));
+        assert_eq!(step(&mut c, &fb, 0), (true, 111, 0, true));
+        // A game's zero between two effects: the motors stop, the
+        // emulation keeps the actuators, the stream stays out.
+        fb.game.rumble = Some((0, 0));
+        assert_eq!(step(&mut c, &fb, 16), (true, 0, 0, true));
+        assert_eq!(step(&mut c, &fb, 100), (true, 0, 0, true));
+        fb.game.rumble = Some((111, 0));
+        assert_eq!(step(&mut c, &fb, 120), (true, 111, 0, true));
+        // The hold counts from the last rumble, not the first.
+        fb.game.rumble = None;
+        let last = 120 + CLASSIC_HOLD.as_millis() as u64;
+        assert_eq!(step(&mut c, &fb, last - 1), (true, 0, 0, true));
+        // Then the actuators go back to the stream: rumble fields invalid.
+        assert_eq!(step(&mut c, &fb, last), (false, 0, 0, false));
+        assert_eq!(step(&mut c, &fb, last + 500), (false, 0, 0, false));
+        // Without the stream there is nothing to hand over; the motors
+        // simply follow the rumble, as before.
+        fb.game.rumble = Some((111, 0));
+        let o = c.compose(&p, &input, &none, &fb, &toggles, false, 0.0, at(last + 600));
+        assert!(o.rumble_valid && o.rumble_left == 111 && !c.classic_owns());
+        // Turning the option off drops the hold at once.
+        fb.game.rumble = Some((111, 0));
+        let _ = step(&mut c, &fb, last + 700);
+        assert!(c.classic_owns());
+        fb.game.rumble = None;
+        let mut off = p.clone();
+        off.rumble.always_classic = false;
+        let o = c.compose(&off, &input, &none, &fb, &toggles, true, 0.0, at(last + 710));
+        // One report with the motors at zero (the old handover), then invalid.
+        assert!(o.rumble_valid && o.rumble_left == 0 && !c.classic_owns());
+        let o = c.compose(&off, &input, &none, &fb, &toggles, true, 0.0, at(last + 720));
+        assert!(!o.rumble_valid && !c.classic_owns());
+    }
+
+    #[test]
+    fn classic_rumble_always_off_is_byte_for_byte_the_old_handover() {
+        // The 0.4.10 rule with the option off, written out: while streaming
+        // the rumble fields are invalid, except one report with the motors
+        // at zero right after they ran; otherwise the motors follow rumble.
+        let p = Profile::default();
+        let input = InputState::default();
+        let none = crate::device::Overrides::default();
+        let toggles = crate::device::Toggles::default();
+        let t0 = Instant::now();
+        let bytes = |o: &OutputState| {
+            let mut b = [0u8; 128];
+            o.build(ds_proto::Connection::Bluetooth, &mut b).to_vec()
+        };
+        // (ms, game rumble, streaming)
+        type Step = (u64, Option<(u8, u8)>, bool);
+        let script: &[Step] = &[
+            (0, None, false),
+            (8, Some((111, 0)), false),
+            (16, Some((111, 0)), true),
+            (32, Some((0, 0)), true),
+            (48, Some((111, 0)), true),
+            (64, None, true),
+            (80, Some((200, 90)), false),
+            (88, Some((0, 0)), false),
+            (96, Some((200, 90)), false),
+            (104, Some((200, 90)), true),
+            (120, None, true),
+            (400, None, true),
+            (500, Some((50, 50)), false),
+            (508, None, false),
+        ];
+        let mut c = Composer::new();
+        let mut fb = crate::device::Feedback::default();
+        let mut motors_on = false;
+        for &(ms, rumble, pcm) in script {
+            fb.game.rumble = rumble;
+            let now = t0 + Duration::from_millis(ms);
+            let got = c.compose(&p, &input, &none, &fb, &toggles, pcm, 0.0, now);
+            assert!(!c.classic_owns(), "{ms}");
+            let (lo, hi) = rumble.unwrap_or((0, 0));
+            let mut want = Composer::new().compose(&p, &input, &none, &fb, &toggles, pcm, 0.0, now);
+            if pcm {
+                want.rumble_valid = motors_on;
+                want.rumble_left = 0;
+                want.rumble_right = 0;
+                motors_on = false;
+            } else {
+                want.rumble_valid = true;
+                want.rumble_left = lo;
+                want.rumble_right = hi;
+                motors_on = lo > 0 || hi > 0;
+            }
+            assert_eq!(bytes(&got), bytes(&want), "{ms}");
+        }
     }
 }

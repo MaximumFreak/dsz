@@ -216,6 +216,10 @@ pub struct Device {
     pub(crate) haptics_wake: Receiver<()>,
     /// The haptics thread owns the actuators (PCM mode).
     pub pcm_mode: AtomicBool,
+    /// "Classic rumble always" has the actuators: the firmware's rumble
+    /// emulation plays and the haptic stream leaves its haptic packet out.
+    /// Set by the writer from [`crate::composer::Composer::classic_owns`].
+    pub classic_rumble: AtomicBool,
     /// A game's haptic audio is playing on a wired controller's own sound
     /// device: the control reports leave the motor fields unmarked, or the
     /// firmware's rumble emulation takes the actuators and the audio isn't
@@ -933,6 +937,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         haptics_wake_tx,
         haptics_wake,
         pcm_mode: AtomicBool::new(false),
+        classic_rumble: AtomicBool::new(false),
         usb_haptics: AtomicBool::new(false),
         haptic_level: [AtomicU8::new(0), AtomicU8::new(0)],
         speaker_level: AtomicU8::new(0),
@@ -1480,6 +1485,9 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 now,
             )
         };
+        device
+            .classic_rumble
+            .store(composer.classic_owns(), Ordering::Release);
         let mut microphone_managed = false;
         let route = device.speaker_route.load(Ordering::Acquire);
         if !device.is_bluetooth() && !device.model.is_dualshock4() && route != SPEAKER_UNTOUCHED {
@@ -1640,6 +1648,7 @@ impl Device {
             haptics_wake_tx,
             haptics_wake,
             pcm_mode: AtomicBool::new(false),
+            classic_rumble: AtomicBool::new(false),
             usb_haptics: AtomicBool::new(false),
             haptic_level: [AtomicU8::new(0), AtomicU8::new(0)],
             speaker_level: AtomicU8::new(0),

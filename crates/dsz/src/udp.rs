@@ -415,12 +415,15 @@ mod tests {
     #[test]
     fn mod_dsx_fallout4() {
         // dvize/DSXFallout4, nlohmann::json: every parameter sent as a string.
-        // CustomTriggerValue / VibrateResistance (no public definition, so
-        // ignored), then AddRGB with brightness.
+        // CustomTriggerValue / VibrateResistance (DSZ's own vibration), then
+        // AddRGB with brightness.
         let c = changes(
             r#"{"instructions":[{"type":1,"parameters":["0","1","12","9","40","200","0","0","0","0","0"]},{"type":2,"parameters":["0","255","64","0","128"]}]}"#,
         );
-        assert_eq!(c[0], None);
+        assert_eq!(
+            c[0],
+            trigger(true, TriggerEffect::Vibration { position: 0, amplitude: 7, frequency: 40 })
+        );
         assert_eq!(c[1], Some(Change::Rgb([128, 32, 0])));
     }
 
@@ -499,6 +502,40 @@ mod tests {
     }
 
     #[test]
+    fn mod_racing_dsx() {
+        // cosmii02/RacingDSX 0.6.7, System.Text.Json: one packet per
+        // instruction. Before a race: lightbar without brightness, triggers
+        // Normal. In a race: Resistance [start, force], the RPM lightbar with
+        // brightness, and on grip loss CustomTriggerValue / VibrateResistance
+        // [frequency, stiffness, start], as DSZ's own vibration.
+        let c = changes(
+            r#"{"instructions":[{"type":2,"parameters":[0,220,120,220]},{"type":1,"parameters":[0,1,0,0,0]},{"type":1,"parameters":[0,2,0,0,0]}]}"#,
+        );
+        assert_eq!(c[0], Some(Change::Rgb([220, 120, 220])));
+        assert_eq!(c[1], trigger(true, TriggerEffect::Off));
+        assert_eq!(c[2], trigger(false, TriggerEffect::Off));
+        let c = changes(r#"{"instructions":[{"type":1,"parameters":[0,2,13,0,3]}]}"#);
+        assert_eq!(c[0], trigger(false, TriggerEffect::Feedback { position: 0, strength: 3 }));
+        let c = changes(r#"{"instructions":[{"type":2,"parameters":[0,255,0,0,255]}]}"#);
+        assert_eq!(c[0], Some(Change::Rgb([255, 0, 0])));
+        let c = changes(
+            r#"{"instructions":[{"type":1,"parameters":[0,2,12,9,30,200,5,0,0,0,0]},{"type":1,"parameters":[0,1,12,9,18,5,0,0,0,0,0]},{"type":1,"parameters":[0,1,12,9,18,150,200,0,0,0,0]}]}"#,
+        );
+        assert_eq!(
+            c[0],
+            trigger(false, TriggerEffect::Vibration { position: 0, amplitude: 7, frequency: 30 })
+        );
+        assert_eq!(
+            c[1],
+            trigger(true, TriggerEffect::Vibration { position: 0, amplitude: 1, frequency: 18 })
+        );
+        assert_eq!(
+            c[2],
+            trigger(true, TriggerEffect::Vibration { position: 7, amplitude: 5, frequency: 18 })
+        );
+    }
+
+    #[test]
     fn mod_rbr_adaptive_trigger() {
         // aaronfang/RBR_Adaptive_Trigger (Python json.dumps): AutomaticGun,
         // then ResetToUserSettings when it stops.
@@ -516,7 +553,7 @@ mod tests {
     fn mod_race_element() {
         // RiddleTime/Race-Element, System.Text.Json: GetDSXStatus, FEEDBACK
         // and VIBRATION (the newer modes), CustomTriggerValue / VibrateResistanceB
-        // (ignored, like every custom mode past PulseAB), then RigidA.
+        // (DSZ's own vibration, B ignored), then RigidA.
         let c = changes(
             r#"{"instructions":[{"type":0,"parameters":[]},{"type":1,"parameters":[0,1,21,1,5]},{"type":1,"parameters":[0,2,23,0,6,40]},{"type":1,"parameters":[0,1,12,11,60,180,0,0,0,0,0]},{"type":1,"parameters":[0,1,12,2,60,180,0,0,0,0,0]}]}"#,
         );
@@ -526,7 +563,10 @@ mod tests {
             c[2],
             trigger(false, TriggerEffect::Vibration { position: 0, amplitude: 6, frequency: 40 })
         );
-        assert_eq!(c[3], None);
+        assert_eq!(
+            c[3],
+            trigger(true, TriggerEffect::Vibration { position: 0, amplitude: 6, frequency: 60 })
+        );
         assert_eq!(
             c[4],
             trigger(true, TriggerEffect::Custom { mode: 0x21, forces: [60, 180, 0, 0, 0, 0, 0] })
