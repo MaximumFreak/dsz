@@ -132,6 +132,10 @@ impl Model {
                 r[0] = 0x01;
                 r[1..5].copy_from_slice(&[0x80; 4]);
                 r[8] = 0x08;
+                // Bit 7 of a contact byte means "not touching"; zero would
+                // park a finger at (0, 0) whenever a controller drops out.
+                r[33] = 0x80;
+                r[37] = 0x80;
             }
             Model::DualShock4 => {
                 let pad = ds_proto::virtual_pad::PadState::default();
@@ -1618,6 +1622,41 @@ fn audio_request(s: &Shared, req: u8, unit: u8, selector: u8, data: &[u8]) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_report_has_no_finger_on_the_touchpad() {
+        // Bit 7 of a contact byte set means lifted; a parked pad whose
+        // controller left must not look like a resting finger.
+        let ds = Model::DualSense.idle_input();
+        assert_eq!((ds[33] & 0x80, ds[37] & 0x80), (0x80, 0x80));
+        assert!(ds[34..37].iter().chain(&ds[38..41]).all(|b| *b == 0));
+        let ds4 = Model::DualShock4.idle_input();
+        assert_eq!((ds4[35] & 0x80, ds4[39] & 0x80), (0x80, 0x80));
+    }
+
+    #[test]
+    fn idle_report_matches_the_no_touch_live_report() {
+        // The idle report and a live report built without touch agree on
+        // every byte the idle report sets, so only the touch bytes changed.
+        let pad = ds_proto::virtual_pad::PadState::default();
+        let live = ds_proto::virtual_pad::ds_usb_input(&pad, None, false, 0);
+        let idle = Model::DualSense.idle_input();
+        assert_eq!(&idle[33..41], &live[33..41]);
+        assert_eq!(&idle[..11], &live[..11]);
+    }
+
+    #[test]
+    fn live_touch_still_passes_through() {
+        let pad = ds_proto::virtual_pad::PadState::default();
+        let mut raw = [0u8; ds_proto::virtual_pad::DS_USB_INPUT_LEN];
+        raw[0] = 0x01;
+        raw[33..37].copy_from_slice(&[0x05, 0x10, 0x20, 0x30]);
+        raw[37] = 0x80;
+        let r = ds_proto::virtual_pad::ds_usb_input(&pad, Some(&raw), true, 0);
+        assert_eq!(&r[33..41], &raw[33..41]);
+        let r = ds_proto::virtual_pad::ds_usb_input(&pad, Some(&raw), false, 0);
+        assert_eq!((r[33], r[37]), (0x80, 0x80));
+    }
 
     fn microphone_test_pad() -> Shared {
         test_pad(Model::DualSense)
