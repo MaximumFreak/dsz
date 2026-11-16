@@ -1,0 +1,11 @@
+name: Feature request
+description: Suggest something DSZ could do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like DSZ to do?
+      description: The game or situation where you'd use it helps, as does another app that already does it.
+    validations:
+      required: true

@@ -1,0 +1,63 @@
+name: Bug report
+description: Something doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. DSZ's log shows what the controller and the virtual pads were doing, and most bugs can't be traced without it.
+
+        **Getting the log:** in DSZ, go to **Settings → Backup & restore → Open settings folder**. Attach **`dsz.log`** from a session where the problem happened. If you restarted DSZ since then, attach **`dsz.previous.log`** too, because the old log moves there on each start.
+  - type: input
+    id: version
+    attributes:
+      label: DSZ version
+      description: Shown at the top of the log, or in Settings.
+      placeholder: "0.4.11"
+    validations:
+      required: true
+  - type: dropdown
+    id: controller
+    attributes:
+      label: Controller
+      options:
+        - DualSense
+        - DualSense Edge
+        - DualShock 4
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - Bluetooth
+        - USB
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game or app
+      description: Where it happens, if it's tied to one.
+      placeholder: "Ghost of Tsushima"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        1. Start DSZ and connect the controller over Bluetooth
+        2. Launch the game
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: In DSZ, open **Settings → Backup & restore → Open settings folder** (usually `%APPDATA%\DSZ`), then drag `dsz.log` into this box, plus `dsz.previous.log` if you restarted DSZ since the problem. Please attach the files rather than pasting them.
+      placeholder: Drop dsz.log here
+    validations:
+      required: true
