@@ -82,6 +82,9 @@ pub struct Settings {
     pub language: crate::i18n::Language,
     pub start_with_windows: bool,
     pub start_minimized: bool,
+    /// Restart as administrator at startup, so keys and text from mappings
+    /// also reach programs that run as administrator.
+    pub run_as_admin: bool,
     pub close_to_tray: bool,
     /// The minimize button hides the window to the tray.
     pub minimize_to_tray: bool,
@@ -181,6 +184,7 @@ impl Default for Settings {
             language: crate::i18n::Language::English,
             start_with_windows: false,
             start_minimized: false,
+            run_as_admin: false,
             close_to_tray: true,
             minimize_to_tray: false,
             default_profile: DEFAULT_PROFILE.into(),

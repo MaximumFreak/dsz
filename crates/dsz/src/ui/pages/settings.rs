@@ -40,6 +40,7 @@ impl App {
         two_columns(ui, |ui, col| {
             if col == 0 {
                 card(ui, crate::i18n::tr("Startup"), "", |ui| {
+                    let mut restart_admin = false;
                     let mut s = engine.settings.write();
                     let mut changed = false;
                     let mut auto = s.start_with_windows;
@@ -62,6 +63,21 @@ impl App {
                         crate::i18n::tr("Open to the tray"),
                         &mut s.start_minimized,
                     );
+                    let mut admin = s.run_as_admin;
+                    if toggle_row(
+                        ui,
+                        crate::i18n::tr("Run as administrator"),
+                        crate::i18n::tr("Lets mappings press keys and type in programs that run as administrator, like some game launchers. Windows asks each time DSZ starts"),
+                        &mut admin,
+                    ) {
+                        s.run_as_admin = admin;
+                        changed = true;
+                        if admin && !crate::platform::is_elevated() {
+                            restart_admin = true;
+                        } else if !admin && crate::platform::is_elevated() {
+                            engine.toast(crate::i18n::tr("DSZ runs without administrator rights from its next start"));
+                        }
+                    }
                     changed |= toggle_row(
                         ui,
                         crate::i18n::tr("Close to tray"),
@@ -114,6 +130,9 @@ impl App {
                     drop(s);
                     if changed {
                         engine.settings_changed();
+                    }
+                    if restart_admin {
+                        restart_as_admin(engine.clone());
                     }
                 });
                 ui.add_space(12.0);
@@ -644,4 +663,23 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Save, then hand over to a copy started as administrator. If Windows'
+/// prompt is declined, the setting goes back off and DSZ keeps running.
+fn restart_as_admin(engine: std::sync::Arc<crate::engine::Engine>) {
+    engine.flush();
+    // `--show`: the window was open, so it opens again.
+    if !crate::platform::start_elevated("--elevated --show") {
+        engine.settings.write().run_as_admin = false;
+        engine.settings_changed();
+        engine.warn_toast(crate::i18n::tr("Running without administrator rights"));
+        return;
+    }
+    log::info!("restarting as administrator");
+    std::thread::spawn(move || {
+        engine.shutdown();
+        crate::applog::close();
+        std::process::exit(0);
+    });
 }

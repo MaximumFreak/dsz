@@ -869,6 +869,21 @@ impl App {
                             toggle_row(ui, crate::i18n::tr("Natural scrolling"), crate::i18n::tr("The page follows your fingers"), &mut t.natural_scroll);
                         }
                     }
+                    // The same switch as Touchpad passthrough on the Virtual
+                    // controller page, here where the mouse is set up. Only
+                    // virtual pads with a touchpad carry touches.
+                    let has_touchpad = matches!(p.virtual_out.kind, VirtualKind::DualSense | VirtualKind::DualShock4);
+                    if p.touchpad.mode == TouchMode::Mouse && has_touchpad {
+                        let mut hide = !p.virtual_out.touch_passthrough;
+                        if toggle_row(
+                            ui,
+                            crate::i18n::tr("Hide the touchpad from the game"),
+                            crate::i18n::tr("The game doesn't see touches, or presses while Press to click is on"),
+                            &mut hide,
+                        ) {
+                            p.virtual_out.touch_passthrough = !hide;
+                        }
+                    }
                 });
                 ui.add_space(12.0);
                 card(

@@ -270,6 +270,9 @@ pub fn start(engine: Arc<Engine>, on_show: impl Fn() + Send + Sync + 'static) {
                 return;
             }
             TRAY_HWND.store(hwnd as isize, Ordering::Release);
+            // Run as administrator, DSZ would otherwise not hear the icon's
+            // clicks: Explorer, which sends them, runs with normal rights.
+            ChangeWindowMessageFilterEx(hwnd, WM_TRAY, MSGFLT_ALLOW, null_mut());
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;

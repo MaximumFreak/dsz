@@ -148,6 +148,13 @@ fn is_extended(vk: u16) -> bool {
     )
 }
 
+/// Number pad digits and decimal point share their scan codes with the
+/// navigation keys (Numpad 1 is End), and Windows picks between them by Num
+/// Lock.
+fn is_numpad(vk: u16) -> bool {
+    matches!(vk, 0x60..=0x69 | 0x6E)
+}
+
 fn key_input(vk: u16, down: bool) -> INPUT {
     let media = (0xA6..=0xB7).contains(&vk);
     let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
@@ -159,8 +166,10 @@ fn key_input(vk: u16, down: bool) -> INPUT {
         flags |= KEYEVENTF_EXTENDEDKEY;
     }
     // Scan codes reach games that read raw keyboard input; media keys only
-    // work as virtual keys.
-    if !media && scan != 0 {
+    // work as virtual keys. Number pad keys go as virtual keys too, with
+    // their scan code alongside, so Num Lock off doesn't turn them into the
+    // navigation keys.
+    if !media && !is_numpad(vk) && scan != 0 {
         flags |= KEYEVENTF_SCANCODE;
     }
     INPUT {
@@ -182,6 +191,116 @@ pub fn key(vk: u16, down: bool) {
         return;
     }
     send(&[key_input(vk, down)]);
+}
+
+/// How one character of a typed text goes out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stroke {
+    /// Its key on the keyboard layout, with or without Shift.
+    Key { vk: u16, shift: bool },
+    /// The character itself, for ones the layout has no plain key for.
+    Unicode,
+}
+
+/// `scan` is `VkKeyScanW`: the key in the low byte, the modifiers it needs
+/// in the high byte (1 Shift, 2 Ctrl, 4 Alt), -1 when the layout lacks it.
+fn stroke(ch: char, scan: impl Fn(u16) -> i16, caps_lock: bool, shift_held: bool, mods_held: bool) -> Stroke {
+    let mut units = [0u16; 2];
+    let units = ch.encode_utf16(&mut units);
+    // A held Ctrl, Alt or Win would turn a key into a shortcut.
+    if units.len() != 1 || mods_held {
+        return Stroke::Unicode;
+    }
+    let r = scan(units[0]);
+    if r == -1 {
+        return Stroke::Unicode;
+    }
+    let vk = (r as u16) & 0xFF;
+    let mods = ((r as u16) >> 8) & 0xFF;
+    // AltGr characters (Ctrl+Alt) go out as Unicode.
+    if vk == 0 || mods & !1 != 0 {
+        return Stroke::Unicode;
+    }
+    let mut shift = mods & 1 != 0;
+    // Caps Lock flips the case of letters.
+    if caps_lock && (0x41..=0x5A).contains(&vk) {
+        shift = !shift;
+    }
+    // A Shift a mapping holds can't be let go for a lowercase letter.
+    if shift_held && !shift {
+        return Stroke::Unicode;
+    }
+    Stroke::Key { vk, shift: shift && !shift_held }
+}
+
+fn unicode_input(unit: u16, down: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: 0,
+                wScan: unit,
+                dwFlags: KEYEVENTF_UNICODE | if down { 0 } else { KEYEVENTF_KEYUP },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Type `text` into the focused window, on its own thread so input keeps
+/// flowing. Characters the keyboard layout has go out as their keys, which
+/// games that read raw keys also see; the rest as Unicode characters. Each
+/// key is held a moment, since games that poll the keyboard once a frame
+/// miss a press and release sent together. One text types at a time.
+pub fn type_text(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let text = text.to_string();
+    std::thread::spawn(move || {
+        static TYPING: Mutex<()> = Mutex::new(());
+        let _one = TYPING.lock();
+        let gap = std::time::Duration::from_millis(15);
+        let step = |i: INPUT| {
+            send(&[i]);
+            std::thread::sleep(gap);
+        };
+        for ch in text.chars() {
+            let (shift_held, mods_held) = {
+                let h = held().lock();
+                (
+                    h.contains_key(&0xA0) || h.contains_key(&0xA1),
+                    [0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C].iter().any(|k| h.contains_key(k)),
+                )
+            };
+            let caps_lock = unsafe { GetKeyState(VK_CAPITAL as i32) } & 1 != 0;
+            match stroke(ch, |u| unsafe { VkKeyScanW(u) }, caps_lock, shift_held, mods_held) {
+                Stroke::Key { vk, shift } => {
+                    if shift {
+                        step(key_input(0xA0, true));
+                    }
+                    step(key_input(vk, true));
+                    step(key_input(vk, false));
+                    if shift {
+                        step(key_input(0xA0, false));
+                    }
+                }
+                Stroke::Unicode => {
+                    let mut buf = [0u16; 2];
+                    let units = ch.encode_utf16(&mut buf);
+                    for u in units.iter() {
+                        send(&[unicode_input(*u, true)]);
+                    }
+                    std::thread::sleep(gap);
+                    for u in units.iter() {
+                        send(&[unicode_input(*u, false)]);
+                    }
+                    std::thread::sleep(gap);
+                }
+            }
+        }
+    });
 }
 
 /// Name for a virtual-key code, for the UI.
@@ -308,4 +427,69 @@ pub fn vk_from_egui(k: eframe::egui::Key) -> Option<u16> {
         K::Quote => 0xDE,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// US layout for the few characters the tests type.
+    fn us(u: u16) -> i16 {
+        match char::from_u32(u as u32).unwrap() {
+            c @ 'a'..='z' => c.to_ascii_uppercase() as i16,
+            c @ 'A'..='Z' => 0x100 | c as i16,
+            c @ '0'..='9' => c as i16,
+            '!' => 0x100 | 0x31,
+            _ => -1,
+        }
+    }
+
+    fn flags(i: &INPUT) -> u32 {
+        unsafe { i.Anonymous.ki.dwFlags }
+    }
+
+    #[test]
+    fn numpad_keys_stay_numpad_keys() {
+        // Numpad 1 goes as its virtual key, not scan code 0x4F (End with
+        // Num Lock off); End itself still goes as an extended scan code.
+        let n1 = key_input(0x61, true);
+        assert_eq!(flags(&n1) & KEYEVENTF_SCANCODE, 0);
+        assert_eq!(unsafe { n1.Anonymous.ki.wVk }, 0x61);
+        let end = key_input(0x23, true);
+        assert_ne!(flags(&end) & KEYEVENTF_SCANCODE, 0);
+        assert_ne!(flags(&end) & KEYEVENTF_EXTENDEDKEY, 0);
+        // Letters keep their scan codes.
+        assert_ne!(flags(&key_input(0x41, true)) & KEYEVENTF_SCANCODE, 0);
+    }
+
+    #[test]
+    fn text_types_layout_keys_with_shift() {
+        let plan: Vec<Stroke> = "Jg2!".chars().map(|c| stroke(c, us, false, false, false)).collect();
+        assert_eq!(
+            plan,
+            [
+                Stroke::Key { vk: 0x4A, shift: true },
+                Stroke::Key { vk: 0x47, shift: false },
+                Stroke::Key { vk: 0x32, shift: false },
+                Stroke::Key { vk: 0x31, shift: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn text_follows_caps_lock_and_held_keys() {
+        // Caps Lock flips letters only.
+        assert_eq!(stroke('J', us, true, false, false), Stroke::Key { vk: 0x4A, shift: false });
+        assert_eq!(stroke('g', us, true, false, false), Stroke::Key { vk: 0x47, shift: true });
+        assert_eq!(stroke('2', us, true, false, false), Stroke::Key { vk: 0x32, shift: false });
+        // A Shift a mapping holds: uppercase rides on it, lowercase can't.
+        assert_eq!(stroke('J', us, false, true, false), Stroke::Key { vk: 0x4A, shift: false });
+        assert_eq!(stroke('g', us, false, true, false), Stroke::Unicode);
+        // A held Ctrl/Alt/Win, or a character the layout lacks.
+        assert_eq!(stroke('g', us, false, false, true), Stroke::Unicode);
+        assert_eq!(stroke('é', us, false, false, false), Stroke::Unicode);
+        assert_eq!(stroke('😀', us, false, false, false), Stroke::Unicode);
+        // AltGr characters.
+        assert_eq!(stroke('@', |_| 0x600 | 0x51, false, false, false), Stroke::Unicode);
+    }
 }

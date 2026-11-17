@@ -33,14 +33,37 @@ pub fn log_game_settings(
     what: &str,
 ) {
     let vo = &p.virtual_out;
+    let h = &p.haptics;
+    // What else plays on the actuators or the speaker: each of these keeps
+    // the haptic stream running beside a game's rumble (issue 43).
+    let mut stream = Vec::new();
+    if h.source == crate::profile::AudioSource::SystemAudio {
+        stream.push("audio haptics");
+    }
+    if h.pc_audio_on_speaker {
+        stream.push("PC audio on the speaker");
+    }
+    if vo.game_speaker && h.speaker_volume > 0 {
+        stream.push("game speaker");
+    }
+    if h.buttons.enabled {
+        stream.push("button clicks");
+    }
+    if h.triggers.enabled {
+        stream.push("trigger haptics");
+    }
     log::info!(
-        "{what}; profile \"{}\": game haptics {} at {} %, haptic rumble strength {} %, game rumble {}{}, on {}",
+        "{what}; profile \"{}\": game haptics {} at {} %, haptic rumble strength {} %, game rumble {}{}, rumble power {} %, improved rumble {}, haptics {}{}, on {}",
         engine.profile_name_for(device),
         if vo.game_haptics { "on" } else { "off" },
         vo.game_haptics_level,
-        (p.haptics.rumble_intensity * 100.0).round(),
+        (h.rumble_intensity * 100.0).round(),
         if vo.game_rumble { "on" } else { "off" },
         if p.rumble.always_classic { " (classic rumble always)" } else { "" },
+        100.0 - 12.5 * p.rumble.power_reduction.min(7) as f32,
+        if p.rumble.enhanced { "on" } else { "off" },
+        if h.enabled { "on" } else { "off" },
+        if stream.is_empty() { String::new() } else { format!(" ({})", stream.join(", ")) },
         if device.is_bluetooth() { "Bluetooth" } else { "USB" },
     );
 }

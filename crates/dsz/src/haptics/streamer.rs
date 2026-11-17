@@ -222,6 +222,38 @@ fn add_level(out: &mut [[f32; 2]], input: &mut [[f32; 2]], level: u8, limiter: &
     }
 }
 
+/// Counters at the start of one game audio session.
+#[derive(Default)]
+struct AudioSession {
+    start: Option<Instant>,
+    underruns: u64,
+    dropped: u64,
+    stream: u64,
+}
+
+impl AudioSession {
+    fn start(game: &super::game::GameReader, device: &Device) -> Self {
+        AudioSession {
+            start: Some(Instant::now()),
+            underruns: game.underruns,
+            dropped: game.dropped.load(Ordering::Relaxed),
+            stream: device.stats.stream_underruns.load(Ordering::Relaxed),
+        }
+    }
+
+    fn log(&self, game: &super::game::GameReader, device: &Device) {
+        let Some(start) = self.start else { return };
+        log::info!(
+            "game audio closed after {} s: {} dropout(s) in the game's audio, buffering {} ms, {} frames cut, {} stream underrun(s)",
+            start.elapsed().as_secs(),
+            game.underruns - self.underruns,
+            game.buffer_ms(),
+            game.dropped.load(Ordering::Relaxed) - self.dropped,
+            device.stats.stream_underruns.load(Ordering::Relaxed) - self.stream,
+        );
+    }
+}
+
 pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     crate::platform::timer_resolution_1ms();
     crate::platform::raise_thread_priority(true);
@@ -268,6 +300,12 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     // audio at all (issue 29).
     let mut was_audio_open = false;
     let mut game_haptics_logged = false;
+    // What the game's audio did while it was open, logged when it closes:
+    // dropouts never reached the log before (issue 49).
+    let mut session = AudioSession::default();
+    // The settings a game's classic rumble plays with, logged once a
+    // session (issue 43).
+    let mut was_game_rumble = false;
 
     // The stream keeps the actuators until this instant; anything that
     // needs it pushes the instant out by `IDLE_AFTER`.
@@ -323,8 +361,16 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         if audio_open && !was_audio_open {
             game_haptics_logged = false;
             super::log_game_settings(engine, device, &profile, "a game opened the virtual DualSense's sound device");
+            session = AudioSession::start(&game, device);
+        } else if !audio_open && was_audio_open {
+            session.log(&game, device);
         }
         was_audio_open = audio_open;
+        let game_rumble = device.feedback.lock().game.rumble_logged;
+        if game_rumble && !was_game_rumble {
+            super::log_game_settings(engine, device, &profile, "the game rumbles");
+        }
+        was_game_rumble = game_rumble;
         let game_speaker = game_src.is_some() && vo.game_speaker;
         let pc_speaker = h.pc_audio_on_speaker;
         let speaker_allowed = enabled && h.speaker_volume > 0 && (game_speaker || pc_speaker);
@@ -733,6 +779,9 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
                 .fetch_add(underruns, Ordering::Relaxed);
             underruns = 0;
         }
+    }
+    if was_audio_open {
+        session.log(&game, device);
     }
     device.microphone.configure(false, true, 100);
     if was_media || capture_used {

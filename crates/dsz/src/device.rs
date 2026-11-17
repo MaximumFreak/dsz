@@ -103,6 +103,14 @@ pub struct GameState {
     pub reports: u64,
     /// The first rumble of this session was logged.
     pub rumble_logged: bool,
+    /// How the game's reports changed its rumble this session, logged when
+    /// the virtual controller goes (issue 43): reports that set a level,
+    /// that stopped it with zero levels, that stopped it with no flags at
+    /// all (SDL's way), and that stopped it while changing something else.
+    pub rumble_sets: u64,
+    pub rumble_zeroed: u64,
+    pub rumble_flags_off: u64,
+    pub rumble_cut_by_other: u64,
 }
 
 #[derive(Debug, Default)]
@@ -127,6 +135,16 @@ impl Feedback {
         self.game.rumble.unwrap_or((0, 0))
     }
     pub fn clear_game(&mut self) {
+        let g = &self.game;
+        if g.rumble_logged {
+            log::info!(
+                "game rumble this session: {} report(s) set it, stopped by {} with zero levels, {} with no flags, {} that changed only other things",
+                g.rumble_sets,
+                g.rumble_zeroed,
+                g.rumble_flags_off,
+                g.rumble_cut_by_other
+            );
+        }
         self.game = GameState::default();
     }
     pub fn prune(&mut self, now: Instant) {
@@ -551,12 +569,35 @@ impl Device {
         let g = &mut f.game;
         g.reports += 1;
         let (heavy, light) = o.rumble;
+        let was = g.rumble.is_some();
         g.rumble = (heavy != 0 || light != 0).then_some((heavy, light));
+        let [f0, f1, f2] = o.flags;
+        if g.rumble.is_some() {
+            g.rumble_sets += 1;
+        } else if was {
+            let other = f0 & !0x03 != 0 || f1 != 0 || f2 & !0x04 != 0;
+            if f0 & 0x03 != 0 {
+                g.rumble_zeroed += 1;
+            } else if !other {
+                g.rumble_flags_off += 1;
+            } else {
+                if g.rumble_cut_by_other == 0 {
+                    log::info!(
+                        "the game stopped its rumble with a report that changes other things (flags {f0:02X} {f1:02X} {f2:02X})"
+                    );
+                }
+                g.rumble_cut_by_other += 1;
+            }
+        }
         if g.rumble.is_some() && !g.rumble_logged {
             // Which way a game sends its feedback (rumble, haptic audio, or
-            // both) decides which level applies; issue 29.
+            // both) decides which level applies; issue 29. The flags and
+            // motor power show which rumble emulation it asks for (issue 43).
             g.rumble_logged = true;
-            log::info!("the game sends classic rumble to the virtual DualSense (heavy {heavy}, light {light})");
+            log::info!(
+                "the game sends classic rumble to the virtual DualSense (heavy {heavy}, light {light}; flags {f0:02X} {f1:02X} {f2:02X}, motor power {})",
+                o.motor_power.map_or("-".to_string(), |b| format!("0x{b:02X}"))
+            );
         }
         if let Some(t) = o.right_trigger {
             g.right_trigger = Some(t);

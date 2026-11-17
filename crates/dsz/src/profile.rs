@@ -667,6 +667,10 @@ pub enum Action {
     Run {
         path: String,
     },
+    /// Type a line of text, as if typed on the keyboard, once per gesture.
+    Text {
+        text: String,
+    },
     /// Switch this controller to a named profile.
     Profile {
         name: String,
@@ -1586,6 +1590,14 @@ mod tests {
         .unwrap();
         assert_eq!(p.mappings[0].action, Action::TurnOffController);
         assert_eq!(p.mappings[0].button, Button::Cross);
+    }
+
+    #[test]
+    fn text_action_round_trips() {
+        let a = Action::Text { text: "Hi there!".into() };
+        let j = serde_json::to_string(&a).unwrap();
+        assert_eq!(j, r#"{"kind":"text","text":"Hi there!"}"#);
+        assert_eq!(serde_json::from_str::<Action>(&j).unwrap(), a);
     }
 
     #[test]

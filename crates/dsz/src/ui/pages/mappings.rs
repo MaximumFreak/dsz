@@ -22,6 +22,7 @@ enum AKind {
     Gyro,
     Touch,
     Run,
+    Text,
     Profile,
     HoldProfile,
     Gamepad,
@@ -42,6 +43,7 @@ fn akind(a: &Action) -> AKind {
         Action::ToggleGyroMouse => AKind::Gyro,
         Action::ToggleTouchpadMouse => AKind::Touch,
         Action::Run { .. } => AKind::Run,
+        Action::Text { .. } => AKind::Text,
         Action::Profile { .. } => AKind::Profile,
         Action::HoldProfile { .. } => AKind::HoldProfile,
         Action::Gamepad { .. } => AKind::Gamepad,
@@ -50,7 +52,7 @@ fn akind(a: &Action) -> AKind {
     }
 }
 
-const KINDS: [(AKind, &str); 16] = [
+const KINDS: [(AKind, &str); 17] = [
     (AKind::None, "Nothing"),
     (AKind::Gamepad, "PlayStation button"),
     (AKind::Xbox, "Xbox button"),
@@ -59,6 +61,7 @@ const KINDS: [(AKind, &str); 16] = [
     (AKind::ScrollUp, "Scroll up"),
     (AKind::ScrollDown, "Scroll down"),
     (AKind::Media, "Media key"),
+    (AKind::Text, "Type text"),
     (AKind::Next, "Next profile"),
     (AKind::Prev, "Previous profile"),
     (AKind::Gyro, "Toggle gyro"),
@@ -229,6 +232,7 @@ impl App {
                                 AKind::Gyro => Action::ToggleGyroMouse,
                                 AKind::Touch => Action::ToggleTouchpadMouse,
                                 AKind::Run => Action::Run { path: String::new() },
+                                AKind::Text => Action::Text { text: String::new() },
                                 AKind::TurnOff => Action::TurnOffController,
                                 AKind::Profile => Action::Profile {
                                     name: profile_names.iter().find(|n| **n != p_name).cloned().unwrap_or_default(),
@@ -379,6 +383,10 @@ impl App {
                                         *path = f.display().to_string();
                                     }
                                 }
+                            }
+                            Action::Text { text } => {
+                                ui.add(egui::TextEdit::singleline(text).hint_text(crate::i18n::tr("Text to type")).desired_width(220.0))
+                                    .on_hover_text(crate::i18n::tr("Typed once each time the mapping fires, into whichever window has focus. It's saved in the profile file as plain text."));
                             }
                             Action::TurnOffController => {
                                 ui.label(RichText::new(crate::i18n::tr("powers off over Bluetooth")).size(12.0).color(MUTED))

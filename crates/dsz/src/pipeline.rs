@@ -771,7 +771,24 @@ fn holdable(a: &Action) -> bool {
     )
 }
 
+/// Keyboard and mouse output, which Windows keeps from programs that run as
+/// administrator unless DSZ does too.
+fn sends_input(a: &Action) -> bool {
+    matches!(
+        a,
+        Action::Key { .. }
+            | Action::Mouse { .. }
+            | Action::ScrollUp
+            | Action::ScrollDown
+            | Action::Text { .. }
+    )
+}
+
 fn action_down(engine: &Engine, device: &Device, a: &Action) {
+    // Windows drops the input without an error, so say why nothing happens.
+    if sends_input(a) && !crate::platform::is_elevated() && crate::platform::foreground_elevated() {
+        engine.warn_toast(crate::i18n::tr("That window runs as administrator, so Windows blocks DSZ's keys. Turn on Run as administrator in Settings."));
+    }
     match a {
         Action::None => {}
         Action::Key {
@@ -834,13 +851,20 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
         // Started by the mapping, which knows the buttons to watch.
         Action::HoldProfile { .. } => {}
         Action::TurnOffController => turn_off_controller(engine, device),
+        Action::Text { text } => sim::type_text(text),
         Action::Run { path } => {
             if !path.trim().is_empty() {
                 let p = path.trim().to_string();
                 std::thread::spawn(move || {
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", "", &p])
-                        .spawn();
+                    // Explorer starts it with normal rights when DSZ runs
+                    // as administrator.
+                    let _ = if crate::platform::is_elevated() {
+                        std::process::Command::new("explorer").arg(&p).spawn()
+                    } else {
+                        std::process::Command::new("cmd")
+                            .args(["/C", "start", "", &p])
+                            .spawn()
+                    };
                 });
             }
         }

@@ -302,13 +302,18 @@ pub fn single_instance(wait: std::time::Duration) -> bool {
             let name = wide("Local\\DSZ.SingleInstance");
             let h = CreateMutexW(null(), 0, name.as_ptr());
             if h.is_null() {
-                return true;
+                // A copy running as administrator owns a mutex this one
+                // isn't allowed to open: it is already running.
+                if GetLastError() != ERROR_ACCESS_DENIED {
+                    return true;
+                }
+            } else {
+                // Leak the handle: it lives as long as the process.
+                if GetLastError() != ERROR_ALREADY_EXISTS {
+                    return true;
+                }
+                CloseHandle(h);
             }
-            // Leak the handle: it lives as long as the process.
-            if GetLastError() != ERROR_ALREADY_EXISTS {
-                return true;
-            }
-            CloseHandle(h);
         }
         if std::time::Instant::now() >= until {
             return false;
@@ -329,6 +334,77 @@ pub fn activate_existing(title: &str) {
             SetForegroundWindow(h);
         }
     }
+}
+
+/// Whether a process runs as administrator; `None` when its token can't be
+/// read.
+fn process_elevated(process: HANDLE) -> Option<bool> {
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    unsafe {
+        let mut token = null_mut();
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut e as *mut _ as *mut c_void,
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        (ok != 0).then_some(e.TokenIsElevated != 0)
+    }
+}
+
+/// DSZ runs as administrator.
+pub fn is_elevated() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *E.get_or_init(|| process_elevated(unsafe { GetCurrentProcess() }).unwrap_or(false))
+}
+
+/// The window in front belongs to a program running as administrator.
+/// Windows drops keys and clicks sent to it by a program that isn't.
+pub fn foreground_elevated() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    unsafe {
+        let w = GetForegroundWindow();
+        if w.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(w, &mut pid);
+        if pid == 0 {
+            return false;
+        }
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let e = process_elevated(h);
+        CloseHandle(h);
+        e.unwrap_or(false)
+    }
+}
+
+/// Start this exe again as administrator, after Windows asks the user.
+/// False when it didn't start (the prompt was declined).
+pub fn start_elevated(args: &str) -> bool {
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let (verb, file, params) = (wide("runas"), wide(&exe.display().to_string()), wide(args));
+    let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    sei.lpVerb = verb.as_ptr();
+    sei.lpFile = file.as_ptr();
+    sei.lpParameters = params.as_ptr();
+    sei.nShow = SW_SHOWNORMAL;
+    unsafe { ShellExecuteExW(&mut sei) != 0 }
 }
 
 /// Outer rectangle of the main window, in screen pixels.
@@ -589,6 +665,12 @@ pub fn open_in_explorer(path: &std::path::Path) {
 
 /// Open a web page in the default browser.
 pub fn open_url(url: &str) {
+    // Run as administrator, the browser would be too; Explorer opens it
+    // with normal rights.
+    if is_elevated() {
+        let _ = std::process::Command::new("explorer").arg(url).spawn();
+        return;
+    }
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     let (verb, u) = (wide("open"), wide(url));
