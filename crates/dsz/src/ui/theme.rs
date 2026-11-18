@@ -95,6 +95,10 @@ pub fn install(ctx: &egui::Context, scale: f32) {
     // to a monitor with a different scale.
     ctx.set_zoom_factor(scale.clamp(0.75, 2.0));
 
+    // The design is dark only. `style_mut` styles the current theme, and
+    // with Windows in light mode egui switches to its unstyled light theme
+    // on the first frame (light dropdowns and popups), so pin dark.
+    ctx.set_theme(egui::Theme::Dark);
     ctx.style_mut(|s| {
         s.text_styles = [
             (
