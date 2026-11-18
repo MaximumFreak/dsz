@@ -268,9 +268,13 @@ pub struct Device {
     /// turns DualShock 4 audio on.
     pub ds4_audio: Mutex<ds_proto::ds4::AudioOut>,
     pub calibrate_request: AtomicBool,
-    /// Calibration feature report (`0x05`) read at connect.
     /// Feature reports a virtual DualSense driven by this controller answers with.
     pub mirror: Mutex<Mirror>,
+    /// A game asked a virtual DualSense for a report the controller didn't
+    /// give at connect: the writer thread reads the missing ones again.
+    mirror_request: AtomicBool,
+    /// When the last read again was asked for, and how many have been.
+    mirror_retry: Mutex<(Option<Instant>, u32)>,
     /// The virtual controller standing in for this one, if any.
     pub virt: crate::virt::Slot,
     /// Game audio for the haptics thread: a virtual DualSense's PCM ring,
@@ -307,6 +311,24 @@ impl Device {
     /// anything the control report carries (feedback, overrides, toggles).
     pub fn kick(&self) {
         let _ = self.kick_tx.try_send(());
+    }
+
+    /// Have the writer thread read the feature reports missing from
+    /// [`Device::mirror`] again, at most every [`MIRROR_RETRY_GAP`] and
+    /// [`MIRROR_RETRIES`] times. A game asking for one every half second
+    /// asks here as often; the virtual pad answers with a stand-in meanwhile.
+    pub fn request_mirror(&self) {
+        if self.model.is_dualshock4() {
+            return;
+        }
+        let mut r = self.mirror_retry.lock();
+        if r.1 >= MIRROR_RETRIES || r.0.is_some_and(|t| t.elapsed() < MIRROR_RETRY_GAP) {
+            return;
+        }
+        *r = (Some(Instant::now()), r.1 + 1);
+        drop(r);
+        self.mirror_request.store(true, Ordering::Release);
+        self.kick();
     }
 
     /// Apply a profile's microphone settings. Capture runs only while an app
@@ -648,34 +670,100 @@ fn normalize_mac(raw: &str) -> String {
         .join(":")
 }
 
+/// Waits before each read again of a feature report Windows calls busy.
+/// Right after a Bluetooth controller connects, all three reads can fail
+/// with "The requested resource is in use" (os error 170).
+const FEATURE_BUSY_RETRIES: [Duration; 3] = [
+    Duration::from_millis(50),
+    Duration::from_millis(150),
+    Duration::from_millis(300),
+];
+/// Shortest gap between reads again asked for by a game, and how many.
+const MIRROR_RETRY_GAP: Duration = Duration::from_secs(2);
+const MIRROR_RETRIES: u32 = 10;
+/// `ERROR_BUSY`.
+const OS_ERROR_BUSY: i32 = 170;
+
+/// One feature report, read again while Windows calls it busy.
+fn read_feature(dev: &HidDevice, id: u8, len: usize) -> Option<Vec<u8>> {
+    let mut waits = FEATURE_BUSY_RETRIES.iter();
+    let mut tries = 1;
+    loop {
+        match dev.get_feature(id, len) {
+            Ok(b) => {
+                if tries > 1 {
+                    log::debug!("feature 0x{id:02X} read on try {tries}");
+                }
+                return Some(b);
+            }
+            Err(e) => match waits.next() {
+                Some(wait) if e.raw_os_error() == Some(OS_ERROR_BUSY) => {
+                    std::thread::sleep(*wait);
+                    tries += 1;
+                }
+                _ => {
+                    log::debug!("feature 0x{id:02X} read failed after {tries} tries: {e}");
+                    return None;
+                }
+            },
+        }
+    }
+}
+
+/// "2.17 · Sep 19 2025" from a DualSense firmware report, or empty.
+fn firmware_text(mirror: &Mirror) -> String {
+    let Some(b) = mirror.firmware.as_ref().filter(|b| b.len() >= 46) else {
+        return String::new();
+    };
+    let date: String = b[1..12]
+        .iter()
+        .map(|&c| c as char)
+        .filter(|c| !c.is_control())
+        .collect();
+    let upd = u16::from_le_bytes([b[44], b[45]]);
+    let mut firmware = format!("{:X}.{:02X}", upd >> 8, upd & 0xFF);
+    if !date.trim().is_empty() {
+        firmware.push_str(&format!(" · {}", date.trim()));
+    }
+    firmware
+}
+
+/// Reads the feature reports a game asked the virtual DualSense for and the
+/// controller didn't give before. Runs on the writer thread, between output
+/// reports, so each is tried once with no waits: rumble and haptics keep
+/// going, and [`Device::request_mirror`]'s spacing is the retry.
+fn read_mirror_again(device: &Device, dev: &HidDevice) {
+    let mut mirror = device.mirror.lock().clone();
+    if !mirror.fill_missing(|id, len| dev.get_feature(id, len).ok()) {
+        log::debug!("{}: missing feature reports still unreadable", device.model.name());
+        return;
+    }
+    let firmware = firmware_text(&mirror);
+    if !firmware.is_empty() {
+        *device.firmware.lock() = firmware.clone();
+    }
+    let missing: Vec<String> = [0x05u8, 0x09, 0x20]
+        .iter()
+        .filter(|&&id| mirror.lacks(id))
+        .map(|id| format!("0x{id:02X}"))
+        .collect();
+    *device.mirror.lock() = mirror;
+    log::info!(
+        "{}: read its feature reports again for a game, firmware {}{}",
+        device.model.name(),
+        if firmware.is_empty() { "?" } else { &firmware },
+        if missing.is_empty() { String::new() } else { format!(", still missing {}", missing.join(", ")) }
+    );
+}
+
 fn read_identity(dev: &HidDevice, conn: Connection, model: Model) -> (String, String, Mirror) {
     if model.is_dualshock4() {
         return read_ds4_identity(dev, conn);
     }
     // The calibration read inside also switches a Bluetooth controller from
     // the short 0x01 report to the full 0x31 report.
-    let mirror = Mirror::read(|id, len| match dev.get_feature(id, len) {
-        Ok(b) => Some(b),
-        Err(e) => {
-            log::debug!("feature 0x{id:02X} read failed: {e}");
-            None
-        }
-    });
-    let mut firmware = String::new();
-    if let Some(b) = &mirror.firmware {
-        if b.len() >= 46 {
-            let date: String = b[1..12]
-                .iter()
-                .map(|&c| c as char)
-                .filter(|c| !c.is_control())
-                .collect();
-            let upd = u16::from_le_bytes([b[44], b[45]]);
-            firmware = format!("{:X}.{:02X}", upd >> 8, upd & 0xFF);
-            if !date.trim().is_empty() {
-                firmware.push_str(&format!(" · {}", date.trim()));
-            }
-        }
-    }
+    let mirror = Mirror::read(|id, len| read_feature(dev, id, len));
+    let firmware = firmware_text(&mirror);
     let mut mac = normalize_mac(&dev.info.serial);
     if mac.is_empty() || conn == Connection::Usb {
         if let Some(b) = &mirror.pairing {
@@ -695,7 +783,7 @@ fn read_identity(dev: &HidDevice, conn: Connection, model: Model) -> (String, St
 fn read_ds4_identity(dev: &HidDevice, conn: Connection) -> (String, String, Mirror) {
     let mut mac = normalize_mac(&dev.info.serial);
     if mac.is_empty() || conn == Connection::Usb {
-        if let Ok(b) = dev.get_feature(0x12, 16) {
+        if let Some(b) = read_feature(dev, 0x12, 16) {
             if b.len() >= 7 && b[0] == 0x12 && b[1..7].iter().any(|x| *x != 0) {
                 mac = (1..7)
                     .rev()
@@ -706,7 +794,7 @@ fn read_ds4_identity(dev: &HidDevice, conn: Connection) -> (String, String, Mirr
         }
     }
     let mut firmware = String::new();
-    if let Ok(b) = dev.get_feature(0xA3, 49) {
+    if let Some(b) = read_feature(dev, 0xA3, 49) {
         if b.len() >= 43 && b[0] == 0xA3 {
             let hw = u16::from_le_bytes([b[35], b[36]]);
             let fw = u16::from_le_bytes([b[41], b[42]]);
@@ -718,11 +806,11 @@ fn read_ds4_identity(dev: &HidDevice, conn: Connection) -> (String, String, Mirr
     } else {
         (0x02, 37, false)
     };
-    match dev.get_feature(id, len) {
-        Ok(b) if !ds_proto::ds4::calibration_plausible(&b, bluetooth) => {
+    match read_feature(dev, id, len) {
+        Some(b) if !ds_proto::ds4::calibration_plausible(&b, bluetooth) => {
             log::info!("DualShock 4 calibration is missing or unusable; gyro uses a software bias");
         }
-        Err(e) => log::debug!("DualShock 4 calibration read failed: {e}"),
+        None => log::debug!("DualShock 4 calibration read failed"),
         _ => {}
     }
     let mirror = Mirror {
@@ -993,6 +1081,8 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         speaker_test_result: Mutex::new(None),
         calibrate_request: AtomicBool::new(false),
         mirror: Mutex::new(mirror),
+        mirror_request: AtomicBool::new(false),
+        mirror_retry: Mutex::new((None, 0)),
         virt: Default::default(),
         game_audio: Mutex::new(None),
         game_audio_test: Mutex::new(None),
@@ -1487,6 +1577,9 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         }
         // Lighter control cadence while the media stream shares the radio.
         next_tick = now + if pcm { TICK_STREAMING } else { TICK };
+        if device.mirror_request.swap(false, Ordering::AcqRel) {
+            read_mirror_again(device, dev);
+        }
 
         let profile = profile_cache.get(engine, device);
         if profile.lighting.mode == crate::profile::LightMode::Audio {
@@ -1704,6 +1797,8 @@ impl Device {
             speaker_test_result: Mutex::new(None),
             calibrate_request: AtomicBool::new(false),
             mirror: Mutex::new(Mirror::default()),
+            mirror_request: AtomicBool::new(false),
+            mirror_retry: Mutex::new((None, 0)),
             virt: Default::default(),
             game_audio: Mutex::new(None),
             game_audio_test: Mutex::new(None),

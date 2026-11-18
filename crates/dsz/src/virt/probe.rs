@@ -57,6 +57,7 @@ pub fn probe(what: &str) {
                     println!("driver output {:02X?} -> {:?}", r, ds_proto::virtual_pad::parse_x360_output(r))
                 }),
                 mirror: Default::default(),
+                refresh: None,
             };
             let t_create = Instant::now();
             match usbip::UsbPad::create(usbip::Model::Xbox360, sink) {
@@ -152,6 +153,7 @@ pub fn probe(what: &str) {
             let sink = usbip::DsSink {
                 on_output: Box::new(|_| {}),
                 mirror: Default::default(),
+                refresh: None,
             };
             let t0 = Instant::now();
             match usbip::UsbPad::create(model, sink) {
@@ -194,7 +196,7 @@ pub fn probe(what: &str) {
                 .unwrap_or(3u32);
             let slot: u32 = std::env::var("DSZ_PROBE_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
             usbip::reserve_slots_below(slot);
-            let sink = usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            let sink = usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default(), refresh: None };
             let t0 = Instant::now();
             let pad = match usbip::UsbPad::create(usbip::Model::Xbox360, sink) {
                 Ok(p) => std::sync::Arc::new(p),
@@ -290,6 +292,7 @@ pub fn probe(what: &str) {
             let sink = usbip::DsSink {
                 on_output: Box::new(|r| println!("driver output {:02X?}", &r[..r.len().min(6)])),
                 mirror: Default::default(),
+                refresh: None,
             };
             let t0 = Instant::now();
             match usbip::UsbPad::create(usbip::Model::Xbox360, sink) {
@@ -326,6 +329,7 @@ pub fn probe(what: &str) {
                     println!("game output {:02X?} -> {:?}", &r[..r.len().min(11)], ds_proto::virtual_pad::parse_ds4_output(r))
                 }),
                 mirror: Default::default(),
+                refresh: None,
             };
             let t_create = Instant::now();
             match usbip::UsbPad::create(usbip::Model::DualShock4, sink) {
@@ -410,6 +414,7 @@ pub fn probe(what: &str) {
                     }
                 }),
                 mirror: Default::default(),
+                refresh: None,
             };
             let t_create = Instant::now();
             match usbip::UsbPad::create(usbip::Model::DualSense, sink) {
@@ -529,6 +534,7 @@ pub fn probe(what: &str) {
             let sink = usbip::DsSink {
                 on_output: Box::new(|_| {}),
                 mirror: Default::default(),
+                refresh: None,
             };
             let t0 = Instant::now();
             match usbip::UsbPad::create(usbip::Model::Microphone, sink) {
@@ -750,7 +756,7 @@ pub fn probe(what: &str) {
                     last = now;
                 }
             };
-            let sink = || usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            let sink = || usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default(), refresh: None };
             let restore = |what: &str| {
                 for (i, (id, _)) in orig.iter().enumerate() {
                     if let Some(id) = id {
@@ -832,7 +838,7 @@ pub fn probe(what: &str) {
                     .collect();
                 println!("{step:<34} defaults {marks}  learned {:?}", w.lock().unwrap().prefs.map(|b| b as u8));
             };
-            let sink = || usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            let sink = || usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default(), refresh: None };
             let restore = || {
                 for (i, (id, _)) in orig.iter().enumerate() {
                     if let Some(id) = id {
@@ -890,7 +896,7 @@ pub fn probe(what: &str) {
             // hold it, so other tools can look at it.
             let slot: u32 = std::env::var("DSZ_PROBE_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
             usbip::reserve_slots_below(slot);
-            let sink = usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            let sink = usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default(), refresh: None };
             match usbip::UsbPad::create(usbip::Model::Xbox360, sink) {
                 Ok(pad) => {
                     println!("attached");
@@ -907,7 +913,7 @@ pub fn probe(what: &str) {
             // from outside in between.
             let slot: u32 = std::env::var("DSZ_PROBE_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
             usbip::reserve_slots_below(slot);
-            let sink = usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default() };
+            let sink = usbip::DsSink { on_output: Box::new(|_| {}), mirror: Default::default(), refresh: None };
             let t0 = Instant::now();
             // DSZ_PROBE_PRE_HIDE=<id;id>: hide these (and the pad) before it
             // is plugged in, as a parked pad is, and show them at 6 s.

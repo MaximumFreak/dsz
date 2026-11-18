@@ -222,6 +222,7 @@ fn plug(engine: &Engine) -> Result<Live, String> {
     let sink = usbip::DsSink {
         on_output: Box::new(|_| {}),
         mirror: Default::default(),
+        refresh: None,
     };
     let hide = hide_ok(engine);
     let apps = if hide { readers() } else { Vec::new() };

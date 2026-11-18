@@ -266,9 +266,23 @@ fn plug_with(
         }),
         Model::Microphone => Box::new(|_| {}),
     };
+    let r = route.clone();
+    let refresh: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        let Some(d) = r.device() else { return };
+        // Copied out first: the two locks are never held together here.
+        let theirs = d.mirror.lock().clone();
+        let mut mine = r.mirror.lock();
+        mine.fill_from(&theirs);
+        let more = mine.incomplete();
+        drop(mine);
+        if more {
+            d.request_mirror();
+        }
+    });
     let sink = usbip::DsSink {
         on_output,
         mirror: route.mirror.clone(),
+        refresh: Some(refresh),
     };
     usbip::UsbPad::create_for(model, sink, mac, before_attach).map_err(|e| {
         log::warn!("usbip-win2: {e}");

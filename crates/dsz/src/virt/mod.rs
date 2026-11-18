@@ -770,6 +770,7 @@ fn plug_microphone() -> Result<Target, String> {
     let sink = usbip::DsSink {
         on_output: Box::new(|_| {}),
         mirror: Default::default(),
+        refresh: None,
     };
     usbip::UsbPad::create(usbip::Model::Microphone, sink).map_err(|e| e.to_string())
 }

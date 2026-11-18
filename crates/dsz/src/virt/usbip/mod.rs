@@ -159,6 +159,10 @@ pub struct DsSink {
     /// a pad that outlives its controller answers with whichever controller
     /// drives it now.
     pub mirror: std::sync::Arc<parking_lot::Mutex<super::mirror::Mirror>>,
+    /// Called when a game asks a virtual DualSense for a report `mirror`
+    /// doesn't have: fills `mirror` with what the controller has read since,
+    /// and asks the controller to read the rest again.
+    pub refresh: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl DsSink {
@@ -166,6 +170,11 @@ impl DsSink {
     /// `tag` is this pad's identity tag, so a DualShock 4's MAC matches its
     /// USB serial.
     pub fn feature(&self, model: Model, id: u8, tag: u16) -> Option<Vec<u8>> {
+        if model == Model::DualSense && self.mirror.lock().lacks(id) {
+            if let Some(refresh) = &self.refresh {
+                refresh();
+            }
+        }
         let m = self.mirror.lock();
         if model == Model::DualShock4 {
             return d::ds4::feature(id, m.calibration.as_deref(), &ds4_mac(tag));
@@ -1787,6 +1796,7 @@ mod tests {
             sink: DsSink {
                 on_output: Box::new(|_| {}),
                 mirror: Arc::new(Mutex::new(super::super::mirror::Mirror::default())),
+                refresh: None,
             },
             conn: Mutex::new(None),
             input: Mutex::new(model.idle_input()),
