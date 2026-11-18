@@ -397,6 +397,51 @@ pub struct AudioRing {
     pub frames_in: AtomicU64,
     /// When PCM last arrived, and the pauses between arrivals.
     arrivals: Mutex<(Option<Instant>, ArrivalGaps)>,
+    /// How Windows queued the audio URBs, for the log (issue 49).
+    transport: Mutex<RenderStats>,
+    /// Times the stream was opened, closed or ended.
+    restarts: AtomicU64,
+}
+
+/// How the host queued render URBs during one game audio session.
+#[derive(Default)]
+struct RenderStats {
+    urbs: u64,
+    packets: (u32, u32),
+    /// URBs held, this one included, as each arrived.
+    depth: (usize, usize),
+    /// How far past now the queued audio reached as each URB arrived, ms.
+    lead: (u64, u64),
+    /// A URB came after the queue had run out: the clock started again.
+    restarts: u64,
+    /// Completions sent more than 2 ms after their window ended, and the
+    /// latest, microseconds.
+    late: u64,
+    latest_us: u64,
+}
+
+impl RenderStats {
+    fn admitted(&mut self, packets: u32, depth: usize, lead: Duration, restarted: bool) {
+        let lead = lead.as_millis() as u64;
+        if self.urbs == 0 {
+            self.packets = (packets, packets);
+            self.depth = (depth, depth);
+            self.lead = (lead, lead);
+        }
+        self.urbs += 1;
+        self.packets = (self.packets.0.min(packets), self.packets.1.max(packets));
+        self.depth = (self.depth.0.min(depth), self.depth.1.max(depth));
+        self.lead = (self.lead.0.min(lead), self.lead.1.max(lead));
+        self.restarts += restarted as u64;
+    }
+
+    fn completed(&mut self, late: Duration) {
+        let us = late.as_micros() as u64;
+        if us > 2_000 {
+            self.late += 1;
+        }
+        self.latest_us = self.latest_us.max(us);
+    }
 }
 
 impl AudioRing {
@@ -405,6 +450,8 @@ impl AudioRing {
             q: Mutex::new(VecDeque::with_capacity(RING_FRAMES * d::RENDER_CHANNELS)),
             frames_in: AtomicU64::new(0),
             arrivals: Mutex::new((None, ArrivalGaps::default())),
+            transport: Mutex::new(RenderStats::default()),
+            restarts: AtomicU64::new(0),
         }
     }
 
@@ -440,6 +487,7 @@ impl AudioRing {
     fn clear(&self) {
         self.q.lock().clear();
         self.arrivals.lock().0 = None;
+        self.restarts.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -462,6 +510,28 @@ impl PcmSource for AudioRing {
     }
     fn take_arrival_gaps(&self) -> ArrivalGaps {
         std::mem::take(&mut self.arrivals.lock().1)
+    }
+    fn restarts(&self) -> u64 {
+        self.restarts.load(Ordering::Relaxed)
+    }
+    fn log_transport(&self, log: bool) {
+        let t = std::mem::take(&mut *self.transport.lock());
+        if !log || t.urbs == 0 {
+            return;
+        }
+        log::debug!(
+            "game audio over USB: {} URB(s) of {}-{} ms, {}-{} held at once reaching {}-{} ms ahead, the queue ran out {} time(s), {} completion(s) over 2 ms late (latest {:.1} ms)",
+            t.urbs,
+            t.packets.0,
+            t.packets.1,
+            t.depth.0,
+            t.depth.1,
+            t.lead.0,
+            t.lead.1,
+            t.restarts,
+            t.late,
+            t.latest_us as f64 / 1000.0,
+        );
     }
 }
 
@@ -526,10 +596,12 @@ struct IsoClock {
 
 impl IsoClock {
     /// Reserve the next window for `lens.len()` one-millisecond packets.
-    fn admit(&mut self, seq: u32, lens: Vec<u32>, now: Instant, epoch: Instant) {
-        let start = match self.cursor {
-            Some(c) if c + MS >= now => c,
-            _ => now,
+    /// True when the queue had run out and the clock started again.
+    fn admit(&mut self, seq: u32, lens: Vec<u32>, now: Instant, epoch: Instant) -> bool {
+        let (start, restarted) = match self.cursor {
+            Some(c) if c + MS >= now => (c, false),
+            Some(_) => (now, true),
+            None => (now, false),
         };
         let due = start + MS * lens.len().max(1) as u32;
         self.cursor = Some(due);
@@ -541,6 +613,7 @@ impl IsoClock {
             due,
             frame,
         });
+        restarted
     }
 
     fn remove(&mut self, seq: u32) -> bool {
@@ -1285,7 +1358,11 @@ fn submit(s: &Shared, u: Submit) {
             s.audio.push(&u.data, gain);
             let mut g = s.conn.lock();
             if let Some(c) = g.as_mut() {
-                c.render.admit(u.seq, u.iso_lens, Instant::now(), s.epoch);
+                let now = Instant::now();
+                let packets = u.iso_lens.len() as u32;
+                let restarted = c.render.admit(u.seq, u.iso_lens, now, s.epoch);
+                let lead = c.render.cursor.map(|end| end.saturating_duration_since(now)).unwrap_or_default();
+                s.audio.transport.lock().admitted(packets, c.render.q.len(), lead, restarted);
             }
         }
         (d::EP_CAPTURE, wire::DIR_IN) if s.model.capture_interface().is_some() && u.packets.is_some() => {
@@ -1325,6 +1402,7 @@ fn clock(s: &Arc<Shared>) {
             if let Some(c) = g.as_mut() {
                 while c.render.q.front().map(|j| j.due <= now).unwrap_or(false) {
                     let j = c.render.q.pop_front().unwrap();
+                    s.audio.transport.lock().completed(now - j.due);
                     descs.clear();
                     let mut off = 0;
                     for &l in &j.lens {

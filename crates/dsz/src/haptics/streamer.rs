@@ -236,6 +236,8 @@ impl AudioSession {
         // Count only this session's pauses.
         if let Some(src) = src {
             src.take_arrival_gaps();
+            // Start the delivery figures with the session too.
+            src.log_transport(false);
         }
         AudioSession {
             start: Some(Instant::now()),
@@ -259,6 +261,9 @@ impl AudioSession {
             super::game::ArrivalGaps::LATE.as_millis(),
             gaps.longest.as_millis(),
         );
+        if let Some(src) = src {
+            src.log_transport(true);
+        }
     }
 }
 

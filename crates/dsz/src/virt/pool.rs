@@ -688,8 +688,14 @@ impl Pool {
     }
 
     /// Unplug everything (app exit).
+    /// Unplug every pad, on quitting. Each is detached now rather than when
+    /// its last handle drops: the process may exit first. An update made in
+    /// the first minute, while the startup pad's thread still held it, left
+    /// that pad plugged in with no one serving it, a dead controller that a
+    /// game took as the first player.
     pub fn clear(&self, engine: &Engine) {
         for p in self.list() {
+            p.target.detach_now();
             self.destroy(engine, &p);
         }
     }
