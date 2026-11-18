@@ -24,6 +24,41 @@ pub fn raise_thread_priority(critical: bool) {
     }
 }
 
+/// While alive, this thread is scheduled by MMCSS as "Pro Audio", like
+/// Windows' own audio engine: in the real-time range, above a game that
+/// keeps every core busy at high priority (issue 49). MMCSS still keeps
+/// a share of each period for the rest of the PC.
+pub struct ProAudio(HANDLE);
+
+impl ProAudio {
+    /// Raise this thread to the highest normal priority, then ask MMCSS
+    /// for more; the first is what stays if MMCSS says no.
+    pub fn join(what: &str) -> ProAudio {
+        raise_thread_priority(false);
+        let task = wide("Pro Audio");
+        let mut index = 0u32;
+        let h = unsafe { AvSetMmThreadCharacteristicsW(task.as_ptr(), &mut index) };
+        if h.is_null() {
+            log::debug!(
+                "{what}: MMCSS refused Pro Audio scheduling ({}), staying at high priority",
+                std::io::Error::last_os_error()
+            );
+        } else {
+            unsafe { AvSetMmThreadPriority(h, AVRT_PRIORITY_HIGH) };
+            log::debug!("{what}: scheduled by MMCSS as Pro Audio");
+        }
+        ProAudio(h)
+    }
+}
+
+impl Drop for ProAudio {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { AvRevertMmThreadCharacteristics(self.0) };
+        }
+    }
+}
+
 /// 1 ms system timer for the whole process, requested once. The writer's
 /// 8 ms tick and every timed wait depend on it.
 pub fn timer_resolution_1ms() {

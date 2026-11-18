@@ -18,8 +18,10 @@
 //!
 //! Timing follows a real host controller. Isochronous URBs are reserved
 //! back to back on an absolute clock (one packet per millisecond) and each
-//! completes when its window ends, so the audio engine runs at real time;
-//! after a gap of a full packet the clock re-anchors instead of replaying.
+//! completes when its window ends, so the audio engine runs at real time.
+//! When the queue runs dry for a moment, the URBs that come next complete
+//! at once until the clock is back to now, so the time is made up rather
+//! than lost; after a longer gap the clock re-anchors instead.
 //! PCM is published as soon as a URB arrives. Input completes a pending
 //! interrupt URB the moment the physical report is processed.
 
@@ -231,6 +233,12 @@ fn plugin_request(layout: PluginLayout, busid: &str, service: &str, host: &str) 
 }
 
 const MS: Duration = Duration::from_millis(1);
+/// How long an isochronous queue may run dry and the time still be made
+/// up. Windows holds only 10-20 ms of render URBs, so a PC that keeps the
+/// next one waiting a little longer would lose that much of the game's
+/// audio each time, and the speaker buffer drained a bit more each time
+/// (issue 49). Longer than this, and the stream had stopped.
+const MAKE_UP: Duration = Duration::from_millis(250);
 /// Resend the last input report when nothing new arrived for this long.
 const INPUT_KEEPALIVE: Duration = Duration::from_millis(8);
 /// About 200 ms of game PCM.
@@ -412,8 +420,10 @@ struct RenderStats {
     depth: (usize, usize),
     /// How far past now the queued audio reached as each URB arrived, ms.
     lead: (u64, u64),
-    /// A URB came after the queue had run out: the clock started again.
-    restarts: u64,
+    /// A URB came after the queue had run out, and of those, the ones
+    /// whose time was made up rather than the clock starting again.
+    ran_out: u64,
+    made_up: u64,
     /// Completions sent more than 2 ms after their window ended, and the
     /// latest, microseconds.
     late: u64,
@@ -421,7 +431,7 @@ struct RenderStats {
 }
 
 impl RenderStats {
-    fn admitted(&mut self, packets: u32, depth: usize, lead: Duration, restarted: bool) {
+    fn admitted(&mut self, packets: u32, depth: usize, lead: Duration, how: Admitted) {
         let lead = lead.as_millis() as u64;
         if self.urbs == 0 {
             self.packets = (packets, packets);
@@ -432,7 +442,8 @@ impl RenderStats {
         self.packets = (self.packets.0.min(packets), self.packets.1.max(packets));
         self.depth = (self.depth.0.min(depth), self.depth.1.max(depth));
         self.lead = (self.lead.0.min(lead), self.lead.1.max(lead));
-        self.restarts += restarted as u64;
+        self.ran_out += (how != Admitted::OnTime) as u64;
+        self.made_up += (how == Admitted::MadeUp) as u64;
     }
 
     fn completed(&mut self, late: Duration) {
@@ -520,7 +531,7 @@ impl PcmSource for AudioRing {
             return;
         }
         log::debug!(
-            "game audio over USB: {} URB(s) of {}-{} ms, {}-{} held at once reaching {}-{} ms ahead, the queue ran out {} time(s), {} completion(s) over 2 ms late (latest {:.1} ms)",
+            "game audio over USB: {} URB(s) of {}-{} ms, {}-{} held at once reaching {}-{} ms ahead, the queue ran out {} time(s) ({} made up), {} completion(s) over 2 ms late (latest {:.1} ms)",
             t.urbs,
             t.packets.0,
             t.packets.1,
@@ -528,7 +539,8 @@ impl PcmSource for AudioRing {
             t.depth.1,
             t.lead.0,
             t.lead.1,
-            t.restarts,
+            t.ran_out,
+            t.made_up,
             t.late,
             t.latest_us as f64 / 1000.0,
         );
@@ -588,6 +600,17 @@ struct IsoJob {
     frame: u32,
 }
 
+/// How a URB found its isochronous queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Admitted {
+    OnTime,
+    /// The queue had run dry for less than `MAKE_UP`: it goes in where the
+    /// last window ended, in the past, and completes at once.
+    MadeUp,
+    /// The queue had been dry longer: the clock starts again from now.
+    Restarted,
+}
+
 #[derive(Default)]
 struct IsoClock {
     q: VecDeque<IsoJob>,
@@ -596,12 +619,12 @@ struct IsoClock {
 
 impl IsoClock {
     /// Reserve the next window for `lens.len()` one-millisecond packets.
-    /// True when the queue had run out and the clock started again.
-    fn admit(&mut self, seq: u32, lens: Vec<u32>, now: Instant, epoch: Instant) -> bool {
-        let (start, restarted) = match self.cursor {
-            Some(c) if c + MS >= now => (c, false),
-            Some(_) => (now, true),
-            None => (now, false),
+    fn admit(&mut self, seq: u32, lens: Vec<u32>, now: Instant, epoch: Instant) -> Admitted {
+        let (start, how) = match self.cursor {
+            Some(c) if c + MS >= now => (c, Admitted::OnTime),
+            Some(c) if c + MAKE_UP >= now => (c, Admitted::MadeUp),
+            Some(_) => (now, Admitted::Restarted),
+            None => (now, Admitted::OnTime),
         };
         let due = start + MS * lens.len().max(1) as u32;
         self.cursor = Some(due);
@@ -613,7 +636,7 @@ impl IsoClock {
             due,
             frame,
         });
-        restarted
+        how
     }
 
     fn remove(&mut self, seq: u32) -> bool {
@@ -1239,7 +1262,7 @@ fn handshake(s: &Shared, st: &mut TcpStream) -> Option<TcpStream> {
 fn session(s: &Arc<Shared>, stream: TcpStream) {
     // The game's audio arrives on this thread, and a busy PC that leaves it
     // waiting is a gap in the speaker (issue 49), like the clock thread.
-    crate::platform::raise_thread_priority(false);
+    let _mmcss = crate::platform::ProAudio::join("virtual controller reader");
     let _ = stream.set_read_timeout(None);
     let _ = stream.set_nodelay(true);
     let Ok(w) = stream.try_clone() else {
@@ -1360,9 +1383,9 @@ fn submit(s: &Shared, u: Submit) {
             if let Some(c) = g.as_mut() {
                 let now = Instant::now();
                 let packets = u.iso_lens.len() as u32;
-                let restarted = c.render.admit(u.seq, u.iso_lens, now, s.epoch);
+                let how = c.render.admit(u.seq, u.iso_lens, now, s.epoch);
                 let lead = c.render.cursor.map(|end| end.saturating_duration_since(now)).unwrap_or_default();
-                s.audio.transport.lock().admitted(packets, c.render.q.len(), lead, restarted);
+                s.audio.transport.lock().admitted(packets, c.render.q.len(), lead, how);
             }
         }
         (d::EP_CAPTURE, wire::DIR_IN) if s.model.capture_interface().is_some() && u.packets.is_some() => {
@@ -1390,7 +1413,7 @@ fn submit(s: &Shared, u: Submit) {
 /// Completes isochronous windows on time and keeps input flowing.
 fn clock(s: &Arc<Shared>) {
     crate::platform::timer_resolution_1ms();
-    crate::platform::raise_thread_priority(false);
+    let _mmcss = crate::platform::ProAudio::join("virtual controller clock");
     let timer = crate::platform::PreciseTimer::new();
     let mut descs: Vec<(u32, u32, u32)> = Vec::with_capacity(64);
     let mut capture: Vec<u8> = Vec::new();
@@ -2032,16 +2055,33 @@ mod tests {
         let epoch = Instant::now();
         let mut c = IsoClock::default();
         let t0 = epoch + Duration::from_millis(5);
-        c.admit(1, vec![384; 10], t0, epoch);
-        c.admit(2, vec![384; 10], t0, epoch);
+        assert_eq!(c.admit(1, vec![384; 10], t0, epoch), Admitted::OnTime);
+        assert_eq!(c.admit(2, vec![384; 10], t0, epoch), Admitted::OnTime);
         assert_eq!(c.q[0].due, t0 + Duration::from_millis(10));
         assert_eq!(c.q[1].due, t0 + Duration::from_millis(20));
         assert_eq!(c.q[1].frame, 15);
         // Long after the cursor: start from now, not from the stale cursor.
-        let late = t0 + Duration::from_millis(100);
+        let late = t0 + Duration::from_millis(20) + MAKE_UP + MS;
         c.q.clear();
-        c.admit(3, vec![384; 2], late, epoch);
+        assert_eq!(c.admit(3, vec![384; 2], late, epoch), Admitted::Restarted);
         assert_eq!(c.q[0].due, late + Duration::from_millis(2));
+    }
+
+    #[test]
+    fn a_short_dry_spell_is_made_up_and_not_lost() {
+        let epoch = Instant::now();
+        let mut c = IsoClock::default();
+        let t0 = epoch + Duration::from_millis(5);
+        c.admit(1, vec![384; 10], t0, epoch);
+        c.q.clear();
+        // 40 ms after the last window ended: it takes the next window
+        // anyway, already due, so the clock is back to now in a few URBs.
+        let late = t0 + Duration::from_millis(50);
+        assert_eq!(c.admit(2, vec![384; 10], late, epoch), Admitted::MadeUp);
+        assert_eq!(c.q[0].due, t0 + Duration::from_millis(20));
+        assert_eq!(c.q[0].frame, 15);
+        // Just within a packet of the cursor is on time, as before.
+        assert_eq!(c.admit(3, vec![384; 10], t0 + Duration::from_millis(21), epoch), Admitted::OnTime);
     }
 
     #[test]
