@@ -118,7 +118,7 @@ RacingDSX only sends once it sees the app it was written for running. With DSZ, 
 
 ### Drivers
 
-Nothing is bundled. The Virtual controller page shows what is installed and installs a missing driver in one click: it downloads the pinned release from the project's GitHub page, checks it (usbip-win2 against its published SHA-256, HidHide by its author's Authenticode signature, since that release publishes no hash), and opens its installer, which asks for admin. `install.rs` has the URLs.
+Nothing is bundled. The Virtual controller page shows what is installed and installs a missing driver in one click: it downloads the pinned release from the project's GitHub page, checks it (usbip-win2 against its published SHA-256, HidHide by its author's Authenticode signature, since that release publishes no hash), and opens its installer, which asks for admin. On an ARM64 PC it takes usbip-win2's arm64 installer, also when the x64 `dsz.exe` runs there under emulation, since the x64 driver doesn't load on ARM64. `install.rs` has the URLs.
 
 | Driver | Used for | On the reference PC |
 |---|---|---|
