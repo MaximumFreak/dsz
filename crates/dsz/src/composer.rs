@@ -26,6 +26,9 @@ pub struct Composer {
     /// The last report left the actuators to the firmware's rumble
     /// emulation while the haptic stream runs; see [`Composer::classic_owns`].
     classic: bool,
+    /// The game's held rumble level (sequence, whether it raised the
+    /// level) the last report put on the motors; see [`Composer::take_held`].
+    held: Option<(u64, bool)>,
     /// The battery blend shown, eased toward the battery's level so a 10 %
     /// step doesn't jump; see [`battery_blend`].
     blend: Option<f32>,
@@ -166,6 +169,7 @@ impl Composer {
             motors_on: false,
             classic_until: None,
             classic: false,
+            held: None,
             blend: None,
             idle_level: 1.0,
         }
@@ -178,6 +182,14 @@ impl Composer {
     /// false with the option off.
     pub fn classic_owns(&self) -> bool {
         self.classic
+    }
+
+    /// The game's held rumble level the last composed report carries on
+    /// the motors, if any (issue 43). The writer passes it to
+    /// [`crate::device::GameState::rumble_sent`] once that report went out.
+    /// None while the stream plays the rumble instead.
+    pub fn take_held(&mut self) -> Option<(u64, bool)> {
+        self.held.take()
     }
 
     /// Lightbar color for the profile at `now`, without overrides.
@@ -414,11 +426,15 @@ impl Composer {
         // rumble jitter and skip while the speaker stream ran (issue 43).
         out.rumble_reduction = p.rumble.power_reduction.min(7);
         out.enhanced_rumble = p.rumble.enhanced;
+        // A game's rumble level goes out in at least one report even when
+        // the game cut it before this one (`GameState::rumble_to_send`).
         let (mut lo, mut hi) = feedback.rumble_now(now);
+        let mut held = None;
         if vo.game_rumble {
-            let (gh, gl) = feedback.game_rumble_now();
+            let ((gh, gl), pending) = feedback.game.rumble_to_send(now);
             lo = lo.max(gh);
             hi = hi.max(gl);
+            held = pending;
         }
         let rumbling = lo > 0 || hi > 0;
         if !p.rumble.always_classic {
@@ -432,10 +448,13 @@ impl Composer {
         if pcm_haptics && !self.classic {
             out.rumble_valid = self.motors_on;
             self.motors_on = false;
+            // The stream plays the rumble, and lets the held level go.
+            self.held = None;
         } else {
             out.rumble_left = lo;
             out.rumble_right = hi;
             self.motors_on = rumbling;
+            self.held = held;
         }
 
         out

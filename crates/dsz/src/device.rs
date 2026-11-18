@@ -86,12 +86,36 @@ impl HapticPulse {
     }
 }
 
+/// A rumble level the game set that no report to the controller has
+/// carried yet; see [`GameState::set_rumble`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldRumble {
+    pub heavy: u8,
+    pub light: u8,
+    /// Which of the game's rumble reports this is, so a report composed
+    /// before a newer level came in doesn't let that one go.
+    pub seq: u64,
+    pub at: Instant,
+}
+
+/// A held rumble level no report took within this long is dropped rather
+/// than played late (a stalled link, or rumble going nowhere, such as a
+/// wired controller playing the game's haptic audio).
+pub const PULSE_STALE: Duration = Duration::from_millis(100);
+
 /// What a game sent to the virtual controller.
 #[derive(Debug, Default, Clone)]
 pub struct GameState {
     /// (heavy, light). Holds until the game changes it, as on a real pad;
     /// cleared when the game closes the virtual controller.
     pub rumble: Option<(u8, u8)>,
+    /// Issue 43: the highest level set since a report last carried the
+    /// game's rumble. GTA V pulses its rumble, a level in one report and
+    /// zero in the next, often closer together than the control reports
+    /// go out; without this the zero overwrote the level before any report
+    /// carried it, and those pulses never reached the controller.
+    pub held: Option<HeldRumble>,
+    pub rumble_seq: u64,
     pub right_trigger: Option<[u8; 11]>,
     pub left_trigger: Option<[u8; 11]>,
     pub rgb: Option<[u8; 3]>,
@@ -111,6 +135,82 @@ pub struct GameState {
     pub rumble_zeroed: u64,
     pub rumble_flags_off: u64,
     pub rumble_cut_by_other: u64,
+    /// How long the game kept its rumble on each time, for the session
+    /// line (issue 43): runs, the shortest, the total, and those under
+    /// 8 ms (shorter than a control report gap while streaming).
+    pub rumble_on_since: Option<Instant>,
+    pub rumble_runs: u64,
+    pub rumble_run_min: Option<Duration>,
+    pub rumble_run_total: Duration,
+    pub rumble_runs_short: u64,
+    /// Pulses that reached the controller only because they were held.
+    pub rumble_saved: u64,
+}
+
+impl GameState {
+    /// The game set its classic rumble. A non-zero level is also held,
+    /// merged with any level still waiting, until a report carries it
+    /// ([`GameState::rumble_sent`]); a zero or lower level never cuts a
+    /// level no report has carried yet.
+    pub fn set_rumble(&mut self, heavy: u8, light: u8, now: Instant) {
+        let on = heavy != 0 || light != 0;
+        match (self.rumble_on_since, on) {
+            (None, true) => self.rumble_on_since = Some(now),
+            (Some(since), false) => {
+                let run = now.saturating_duration_since(since);
+                self.rumble_on_since = None;
+                self.rumble_runs += 1;
+                self.rumble_run_total += run;
+                self.rumble_run_min = Some(self.rumble_run_min.map_or(run, |m| m.min(run)));
+                if run < Duration::from_millis(8) {
+                    self.rumble_runs_short += 1;
+                }
+            }
+            _ => {}
+        }
+        self.rumble = on.then_some((heavy, light));
+        if on {
+            self.rumble_seq += 1;
+            let (h, l) = self.held_now(now).map_or((0, 0), |p| (p.heavy, p.light));
+            self.held = Some(HeldRumble {
+                heavy: h.max(heavy),
+                light: l.max(light),
+                seq: self.rumble_seq,
+                at: now,
+            });
+        }
+    }
+
+    fn held_now(&self, now: Instant) -> Option<HeldRumble> {
+        self.held
+            .filter(|p| now.saturating_duration_since(p.at) < PULSE_STALE)
+    }
+
+    /// The game's rumble for the next report: what it last set, raised to
+    /// any level it set that no report has carried yet. With the hold, the
+    /// held report's sequence number and whether it raised the level.
+    pub fn rumble_to_send(&self, now: Instant) -> ((u8, u8), Option<(u64, bool)>) {
+        let (h, l) = self.rumble.unwrap_or((0, 0));
+        match self.held_now(now) {
+            Some(p) => (
+                (h.max(p.heavy), l.max(p.light)),
+                Some((p.seq, p.heavy > h || p.light > l)),
+            ),
+            None => ((h, l), None),
+        }
+    }
+
+    /// A report to the controller (or the haptic stream) carried the held
+    /// level `seq` from [`GameState::rumble_to_send`]: let it go, unless a
+    /// newer level came in since. `raised`: the hold made the difference.
+    pub fn rumble_sent(&mut self, seq: u64, raised: bool) {
+        if self.held.is_some_and(|p| p.seq == seq) {
+            self.held = None;
+            if raised {
+                self.rumble_saved += 1;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -144,6 +244,16 @@ impl Feedback {
                 g.rumble_flags_off,
                 g.rumble_cut_by_other
             );
+            if g.rumble_runs > 0 {
+                log::info!(
+                    "game rumble pulses: {} on for {:.1} ms on average, shortest {:.1} ms, {} under 8 ms; {} reached the controller only because DSZ held them",
+                    g.rumble_runs,
+                    g.rumble_run_total.as_secs_f64() * 1000.0 / g.rumble_runs as f64,
+                    g.rumble_run_min.unwrap_or_default().as_secs_f64() * 1000.0,
+                    g.rumble_runs_short,
+                    g.rumble_saved
+                );
+            }
         }
         self.game = GameState::default();
     }
@@ -566,7 +676,7 @@ impl Device {
     /// Rumble from the game.
     pub fn set_game_rumble(&self, heavy: u8, light: u8) {
         let mut f = self.feedback.lock();
-        f.game.rumble = (heavy != 0 || light != 0).then_some((heavy, light));
+        f.game.set_rumble(heavy, light, Instant::now());
         drop(f);
         self.kick();
     }
@@ -592,7 +702,7 @@ impl Device {
         g.reports += 1;
         let (heavy, light) = o.rumble;
         let was = g.rumble.is_some();
-        g.rumble = (heavy != 0 || light != 0).then_some((heavy, light));
+        g.set_rumble(heavy, light, Instant::now());
         let [f0, f1, f2] = o.flags;
         if g.rumble.is_some() {
             g.rumble_sets += 1;
@@ -1663,6 +1773,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             && now.duration_since(last_write) < LIGHTING_GAP;
         let due =
             keepalive || (changed && !throttled) || device.force_output.load(Ordering::Acquire);
+        let mut wrote = false;
         if due && now >= backoff_until {
             device.force_output.store(false, Ordering::Release);
             let ds4_audio = *device.ds4_audio.lock();
@@ -1679,9 +1790,22 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 last_sent = Some(state);
                 last_write = now;
                 writes_since += 1;
+                wrote = true;
             } else {
                 // Make sure the state goes out once the link is back.
                 last_sent = None;
+            }
+        }
+        if let Some((seq, raised)) = composer.take_held() {
+            // The held rumble level is with the controller once a report
+            // carrying it went out, or when the last one sent already had
+            // the same motor levels (nothing new to send).
+            let carried = last_sent.as_ref().is_some_and(|l| {
+                (l.rumble_valid, l.rumble_left, l.rumble_right)
+                    == (state.rumble_valid, state.rumble_left, state.rumble_right)
+            });
+            if carried {
+                device.feedback.lock().game.rumble_sent(seq, raised && wrote);
             }
         }
 
@@ -2218,4 +2342,252 @@ mod game_audio_test_tests {
         d.end_game_audio_test(&t);
         assert!(d.game_audio.lock().is_none());
     }
+}
+
+#[cfg(test)]
+mod rumble_pulse_tests {
+    //! Issue 43: GTA V pulses its rumble, a level in one report and zero in
+    //! the next. A level the game set must reach the controller in at least
+    //! one report, even when its zero comes before the writer's next report.
+    use super::*;
+    use crate::composer::Composer;
+    use crate::profile::Profile;
+    use ds_proto::OutputState;
+
+    fn compose(c: &mut Composer, d: &Device, p: &Profile, pcm: bool, now: Instant) -> OutputState {
+        let fb = d.feedback.lock();
+        c.compose(
+            p,
+            &InputState::default(),
+            &Overrides::default(),
+            &fb,
+            &Toggles::default(),
+            pcm,
+            0.0,
+            now,
+        )
+    }
+
+    /// A game's USB output report to the virtual DualSense: classic rumble
+    /// (heavy, light) with the rumble flags set, as GTA V sends it.
+    fn ds_rumble_report(heavy: u8, light: u8) -> Vec<u8> {
+        let mut r = vec![0u8; ds_proto::virtual_pad::DS_USB_OUTPUT_LEN];
+        r[0] = 0x02;
+        r[1] = 0x03;
+        r[2] = 0x40;
+        r[3] = light;
+        r[4] = heavy;
+        r
+    }
+
+    #[test]
+    fn a_pulse_cleared_before_the_next_report_still_goes_out() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let p = Profile::default();
+        let mut c = Composer::new();
+        let now = Instant::now();
+        let idle = compose(&mut c, &d, &p, false, now);
+        assert_eq!((idle.rumble_left, idle.rumble_right), (0, 0));
+        // An Xbox 360 or DualShock 4 virtual pad: on, then off, both
+        // between two of the writer's reports.
+        d.set_game_rumble(111, 0);
+        d.set_game_rumble(0, 0);
+        let o = compose(&mut c, &d, &p, false, now + Duration::from_millis(4));
+        assert!(o.rumble_valid);
+        assert_eq!((o.rumble_left, o.rumble_right), (111, 0), "the pulse was lost");
+    }
+
+    #[test]
+    fn a_virtual_dualsense_pulse_survives_classic_rumble_always_with_the_speaker_stream() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let mut p = Profile::default();
+        p.rumble.always_classic = true;
+        let mut c = Composer::new();
+        let now = Instant::now();
+        // The speaker stream runs (pcm), nothing rumbles: the stream has the
+        // actuators.
+        assert!(!compose(&mut c, &d, &p, true, now).rumble_valid);
+        d.apply_game_output(&ds_rumble_report(111, 0));
+        d.apply_game_output(&ds_rumble_report(0, 0));
+        let o = compose(&mut c, &d, &p, true, now + Duration::from_millis(8));
+        assert!(o.rumble_valid);
+        assert_eq!((o.rumble_left, o.rumble_right), (111, 0), "the pulse was lost");
+        assert!(c.classic_owns());
+    }
+
+    #[test]
+    fn a_game_that_never_rumbles_gets_the_same_report_bytes() {
+        // Reports that set no rumble leave every control report byte as
+        // it was, in every mode.
+        let bytes = |o: &OutputState| {
+            let mut b = [0u8; 128];
+            o.build(Connection::Bluetooth, &mut b).to_vec()
+        };
+        let now = Instant::now();
+        for always_classic in [false, true] {
+            for pcm in [false, true] {
+                let mut p = Profile::default();
+                p.rumble.always_classic = always_classic;
+                let quiet = Device::for_test(Connection::Bluetooth, "");
+                let busy = Device::for_test(Connection::Bluetooth, "");
+                // A report with no rumble flags, then zero rumble.
+                let mut plain = vec![0u8; ds_proto::virtual_pad::DS_USB_OUTPUT_LEN];
+                plain[0] = 0x02;
+                busy.apply_game_output(&plain);
+                busy.set_game_rumble(0, 0);
+                let (mut a, mut b) = (Composer::new(), Composer::new());
+                for ms in [0u64, 4, 8, 16, 200] {
+                    let t = now + Duration::from_millis(ms);
+                    let x = compose(&mut a, &quiet, &p, pcm, t);
+                    let y = compose(&mut b, &busy, &p, pcm, t);
+                    assert_eq!(bytes(&x), bytes(&y), "classic {always_classic}, pcm {pcm}, {ms} ms");
+                }
+            }
+        }
+    }
+
+    /// One writer step: compose, "send", and let the held level go as the
+    /// writer does once the report is out.
+    fn send(c: &mut Composer, d: &Device, p: &Profile, pcm: bool, now: Instant) -> (bool, u8, u8) {
+        let o = compose(c, d, p, pcm, now);
+        if let Some((seq, raised)) = c.take_held() {
+            d.feedback.lock().game.rumble_sent(seq, raised);
+        }
+        (o.rumble_valid, o.rumble_left, o.rumble_right)
+    }
+
+    #[test]
+    fn a_held_pulse_goes_out_once_then_the_zero_follows() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let p = Profile::default();
+        let mut c = Composer::new();
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        d.set_game_rumble(111, 0);
+        d.set_game_rumble(0, 0);
+        assert_eq!(send(&mut c, &d, &p, false, at(4)), (true, 111, 0));
+        // Carried once: the next report has the game's zero.
+        assert_eq!(send(&mut c, &d, &p, false, at(8)), (true, 0, 0));
+        assert!(d.feedback.lock().game.held.is_none());
+        assert_eq!(d.feedback.lock().game.rumble_saved, 1);
+    }
+
+    #[test]
+    fn steady_rumble_and_a_carried_stop_are_unchanged() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let p = Profile::default();
+        let mut c = Composer::new();
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        // Steady: the game repeats its level; every report has it.
+        for ms in (0..80).step_by(8) {
+            d.set_game_rumble(150, 40);
+            assert_eq!(send(&mut c, &d, &p, false, at(ms)), (true, 150, 40), "{ms}");
+        }
+        // Stopped after a report carried the level: the zero goes out in
+        // the very next report, no longer on than before.
+        d.set_game_rumble(0, 0);
+        assert_eq!(send(&mut c, &d, &p, false, at(84)), (true, 0, 0));
+        // Lowered after a report carried the level: the lower level at once.
+        d.set_game_rumble(200, 0);
+        assert_eq!(send(&mut c, &d, &p, false, at(88)), (true, 200, 0));
+        d.set_game_rumble(60, 0);
+        assert_eq!(send(&mut c, &d, &p, false, at(92)), (true, 60, 0));
+        assert_eq!(d.feedback.lock().game.rumble_saved, 0);
+    }
+
+    #[test]
+    fn a_higher_level_cut_to_a_lower_one_before_a_report_goes_out_once() {
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let p = Profile::default();
+        let mut c = Composer::new();
+        let t = Instant::now();
+        d.set_game_rumble(200, 10);
+        d.set_game_rumble(80, 90);
+        // Each motor's highest level since the last report, once.
+        assert_eq!(send(&mut c, &d, &p, false, t), (true, 200, 90));
+        assert_eq!(send(&mut c, &d, &p, false, t + Duration::from_millis(8)), (true, 80, 90));
+    }
+
+    #[test]
+    fn a_newer_pulse_is_not_let_go_by_an_older_report() {
+        let mut g = GameState::default();
+        let t = Instant::now();
+        g.set_rumble(111, 0, t);
+        let (_, first) = g.rumble_to_send(t);
+        // Another pulse comes in while that report is on its way.
+        g.set_rumble(0, 0, t);
+        g.set_rumble(90, 0, t + Duration::from_millis(1));
+        g.set_rumble(0, 0, t + Duration::from_millis(2));
+        let (seq, _) = first.unwrap();
+        g.rumble_sent(seq, true);
+        assert_eq!(g.rumble_to_send(t + Duration::from_millis(3)).0, (111, 0), "merged and still held");
+        let (_, second) = g.rumble_to_send(t + Duration::from_millis(3));
+        g.rumble_sent(second.unwrap().0, true);
+        assert_eq!(g.rumble_to_send(t + Duration::from_millis(4)), ((0, 0), None));
+    }
+
+    #[test]
+    fn a_held_level_nothing_took_is_dropped_not_played_late() {
+        let mut g = GameState::default();
+        let t = Instant::now();
+        g.set_rumble(111, 0, t);
+        g.set_rumble(0, 0, t);
+        assert_eq!(g.rumble_to_send(t + PULSE_STALE - Duration::from_millis(1)).0, (111, 0));
+        assert_eq!(g.rumble_to_send(t + PULSE_STALE), ((0, 0), None));
+    }
+
+    #[test]
+    fn while_the_stream_plays_rumble_the_control_report_is_unchanged() {
+        // Classic rumble always off and haptics streaming: rumble plays on
+        // the stream (the streamer takes the held level), and the control
+        // report is byte for byte what it was.
+        let bytes = |o: &OutputState| {
+            let mut b = [0u8; 128];
+            o.build(Connection::Bluetooth, &mut b).to_vec()
+        };
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let p = Profile::default();
+        let t = Instant::now();
+        let mut c = Composer::new();
+        d.set_game_rumble(111, 0);
+        d.set_game_rumble(0, 0);
+        let got = compose(&mut c, &d, &p, true, t);
+        assert!(c.take_held().is_none());
+        let want = Composer::new().compose(
+            &p,
+            &InputState::default(),
+            &Overrides::default(),
+            &Feedback::default(),
+            &Toggles::default(),
+            true,
+            0.0,
+            t,
+        );
+        assert_eq!(bytes(&got), bytes(&want));
+        assert!(d.feedback.lock().game.held.is_some(), "left for the stream");
+    }
+
+    #[test]
+    fn pulses_keep_the_classic_handover() {
+        // Classic rumble always with the speaker stream: a held pulse takes
+        // the actuators, the zero follows, and CLASSIC_HOLD after the pulse
+        // they go back to the stream.
+        let d = Device::for_test(Connection::Bluetooth, "");
+        let mut p = Profile::default();
+        p.rumble.always_classic = true;
+        let mut c = Composer::new();
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        d.set_game_rumble(111, 0);
+        d.set_game_rumble(0, 0);
+        assert_eq!(send(&mut c, &d, &p, true, at(0)), (true, 111, 0));
+        assert!(c.classic_owns());
+        assert_eq!(send(&mut c, &d, &p, true, at(16)), (true, 0, 0));
+        assert!(c.classic_owns());
+        let back = crate::composer::CLASSIC_HOLD.as_millis() as u64;
+        assert_eq!(send(&mut c, &d, &p, true, at(back)), (false, 0, 0));
+        assert!(!c.classic_owns());
+    }
+
 }

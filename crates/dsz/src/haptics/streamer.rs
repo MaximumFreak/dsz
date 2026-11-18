@@ -622,16 +622,23 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         {
             let mut fb = device.feedback.lock();
             let (mut heavy, mut light) = fb.rumble_now(now);
+            let mut held = None;
             if profile.virtual_out.game_rumble {
-                let (gh, gl) = fb.game_rumble_now();
+                // A level the game set and cut since the last block still
+                // plays for one block (issue 43; `GameState::rumble_to_send`).
+                let ((gh, gl), pending) = fb.game.rumble_to_send(now);
                 heavy = heavy.max(gh);
                 light = light.max(gl);
+                held = pending;
             }
             if profile.rumble.always_classic {
                 // The firmware's rumble emulation plays it (composer).
                 synth.rumble(0, 0, 1.0);
             } else {
                 synth.rumble(heavy, light, h.rumble_intensity);
+                if let Some((seq, raised)) = held {
+                    fb.game.rumble_sent(seq, raised);
+                }
             }
             pulses.extend(fb.pulses.drain(..));
         }
