@@ -362,6 +362,8 @@
   "Double tap": "Doble toque",
   "hold for": "mantener durante",
   "interval": "intervalo",
+  "variation ±": "variación ±",
+  "Each press comes a little earlier or later, by up to this much. 0 keeps the exact interval.": "Cada pulsación llega un poco antes o después, como mucho esta cantidad. Con 0 se mantiene el intervalo exacto.",
   "Record": "Capturar tecla",
   "Press a key…": "Pulsa una tecla…",
   "Press": "Pulsar",

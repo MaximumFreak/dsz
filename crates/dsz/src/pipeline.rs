@@ -755,9 +755,37 @@ struct MapRt {
     last_press: Option<Instant>,
     turbo: bool,
     turbo_next: Option<Instant>,
+    /// Random state for turbo variation; seeded on first use.
+    turbo_rng: u64,
     tap_up_at: Option<Instant>,
     /// Buttons a muted combo hid; each stays hidden until it is released.
     mute_latch: u32,
+}
+
+/// How long a turbo press stays down, or up, before the next change. Without
+/// variation, half the interval, as it always was. With it, each half moves
+/// by up to half the variation, so each interval moves by up to all of it.
+fn turbo_half(turbo_ms: u32, variation_ms: u32, rng: &mut u64) -> Duration {
+    let half = turbo_ms.clamp(20, 2000) / 2;
+    if variation_ms == 0 {
+        return Duration::from_millis(half as u64);
+    }
+    if *rng == 0 {
+        *rng = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+            | 1;
+    }
+    // splitmix64: plenty for timing jitter, and no new dependency.
+    *rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *rng;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let spread = (variation_ms.min(1000) / 2) as u64;
+    let offset = (z % (2 * spread + 1)) as i64 - spread as i64;
+    Duration::from_millis((half as i64 + offset).max(10) as u64)
 }
 
 fn holdable(a: &Action) -> bool {
@@ -1462,7 +1490,7 @@ impl Pipeline {
             if rt.turbo {
                 if let Some(next) = rt.turbo_next {
                     if now >= next {
-                        let half = Duration::from_millis((m.turbo_ms.clamp(20, 2000) / 2) as u64);
+                        let half = turbo_half(m.turbo_ms, m.turbo_variation_ms, &mut rt.turbo_rng);
                         if rt.out_down {
                             action_up(&m.action);
                             rt.out_down = false;
@@ -2309,6 +2337,36 @@ mod hold_profile_tests {
 mod tests {
     use super::*;
     use ds_proto::input::TouchPoint;
+
+    #[test]
+    fn turbo_without_variation_keeps_its_exact_timing() {
+        // The formula from before variation existed, for every interval.
+        for ms in (0..=2100).chain([u32::MAX]) {
+            let mut rng = 0;
+            let old = Duration::from_millis((ms.clamp(20, 2000) / 2) as u64);
+            for _ in 0..3 {
+                assert_eq!(turbo_half(ms, 0, &mut rng), old, "{ms} ms");
+            }
+            assert_eq!(rng, 0, "no random state is touched");
+        }
+    }
+
+    #[test]
+    fn turbo_variation_stays_within_its_range() {
+        let mut rng = 0;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..2000 {
+            let h = turbo_half(100, 40, &mut rng).as_millis() as u64;
+            assert!((30..=70).contains(&h), "{h}");
+            seen.insert(h);
+        }
+        // Both ends come up, and plenty in between.
+        assert!(seen.contains(&30) && seen.contains(&70) && seen.len() > 30, "{seen:?}");
+        // A half never drops below 10 ms, whatever the settings.
+        for _ in 0..500 {
+            assert!(turbo_half(20, u32::MAX, &mut rng) >= Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn directional_reach_only_shapes_passthrough_virtual_sticks() {
