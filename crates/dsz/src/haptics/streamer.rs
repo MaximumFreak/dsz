@@ -19,7 +19,7 @@ use ds_proto::Buttons;
 
 use super::audio::Sub;
 use super::dsp::{haptic_clip, resample_window, soft_clip, HapticFilter, Limiter, Squeeze};
-use super::game::WINDOW;
+use super::game::{PcmSource, WINDOW};
 use super::opus::{Encoder, Pcm};
 use super::synth::Synth;
 use crate::device::{Device, StreamPacket, MAX_REPORT, SPEAKER_HEADSET, SPEAKER_MUTED, SPEAKER_UNTOUCHED};
@@ -232,7 +232,11 @@ struct AudioSession {
 }
 
 impl AudioSession {
-    fn start(game: &super::game::GameReader, device: &Device) -> Self {
+    fn start(game: &super::game::GameReader, device: &Device, src: Option<&dyn PcmSource>) -> Self {
+        // Count only this session's pauses.
+        if let Some(src) = src {
+            src.take_arrival_gaps();
+        }
         AudioSession {
             start: Some(Instant::now()),
             underruns: game.underruns,
@@ -241,15 +245,19 @@ impl AudioSession {
         }
     }
 
-    fn log(&self, game: &super::game::GameReader, device: &Device) {
+    fn log(&self, game: &super::game::GameReader, device: &Device, src: Option<&dyn PcmSource>) {
         let Some(start) = self.start else { return };
+        let gaps = src.map(|s| s.take_arrival_gaps()).unwrap_or_default();
         log::info!(
-            "game audio closed after {} s: {} dropout(s) in the game's audio, buffering {} ms, {} frames cut, {} stream underrun(s)",
+            "game audio closed after {} s: {} dropout(s) in the game's audio, buffering {} ms, {} frames cut, {} stream underrun(s); it stopped arriving {} time(s) for {} ms or more, longest {} ms",
             start.elapsed().as_secs(),
             game.underruns - self.underruns,
             game.buffer_ms(),
             game.dropped.load(Ordering::Relaxed) - self.dropped,
             device.stats.stream_underruns.load(Ordering::Relaxed) - self.stream,
+            gaps.count,
+            super::game::ArrivalGaps::LATE.as_millis(),
+            gaps.longest.as_millis(),
         );
     }
 }
@@ -361,9 +369,9 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         if audio_open && !was_audio_open {
             game_haptics_logged = false;
             super::log_game_settings(engine, device, &profile, "a game opened the virtual DualSense's sound device");
-            session = AudioSession::start(&game, device);
+            session = AudioSession::start(&game, device, game_src.as_deref());
         } else if !audio_open && was_audio_open {
-            session.log(&game, device);
+            session.log(&game, device, game_src.as_deref());
         }
         was_audio_open = audio_open;
         let game_rumble = device.feedback.lock().game.rumble_logged;
@@ -781,7 +789,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
         }
     }
     if was_audio_open {
-        session.log(&game, device);
+        let src = device.game_audio.lock().clone();
+        session.log(&game, device, src.as_deref());
     }
     device.microphone.configure(false, true, 100);
     if was_media || capture_used {

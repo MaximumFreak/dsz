@@ -45,6 +45,32 @@ pub trait PcmSource: Send + Sync {
     /// Read up to `out.len() / 4` frames. Returns frames read.
     fn read(&self, out: &mut [i16]) -> usize;
     fn drop_frames(&self, n: usize);
+    /// Pauses in the audio arriving since the last call, which starts
+    /// counting afresh.
+    fn take_arrival_gaps(&self) -> ArrivalGaps {
+        ArrivalGaps::default()
+    }
+}
+
+/// Times the game's audio stopped arriving for `ArrivalGaps::LATE` or
+/// longer, and the longest pause (issue 49: tells a PC that stops sending
+/// apart from a buffer that is too thin).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ArrivalGaps {
+    pub count: u64,
+    pub longest: Duration,
+}
+
+impl ArrivalGaps {
+    pub const LATE: Duration = Duration::from_millis(25);
+
+    /// Count the pause between two arrivals.
+    pub fn note(&mut self, pause: Duration) {
+        if pause >= Self::LATE {
+            self.count += 1;
+            self.longest = self.longest.max(pause);
+        }
+    }
 }
 
 /// One window of game audio, scaled to -1..1.
@@ -141,6 +167,11 @@ impl GameReader {
                         "game audio ran dry and was back {} ms later; buffering {} ms of it now",
                         at.elapsed().as_millis(),
                         self.buffer_ms()
+                    );
+                } else {
+                    log::debug!(
+                        "game audio ran dry again and was back {} ms later",
+                        at.elapsed().as_millis()
                     );
                 }
             }

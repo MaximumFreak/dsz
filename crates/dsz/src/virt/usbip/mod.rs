@@ -43,7 +43,7 @@ use windows_sys::core::GUID;
 use self::descriptors as d;
 use self::wire::{Command, Submit};
 use super::win;
-use crate::haptics::game::PcmSource;
+use crate::haptics::game::{ArrivalGaps, PcmSource};
 
 /// Which controller a virtual pad presents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -395,6 +395,8 @@ pub(crate) fn has_our_serial(id: &str) -> bool {
 pub struct AudioRing {
     q: Mutex<VecDeque<i16>>,
     pub frames_in: AtomicU64,
+    /// When PCM last arrived, and the pauses between arrivals.
+    arrivals: Mutex<(Option<Instant>, ArrivalGaps)>,
 }
 
 impl AudioRing {
@@ -402,11 +404,19 @@ impl AudioRing {
         AudioRing {
             q: Mutex::new(VecDeque::with_capacity(RING_FRAMES * d::RENDER_CHANNELS)),
             frames_in: AtomicU64::new(0),
+            arrivals: Mutex::new((None, ArrivalGaps::default())),
         }
     }
 
     /// Append little-endian PCM, with `gain` on the speaker channels.
     fn push(&self, pcm: &[u8], gain: f32) {
+        {
+            let now = Instant::now();
+            let mut a = self.arrivals.lock();
+            if let Some(last) = a.0.replace(now) {
+                a.1.note(now - last);
+            }
+        }
         let mut q = self.q.lock();
         let frames = pcm.len() / (2 * d::RENDER_CHANNELS);
         for (i, c) in pcm
@@ -429,6 +439,7 @@ impl AudioRing {
 
     fn clear(&self) {
         self.q.lock().clear();
+        self.arrivals.lock().0 = None;
     }
 }
 
@@ -448,6 +459,9 @@ impl PcmSource for AudioRing {
         let mut q = self.q.lock();
         let n = (n * d::RENDER_CHANNELS).min(q.len());
         q.drain(..n);
+    }
+    fn take_arrival_gaps(&self) -> ArrivalGaps {
+        std::mem::take(&mut self.arrivals.lock().1)
     }
 }
 
@@ -1150,6 +1164,9 @@ fn handshake(s: &Shared, st: &mut TcpStream) -> Option<TcpStream> {
 /// Serve one imported connection: read URBs until the driver goes away.
 /// A replug under way leaves the pad alive for the next connection.
 fn session(s: &Arc<Shared>, stream: TcpStream) {
+    // The game's audio arrives on this thread, and a busy PC that leaves it
+    // waiting is a gap in the speaker (issue 49), like the clock thread.
+    crate::platform::raise_thread_priority(false);
     let _ = stream.set_read_timeout(None);
     let _ = stream.set_nodelay(true);
     let Ok(w) = stream.try_clone() else {
@@ -1975,6 +1992,25 @@ mod tests {
         assert_eq!(printed, serial);
         let mac_report = d::ds4::feature(0x81, None, &mac).unwrap();
         assert_eq!(&mac_report[1..7], &report[1..7]);
+    }
+
+    #[test]
+    fn ring_counts_pauses_in_the_audio_arriving() {
+        let r = AudioRing::new();
+        let frame = [0u8; 8];
+        r.push(&frame, 1.0);
+        r.push(&frame, 1.0);
+        assert_eq!(r.take_arrival_gaps().count, 0, "back to back is no pause");
+        std::thread::sleep(ArrivalGaps::LATE + Duration::from_millis(5));
+        r.push(&frame, 1.0);
+        let g = r.take_arrival_gaps();
+        assert_eq!(g.count, 1);
+        assert!(g.longest >= ArrivalGaps::LATE);
+        assert_eq!(r.take_arrival_gaps(), ArrivalGaps::default(), "taking starts afresh");
+        r.clear();
+        std::thread::sleep(ArrivalGaps::LATE + Duration::from_millis(5));
+        r.push(&frame, 1.0);
+        assert_eq!(r.take_arrival_gaps().count, 0, "a closed stream is no pause");
     }
 
     #[test]

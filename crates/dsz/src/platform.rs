@@ -37,26 +37,34 @@ pub fn timer_resolution_1ms() {
 /// Windows 11 ignores a hidden or minimized process's timer-resolution
 /// request (so 8 ms waits become 15.6 ms in the tray) and may run it under
 /// EcoQoS; a controller driver has to stay on time either way.
+///
+/// Windows 10 has no timer-resolution flag and rejects the request when it
+/// is there (error 87), so the speed opt-out is then made alone (issue 49).
 pub fn opt_out_of_power_throttling() {
-    unsafe {
+    let set = |mask: u32| unsafe {
         let state = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
-                | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            ControlMask: mask,
             StateMask: 0,
         };
-        let ok = SetProcessInformation(
+        SetProcessInformation(
             GetCurrentProcess(),
             ProcessPowerThrottling,
             &state as *const _ as *const c_void,
             std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        ) != 0
+    };
+    if set(PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION) {
+        return;
+    }
+    let all = std::io::Error::last_os_error();
+    if set(PROCESS_POWER_THROTTLING_EXECUTION_SPEED) {
+        log::debug!("power throttling: opted out of speed throttling only ({all})");
+    } else {
+        log::debug!(
+            "power throttling opt-out failed: {}",
+            std::io::Error::last_os_error()
         );
-        if ok == 0 {
-            log::debug!(
-                "power throttling opt-out failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
     }
 }
 
