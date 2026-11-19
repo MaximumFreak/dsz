@@ -91,14 +91,14 @@ fn main() {
         engine.start();
     }
     if updated {
-        engine.toast(crate::localized_format!("Updated to DSZ {}", "Atualizado para DSZ {}", "Actualizado a DSZ {}", env!("CARGO_PKG_VERSION")));
+        engine.toast(crate::localized_format!("Updated to DSZ {}", "Atualizado para DSZ {}", "Actualizado a DSZ {}", "已更新到 DSZ {}", env!("CARGO_PKG_VERSION")));
     }
     if admin_declined {
         log::warn!("not running as administrator: the prompt was declined");
         engine.warn_toast(crate::i18n::tr("Running without administrator rights"));
     }
     if moved {
-        engine.toast(crate::localized_format!("Settings are in {}", "As configurações estão em {}", "La configuración está en {}", engine.data_dir.display()));
+        engine.toast(crate::localized_format!("Settings are in {}", "As configurações estão em {}", "La configuración está en {}", "设置位于 {}", engine.data_dir.display()));
     }
 
     let start_hidden = !updated && !moved && !show && (minimized_flag || engine.settings.read().start_minimized);

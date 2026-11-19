@@ -214,7 +214,7 @@ fn reach_preview(ui: &mut egui::Ui, state: &mut ReachEditor, reach: &mut StickRe
     p.circle_filled(dot, 4.0, ACCENT);
     let raw_percent = raw.length() * 100.0;
     let corrected_percent = corrected.length() * 100.0;
-    muted(ui, &crate::localized_format!("Raw {raw_percent:.0}% → corrected {corrected_percent:.0}%", "Bruto {raw_percent:.0}% → corrigido {corrected_percent:.0}%", "Original {raw_percent:.0}% → corregido {corrected_percent:.0}%"));
+    muted(ui, &crate::localized_format!("Raw {raw_percent:.0}% → corrected {corrected_percent:.0}%", "Bruto {raw_percent:.0}% → corrigido {corrected_percent:.0}%", "Original {raw_percent:.0}% → corregido {corrected_percent:.0}%", "原始 {raw_percent:.0}% → 校正后 {corrected_percent:.0}%"));
 }
 
 fn reach_editor(ui: &mut egui::Ui, reach: &mut StickReach, state: &mut ReachEditor, input: Option<(u8, u8)>, virtual_on: bool) {
@@ -282,11 +282,11 @@ fn reach_editor(ui: &mut egui::Ui, reach: &mut StickReach, state: &mut ReachEdit
     if let Some(c) = &state.calibration {
         let count = c.maxima.iter().filter(|m| m.is_some()).count();
         let turns = c.turns;
-        note(ui, &crate::localized_format!("Rotate fully: {count}/16 directions · {turns}/3 turns", "Gire até o limite: {count}/16 direções · {turns}/3 voltas", "Gira hasta el tope: {count}/16 direcciones · {turns}/3 vueltas"), ACCENT);
+        note(ui, &crate::localized_format!("Rotate fully: {count}/16 directions · {turns}/3 turns", "Gire até o limite: {count}/16 direções · {turns}/3 voltas", "Gira hasta el tope: {count}/16 direcciones · {turns}/3 vueltas", "完整旋转：{count}/16 个方向 · {turns}/3 圈"), ACCENT);
     } else if let Some(maxima) = &state.pending {
         let missing = maxima.iter().filter(|m| m.is_none()).count();
         if missing > 0 {
-            note(ui, &crate::localized_format!("{missing} directions unmeasured. Apply keeps their current gains.", "{missing} direções sem amostras. Aplicar mantém os ganhos atuais delas.", "{missing} direcciones sin medir. Aplicar conserva sus ganancias actuales."), WARN);
+            note(ui, &crate::localized_format!("{missing} directions unmeasured. Apply keeps their current gains.", "{missing} direções sem amostras. Aplicar mantém os ganhos atuais delas.", "{missing} direcciones sin medir. Aplicar conserva sus ganancias actuales.", "有 {missing} 个方向未测量。应用时保留它们当前的增益。"), WARN);
         } else {
             muted(ui, crate::i18n::tr("All directions measured. Apply or discard the preview."));
         }

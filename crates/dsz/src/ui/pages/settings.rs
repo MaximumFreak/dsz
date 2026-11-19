@@ -19,6 +19,8 @@ impl App {
                     egui::ComboBox::from_id_salt("interface-language")
                         .selected_text(language.label())
                         .show_ui(ui, |ui| {
+                            // "简体中文" needs the CJK font in every language.
+                            ensure_cjk(ui.ctx());
                             for value in crate::i18n::Language::ALL {
                                 ui.selectable_value(
                                     &mut language,
@@ -90,7 +92,7 @@ impl App {
                         crate::i18n::tr("The minimize button hides the window to the tray instead of the taskbar"),
                         &mut s.minimize_to_tray,
                     );
-                    let hint = crate::localized_format!("Every controller starts on \"{}\"; picking another profile still sticks until the app restarts", "Todos os controles iniciam em \"{}\"; outro perfil escolhido permanece até reiniciar o aplicativo", "Todos los mandos inician con \"{}\"; si eliges otro perfil, se mantiene hasta reiniciar la aplicación", s.default_profile);
+                    let hint = crate::localized_format!("Every controller starts on \"{}\"; picking another profile still sticks until the app restarts", "Todos os controles iniciam em \"{}\"; outro perfil escolhido permanece até reiniciar o aplicativo", "Todos los mandos inician con \"{}\"; si eliges otro perfil, se mantiene hasta reiniciar la aplicación", "每个手柄启动时都使用“{}”；选择其他配置文件后会一直保留，直到应用重启", s.default_profile);
                     changed |= toggle_row(
                         ui,
                         crate::i18n::tr("Start on the default profile"),
@@ -278,9 +280,9 @@ impl App {
                             } else {
                                 pill(ui, crate::i18n::tr("Off"), FAINT);
                             }
-                            muted(ui, &crate::localized_format!("{} packet(s) received", "{} pacote(s) recebido(s)", "{} paquete(s) recibido(s)", st.packets));
+                            muted(ui, &crate::localized_format!("{} packet(s) received", "{} pacote(s) recebido(s)", "{} paquete(s) recibido(s)", "已收到 {} 个数据包", st.packets));
                             if let Some(t) = st.last_packet {
-                                muted(ui, &crate::localized_format!("· last {:.0}s ago", "· último há {:.0}s", "· el último hace {:.0}s", t.elapsed().as_secs_f32()));
+                                muted(ui, &crate::localized_format!("· last {:.0}s ago", "· último há {:.0}s", "· el último hace {:.0}s", "· 上次在 {:.0} 秒前", t.elapsed().as_secs_f32()));
                             }
                         });
                         if !st.last_text.is_empty() {
@@ -364,7 +366,7 @@ impl App {
                     muted(
                         ui,
                         &crate::localized_format!(
-                            "Controller speaker: libopus {}, built in. Controller drawings and icon: OpenController (MIT).", "Alto-falante: libopus {} integrado. Desenhos e ícone: OpenController (MIT).", "Altavoz del mando: libopus {} integrado. Dibujos del mando e icono: OpenController (MIT).",
+                            "Controller speaker: libopus {}, built in. Controller drawings and icon: OpenController (MIT).", "Alto-falante: libopus {} integrado. Desenhos e ícone: OpenController (MIT).", "Altavoz del mando: libopus {} integrado. Dibujos del mando e icono: OpenController (MIT).", "手柄扬声器：内置 libopus {}。手柄图示和图标：OpenController（MIT）。",
                             crate::haptics::opus::version()
                         ),
                     );
@@ -386,7 +388,7 @@ impl App {
                 if toggle_row(
                     ui,
                     crate::i18n::tr("Motion server (DSU)"),
-                    &crate::localized_format!("The cemuhook protocol, on 127.0.0.1:{PORT} only", "Protocolo cemuhook, somente em 127.0.0.1:{PORT}", "Protocolo cemuhook, solo en 127.0.0.1:{PORT}"),
+                    &crate::localized_format!("The cemuhook protocol, on 127.0.0.1:{PORT} only", "Protocolo cemuhook, somente em 127.0.0.1:{PORT}", "Protocolo cemuhook, solo en 127.0.0.1:{PORT}", "cemuhook 协议，仅限 127.0.0.1:{PORT}"),
                     &mut on,
                 ) {
                     engine.settings.write().dsu_enabled = on;
@@ -412,8 +414,8 @@ impl App {
                     }
                 });
                 ui.add_space(4.0);
-                muted(ui, &crate::localized_format!("Dolphin: Controllers > Alternate Input Sources > enable DSU Client and add a server named DSZ (127.0.0.1, port {PORT}). Picking the DSUClient device maps nothing by itself: in the Wii Remote's Motion Input tab, right-click each Accelerometer and Gyroscope box and enter its DSU input, such as `DSUClient/0/DSZ:Accel Up` or `DSUClient/0/DSZ:Gyro Pitch Up`, then tick Enabled under Point for gyro pointing. Leave Device on the controller you use for buttons.", "Dolphin: Controllers > Alternate Input Sources > ative o DSU Client e adicione um servidor chamado DSZ (127.0.0.1, porta {PORT}). Escolher o dispositivo DSUClient não mapeia nada sozinho: na aba Motion Input do Wii Remote, clique com o botão direito em cada caixa de Accelerometer e Gyroscope e digite a entrada DSU, como `DSUClient/0/DSZ:Accel Up` ou `DSUClient/0/DSZ:Gyro Pitch Up`, e marque Enabled em Point para apontar com o giroscópio. Deixe Device no controle que você usa para os botões.", "Dolphin: Controllers > Alternate Input Sources > activa DSU Client y añade un servidor llamado DSZ (127.0.0.1, puerto {PORT}). Elegir el dispositivo DSUClient no asigna controles por sí solo: en la pestaña Motion Input del Wii Remote, haz clic derecho en cada casilla de Accelerometer y Gyroscope e introduce su entrada DSU, como `DSUClient/0/DSZ:Accel Up` o `DSUClient/0/DSZ:Gyro Pitch Up`. Después marca Enabled en Point para apuntar con el giroscopio. Deja Device en el mando que usas para los botones."));
-                muted(ui, &crate::localized_format!("Cemu: Input settings > API DSUController. Ryujinx: Input > Motion > CemuHook compatible motion (127.0.0.1, port {PORT}). Yuzu-family emulators: Controls > Motion > CemuhookUDP.", "Cemu: Input settings > API DSUController. Ryujinx: Input > Motion > CemuHook compatible motion (127.0.0.1, porta {PORT}). Emuladores da família Yuzu: Controls > Motion > CemuhookUDP.", "Cemu: Input settings > API DSUController. Ryujinx: Input > Motion > CemuHook compatible motion (127.0.0.1, puerto {PORT}). Emuladores derivados de Yuzu: Controls > Motion > CemuhookUDP."));
+                muted(ui, &crate::localized_format!("Dolphin: Controllers > Alternate Input Sources > enable DSU Client and add a server named DSZ (127.0.0.1, port {PORT}). Picking the DSUClient device maps nothing by itself: in the Wii Remote's Motion Input tab, right-click each Accelerometer and Gyroscope box and enter its DSU input, such as `DSUClient/0/DSZ:Accel Up` or `DSUClient/0/DSZ:Gyro Pitch Up`, then tick Enabled under Point for gyro pointing. Leave Device on the controller you use for buttons.", "Dolphin: Controllers > Alternate Input Sources > ative o DSU Client e adicione um servidor chamado DSZ (127.0.0.1, porta {PORT}). Escolher o dispositivo DSUClient não mapeia nada sozinho: na aba Motion Input do Wii Remote, clique com o botão direito em cada caixa de Accelerometer e Gyroscope e digite a entrada DSU, como `DSUClient/0/DSZ:Accel Up` ou `DSUClient/0/DSZ:Gyro Pitch Up`, e marque Enabled em Point para apontar com o giroscópio. Deixe Device no controle que você usa para os botões.", "Dolphin: Controllers > Alternate Input Sources > activa DSU Client y añade un servidor llamado DSZ (127.0.0.1, puerto {PORT}). Elegir el dispositivo DSUClient no asigna controles por sí solo: en la pestaña Motion Input del Wii Remote, haz clic derecho en cada casilla de Accelerometer y Gyroscope e introduce su entrada DSU, como `DSUClient/0/DSZ:Accel Up` o `DSUClient/0/DSZ:Gyro Pitch Up`. Después marca Enabled en Point para apuntar con el giroscopio. Deja Device en el mando que usas para los botones.", "Dolphin：控制器 > 备用输入源 > 启用 DSU 客户端，并添加名为 DSZ 的服务器（127.0.0.1，端口 {PORT}）。仅选择 DSUClient 设备本身不会映射任何内容：在 Wii 遥控器的“体感输入”选项卡中，右键单击每个加速度计和陀螺仪框，输入对应的 DSU 输入，例如 `DSUClient/0/DSZ:Accel Up` 或 `DSUClient/0/DSZ:Gyro Pitch Up`，然后在“指向”下勾选“启用”以使用陀螺仪指向。“设备”保持为你用于按键的手柄。"));
+                muted(ui, &crate::localized_format!("Cemu: Input settings > API DSUController. Ryujinx: Input > Motion > CemuHook compatible motion (127.0.0.1, port {PORT}). Yuzu-family emulators: Controls > Motion > CemuhookUDP.", "Cemu: Input settings > API DSUController. Ryujinx: Input > Motion > CemuHook compatible motion (127.0.0.1, porta {PORT}). Emuladores da família Yuzu: Controls > Motion > CemuhookUDP.", "Cemu: Input settings > API DSUController. Ryujinx: Input > Motion > CemuHook compatible motion (127.0.0.1, puerto {PORT}). Emuladores derivados de Yuzu: Controls > Motion > CemuhookUDP.", "Cemu：输入设置 > API 选择 DSUController。Ryujinx：输入 > 体感 > 兼容 CemuHook 的体感（127.0.0.1，端口 {PORT}）。yuzu 系模拟器：控制 > 体感 > CemuhookUDP。"));
                 muted(ui, crate::i18n::tr("Buttons and sticks still come from the virtual controller. Set the profile's gyro to Off while playing, or the gyro moves the mouse as well."));
             },
         );
@@ -442,7 +444,7 @@ impl App {
                     note(
                         ui,
                         &crate::localized_format!(
-                            "DSZ {} is available (this is {}). Updating restarts DSZ, so the virtual controllers reconnect: best done outside a game.", "O DSZ {} está disponível (esta é a versão {}). A atualização reinicia o DSZ e reconecta os controles virtuais: prefira atualizar fora de um jogo.", "DSZ {} está disponible (esta versión es la {}). Al actualizar, DSZ se reinicia y los mandos virtuales se reconectan; es mejor hacerlo fuera de un juego.",
+                            "DSZ {} is available (this is {}). Updating restarts DSZ, so the virtual controllers reconnect: best done outside a game.", "O DSZ {} está disponível (esta é a versão {}). A atualização reinicia o DSZ e reconecta os controles virtuais: prefira atualizar fora de um jogo.", "DSZ {} está disponible (esta versión es la {}). Al actualizar, DSZ se reinicia y los mandos virtuales se reconectan; es mejor hacerlo fuera de un juego.", "DSZ {} 已发布（当前为 {}）。更新会重启 DSZ，虚拟手柄会重新连接：最好在游戏之外进行。",
                             r.version,
                             env!("CARGO_PKG_VERSION")
                         ),
@@ -466,7 +468,7 @@ impl App {
                         muted(
                             ui,
                             &crate::localized_format!(
-                                "Waiting for your browser to download DSZ {} to the Downloads folder…", "Aguardando o navegador baixar o DSZ {} na pasta Downloads…", "Esperando a que el navegador descargue DSZ {} en la carpeta Descargas…",
+                                "Waiting for your browser to download DSZ {} to the Downloads folder…", "Aguardando o navegador baixar o DSZ {} na pasta Downloads…", "Esperando a que el navegador descargue DSZ {} en la carpeta Descargas…", "正在等待浏览器把 DSZ {} 下载到“下载”文件夹…",
                                 r.version
                             ),
                         );
@@ -495,7 +497,7 @@ impl App {
                     note(
                         ui,
                         &crate::localized_format!(
-                            "DSZ {} is downloaded and checked ({}). Installing restarts DSZ, so the virtual controllers reconnect.", "O DSZ {} foi baixado e verificado ({}). A instalação reinicia o DSZ e reconecta os controles virtuais.", "DSZ {} se ha descargado y verificado ({}). La instalación reinicia DSZ y reconecta los mandos virtuales.",
+                            "DSZ {} is downloaded and checked ({}). Installing restarts DSZ, so the virtual controllers reconnect.", "O DSZ {} foi baixado e verificado ({}). A instalação reinicia o DSZ e reconecta os controles virtuais.", "DSZ {} se ha descargado y verificado ({}). La instalación reinicia DSZ y reconecta los mandos virtuales.", "DSZ {} 已下载并校验（{}）。安装会重启 DSZ，虚拟手柄会重新连接。",
                             r.version,
                             file.display()
                         ),
@@ -516,10 +518,10 @@ impl App {
                     let text = match &status {
                         Some(Status::Checking) => crate::i18n::tr("Checking…").to_string(),
                         Some(Status::UpToDate) => {
-                            crate::localized_format!("DSZ {} is the latest version.", "DSZ {} é a versão mais recente.", "DSZ {} es la versión más reciente.", env!("CARGO_PKG_VERSION"))
+                            crate::localized_format!("DSZ {} is the latest version.", "DSZ {} é a versão mais recente.", "DSZ {} es la versión más reciente.", "DSZ {} 已是最新版本。", env!("CARGO_PKG_VERSION"))
                         }
                         Some(Status::Failed(e)) => crate::i18n::tr(e).to_string(),
-                        _ => crate::localized_format!("This is DSZ {}.", "Esta é a versão {} do DSZ.", "Esta es la versión {} de DSZ.", env!("CARGO_PKG_VERSION")),
+                        _ => crate::localized_format!("This is DSZ {}.", "Esta é a versão {} do DSZ.", "Esta es la versión {} de DSZ.", "这是 DSZ {}。", env!("CARGO_PKG_VERSION")),
                     };
                     if let Some(Status::Failed(_)) = status {
                         note(ui, &text, WARN);
@@ -573,7 +575,7 @@ impl App {
                     {
                         match crate::backup::export(&engine, &f) {
                             Ok(()) => engine.toast(crate::i18n::tr("Backup saved")),
-                            Err(e) => engine.warn_toast(crate::localized_format!("Couldn't save the backup: {e}", "Não foi possível salvar o backup: {e}", "No se pudo guardar la copia de seguridad: {e}")),
+                            Err(e) => engine.warn_toast(crate::localized_format!("Couldn't save the backup: {e}", "Não foi possível salvar o backup: {e}", "No se pudo guardar la copia de seguridad: {e}", "无法保存备份：{e}")),
                         }
                     }
                 }
@@ -604,7 +606,7 @@ impl App {
                 note(
                     ui,
                     &crate::localized_format!(
-                        "Restore \"{file}\" ({})? This replaces all your current profiles and settings. They are saved first to the {} folder, so you can go back.", "Restaurar \"{file}\" ({})? Seus perfis e configurações serão substituídos. Uma cópia será salva antes na pasta {} para permitir a recuperação.", "¿Restaurar \"{file}\" ({})? Se reemplazarán todos los perfiles y ajustes actuales. Primero se guardarán en la carpeta {} para que puedas recuperarlos.",
+                        "Restore \"{file}\" ({})? This replaces all your current profiles and settings. They are saved first to the {} folder, so you can go back.", "Restaurar \"{file}\" ({})? Seus perfis e configurações serão substituídos. Uma cópia será salva antes na pasta {} para permitir a recuperação.", "¿Restaurar \"{file}\" ({})? Se reemplazarán todos los perfiles y ajustes actuales. Primero se guardarán en la carpeta {} para que puedas recuperarlos.", "要恢复“{file}”（{}）吗？这会替换你当前所有的配置文件和设置。它们会先保存到 {} 文件夹，以便你恢复。",
                         b.summary(),
                         crate::backup::AUTO_DIR
                     ),
@@ -614,7 +616,7 @@ impl App {
                     if danger_button(ui, crate::i18n::tr("Restore")).clicked() {
                         match crate::backup::restore(&engine, &b) {
                             Ok(saved) => engine.toast(crate::localized_format!(
-                                "Settings restored. The previous ones are in {}", "Configurações restauradas. As anteriores estão em {}", "Configuración restaurada. La anterior está en {}",
+                                "Settings restored. The previous ones are in {}", "Configurações restauradas. As anteriores estão em {}", "Configuración restaurada. La anterior está en {}", "设置已恢复。之前的设置保存在 {}",
                                 saved.display()
                             )),
                             Err(e) => engine.warn_toast(e),
@@ -630,7 +632,7 @@ impl App {
             muted(
                 ui,
                 &crate::localized_format!(
-                    "Everything is kept in {} (profiles in its profiles folder).", "Tudo fica em {} (os perfis ficam na subpasta profiles).", "Todo se guarda en {} (los perfiles están en su subcarpeta profiles).",
+                    "Everything is kept in {} (profiles in its profiles folder).", "Tudo fica em {} (os perfis ficam na subpasta profiles).", "Todo se guarda en {} (los perfiles están en su subcarpeta profiles).", "所有内容都保存在 {}（配置文件在其 profiles 文件夹中）。",
                     engine.data_dir.display()
                 ),
             );
@@ -642,7 +644,7 @@ impl App {
                     ui,
                     crate::i18n::tr("Keep settings beside dsz.exe"),
                     &crate::localized_format!(
-                        "Portable: settings, profiles and the log go in a {} folder next to the app. Switching moves them and restarts DSZ", "Portátil: configurações, perfis e registros ficam em uma pasta {} ao lado do aplicativo. A troca move esses arquivos e reinicia o DSZ", "Portátil: los ajustes, perfiles y registros se guardan en una carpeta {} junto a la aplicación. Al cambiar de modo se trasladan y se reinicia DSZ",
+                        "Portable: settings, profiles and the log go in a {} folder next to the app. Switching moves them and restarts DSZ", "Portátil: configurações, perfis e registros ficam em uma pasta {} ao lado do aplicativo. A troca move esses arquivos e reinicia o DSZ", "Portátil: los ajustes, perfiles y registros se guardan en una carpeta {} junto a la aplicación. Al cambiar de modo se trasladan y se reinicia DSZ", "便携模式：设置、配置文件和日志保存在应用旁边的 {} 文件夹中。切换会移动它们并重启 DSZ",
                         crate::portable::FOLDER
                     ),
                     &mut on,

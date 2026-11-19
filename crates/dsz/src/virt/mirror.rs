@@ -14,6 +14,13 @@
 //! The virtual pad is a plain DualSense, and SDL halves rumble for one on
 //! firmware below 2.24. An Edge's own numbering (2.17 and up) reads as old,
 //! and the app converts rumble itself, so games should send it at full scale.
+//!
+//! Steam on Windows offers a firmware update for a DualSense whose update
+//! version is older than Sony's current one, and it reads the report once,
+//! when the pad appears: for the virtual pad that is usually at startup,
+//! before any controller has connected. So the stand-in report, and an
+//! Edge's report on the plain DualSense, carry the current plain DualSense
+//! update version; a plain DualSense's own report is passed on as it is.
 
 /// Feature reports read from the physical controller, report id first.
 #[derive(Clone, Debug, Default)]
@@ -21,6 +28,9 @@ pub struct Mirror {
     pub calibration: Option<Vec<u8>>,
     pub pairing: Option<Vec<u8>>,
     pub firmware: Option<Vec<u8>>,
+    /// Whether `firmware` came from a DualSense Edge, whose update versions
+    /// count separately from a plain DualSense's.
+    pub firmware_from_edge: bool,
 }
 
 pub const CALIBRATION_LEN: usize = 41;
@@ -30,6 +40,12 @@ pub const FIRMWARE_LEN: usize = 64;
 /// Lowest update version the virtual DualSense reports: 2.24, the first
 /// with improved rumble emulation.
 const MIN_UPDATE_VERSION: u16 = 0x0224;
+
+/// Update version and build date of the current plain DualSense firmware
+/// (6.30, what Sony's PlayStation Accessories app shows as A-0630 and calls
+/// up to date). Steam doesn't offer an update for it.
+const CURRENT_UPDATE_VERSION: u16 = 0x0630;
+const CURRENT_BUILD_DATE: &[u8; 11] = b"Jul  4 2025";
 
 /// Address for the virtual pad before a controller connects: locally
 /// administered, "DSZ" in the low bytes.
@@ -68,6 +84,9 @@ impl Mirror {
     /// any were taken.
     pub fn fill_from(&mut self, other: &Mirror) -> bool {
         let mut got = false;
+        if self.firmware.is_none() && other.firmware.is_some() {
+            self.firmware_from_edge = other.firmware_from_edge;
+        }
         for (mine, theirs) in [
             (&mut self.calibration, &other.calibration),
             (&mut self.pairing, &other.pairing),
@@ -114,8 +133,13 @@ impl Mirror {
             0x20 => {
                 let mut v = self.firmware.clone().unwrap_or_else(neutral_firmware);
                 let upd = u16::from_le_bytes([v[44], v[45]]);
-                if upd < MIN_UPDATE_VERSION {
-                    v[44..46].copy_from_slice(&MIN_UPDATE_VERSION.to_le_bytes());
+                let floor = if self.firmware_from_edge && self.firmware.is_some() {
+                    CURRENT_UPDATE_VERSION
+                } else {
+                    MIN_UPDATE_VERSION
+                };
+                if upd < floor {
+                    v[44..46].copy_from_slice(&floor.to_le_bytes());
                 }
                 Some(v)
             }
@@ -134,12 +158,16 @@ pub fn pairing_report(address: &[u8; 6]) -> Vec<u8> {
     v
 }
 
-/// A firmware report for a pad whose controller wouldn't give one: report
-/// id and nothing else, so its update version reads as
-/// [`MIN_UPDATE_VERSION`] once [`Mirror::answer`] raises it.
+/// A firmware report for a pad whose controller wouldn't give one, or
+/// hasn't connected yet: the current plain DualSense firmware's build date
+/// and update version, other fields zero. Before 0.4.16 the report was
+/// declined, and Steam offered no update; an all-zero report raised to 2.24
+/// made it offer one.
 pub fn neutral_firmware() -> Vec<u8> {
     let mut v = vec![0u8; FIRMWARE_LEN];
     v[0] = 0x20;
+    v[1..12].copy_from_slice(CURRENT_BUILD_DATE);
+    v[44..46].copy_from_slice(&CURRENT_UPDATE_VERSION.to_le_bytes());
     v
 }
 
@@ -176,8 +204,7 @@ mod tests {
         assert!(m.lacks(0x20) && !m.lacks(0x05) && !m.lacks(0x81));
         let fw = m.answer(0x20).expect("a stand-in when not read");
         assert_eq!(fw.len(), FIRMWARE_LEN);
-        assert_eq!(fw[0], 0x20);
-        assert_eq!(&fw[44..46], &[0x24, 0x02]);
+        assert_eq!(fw, neutral_firmware());
         assert_eq!(m.answer(0x81), None);
     }
 
@@ -221,9 +248,49 @@ mod tests {
             .answer(0x20)
             .unwrap()
         };
-        // An Edge on 2.17 is raised; newer firmware is left alone.
+        // Old firmware is raised; newer firmware is left alone.
         assert_eq!(&fw(0x0217)[44..46], &[0x24, 0x02]);
         assert_eq!(&fw(0x0312)[44..46], &[0x12, 0x03]);
+    }
+
+    /// A report as a DualSense on 6.30 gives it (build date and time, then
+    /// varied bytes), so every byte is checked.
+    fn plain_dualsense_report(upd: u16) -> Vec<u8> {
+        let mut v: Vec<u8> = (0..FIRMWARE_LEN as u8).map(|i| i.wrapping_mul(37) ^ 0x5A).collect();
+        v[0] = 0x20;
+        v[1..20].copy_from_slice(b"Jul  4 202510:11:12");
+        v[44..46].copy_from_slice(&upd.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn plain_dualsense_firmware_is_passed_on_unchanged() {
+        for upd in [0x0224, 0x0630, 0x0710] {
+            let real = plain_dualsense_report(upd);
+            let m = Mirror::read(|id, len| (id == 0x20).then(|| real[..len].to_vec()));
+            assert!(!m.firmware_from_edge);
+            assert_eq!(m.answer(0x20).unwrap(), real, "update version {upd:04X}");
+            let mut route = Mirror::default();
+            route.fill_from(&m);
+            assert_eq!(route.answer(0x20).unwrap(), real);
+        }
+    }
+
+    #[test]
+    fn edge_firmware_reads_as_current_plain_dualsense() {
+        let report = plain_dualsense_report(0x0217);
+        let mut edge = Mirror::read(|id, len| (id == 0x20).then(|| report[..len].to_vec()));
+        edge.firmware_from_edge = true;
+        let fw = edge.answer(0x20).unwrap();
+        assert_eq!(&fw[44..46], &[0x30, 0x06]);
+        assert_eq!(fw[..44], report[..44], "the rest is the Edge's own");
+        assert_eq!(fw[46..], report[46..]);
+        assert_eq!(edge.firmware.as_ref().unwrap(), &report, "the app still sees 2.17");
+
+        let mut route = Mirror::default();
+        assert!(route.fill_from(&edge));
+        assert!(route.firmware_from_edge);
+        assert_eq!(route.answer(0x20).unwrap(), fw);
     }
 
     #[test]
@@ -234,5 +301,11 @@ mod tests {
         assert_eq!(i16::from_le_bytes([c[7], c[8]]), 8192);
         let p = m.answer(0x09).unwrap();
         assert_eq!(&p[1..4], b"ZSD");
+        let mut want = vec![0u8; FIRMWARE_LEN];
+        want[0] = 0x20;
+        want[1..12].copy_from_slice(b"Jul  4 2025");
+        want[44] = 0x30;
+        want[45] = 0x06;
+        assert_eq!(m.answer(0x20).unwrap(), want);
     }
 }

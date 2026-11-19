@@ -349,7 +349,7 @@ pub fn run(engine: Arc<Engine>) {
                         }
                         None => {
                             log::info!("{exe} is running: switching to profile \"{profile}\"");
-                            engine.toast(crate::localized_format!("{exe} detected — profile \"{profile}\"", "{exe} detectado — perfil \"{profile}\"", "{exe} detectado — perfil \"{profile}\""));
+                            engine.toast(crate::localized_format!("{exe} detected — profile \"{profile}\"", "{exe} detectado — perfil \"{profile}\"", "{exe} detectado — perfil \"{profile}\"", "检测到 {exe} — 配置文件“{profile}”"));
                         }
                     }
                 }
@@ -358,7 +358,7 @@ pub fn run(engine: Arc<Engine>) {
                         "{exe} has no DualSense support: virtual {}",
                         fallback_pad.label()
                     );
-                    engine.toast(crate::localized_format!("{exe} — virtual {}", "{exe} — virtual {}", "{exe} — mando virtual {}", fallback_pad.label()));
+                    engine.toast(crate::localized_format!("{exe} — virtual {}", "{exe} — virtual {}", "{exe} — mando virtual {}", "{exe} — 虚拟 {}", fallback_pad.label()));
                 }
                 None => {
                     let exe = prev_override
@@ -372,7 +372,7 @@ pub fn run(engine: Arc<Engine>) {
                             .map(|d| engine.assigned_profile(d))
                             .unwrap_or_else(|| engine.settings.read().default_profile.clone());
                         log::info!("{exe} closed: back to profile \"{back}\"");
-                        engine.toast(crate::localized_format!("{exe} closed — back to \"{back}\"", "{exe} fechado — voltando para \"{back}\"", "{exe} cerrado — de vuelta a \"{back}\""));
+                        engine.toast(crate::localized_format!("{exe} closed — back to \"{back}\"", "{exe} fechado — voltando para \"{back}\"", "{exe} cerrado — de vuelta a \"{back}\"", "{exe} 已关闭 — 切回“{back}”"));
                     }
                 }
             }

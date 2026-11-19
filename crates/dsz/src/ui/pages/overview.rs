@@ -40,7 +40,7 @@ impl App {
             ui,
             &name,
             &crate::localized_format!(
-                "{} over {}  ·  profile \"{}\"", "{} por {}  ·  perfil \"{}\"", "{} por {}  ·  perfil \"{}\"",
+                "{} over {}  ·  profile \"{}\"", "{} por {}  ·  perfil \"{}\"", "{} por {}  ·  perfil \"{}\"", "{} 通过 {}  ·  配置文件“{}”",
                 d.model.name(),
                 if d.is_bluetooth() { "Bluetooth" } else { "USB" },
                 self.engine.profile_name_for(d)
@@ -182,7 +182,7 @@ impl App {
                     stat(
                         ui,
                         crate::i18n::tr("Haptic stream"),
-                        crate::localized_format!("{} packets/s", "{} pacotes/s", "{} paquetes/s", s.stream_hz.load(Ordering::Relaxed)),
+                        crate::localized_format!("{} packets/s", "{} pacotes/s", "{} paquetes/s", "{} 包/秒", s.stream_hz.load(Ordering::Relaxed)),
                     );
                 }
                 stat(
@@ -199,7 +199,7 @@ impl App {
                     ui,
                     crate::i18n::tr("Recovered errors"),
                     RichText::new(crate::localized_format!(
-                        "{} write · {} CRC", "{} envios · {} CRC", "{} envío · {} CRC",
+                        "{} write · {} CRC", "{} envios · {} CRC", "{} envío · {} CRC", "{} 写入 · {} CRC",
                         s.write_errors.load(Ordering::Relaxed),
                         s.crc_errors.load(Ordering::Relaxed)
                     ))

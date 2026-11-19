@@ -115,7 +115,7 @@ fn driver_row(
                     | install::Status::Installing
             )
         );
-        if !busy && primary_button(ui, &crate::localized_format!("Install {}", "Instalar {}", "Instalar {}", pkg.name())).clicked() {
+        if !busy && primary_button(ui, &crate::localized_format!("Install {}", "Instalar {}", "Instalar {}", "安装 {}", pkg.name())).clicked() {
             let ctx = ui.ctx().clone();
             install::start(pkg, move || ctx.request_repaint());
         }
@@ -235,14 +235,14 @@ impl App {
                         match (st.active, &st.error) {
                             (Some(k), _) => {
                                 ui.horizontal(|ui| {
-                                    pill(ui, &crate::localized_format!("{} connected", "{} conectado(s)", "{} conectado(s)", crate::i18n::tr(k.label())), GOOD);
-                                    muted(ui, &crate::localized_format!("via {}", "via {}", "mediante {}", st.backend));
+                                    pill(ui, &crate::localized_format!("{} connected", "{} conectado(s)", "{} conectado(s)", "{} 已连接", crate::i18n::tr(k.label())), GOOD);
+                                    muted(ui, &crate::localized_format!("via {}", "via {}", "mediante {}", "通过 {}", st.backend));
                                     if let Some(slot) = st.xinput_slot {
-                                        muted(ui, &crate::localized_format!("· XInput player {}", "· jogador XInput {}", "· jugador XInput {}", slot + 1));
+                                        muted(ui, &crate::localized_format!("· XInput player {}", "· jogador XInput {}", "· jugador XInput {}", "· XInput 玩家 {}", slot + 1));
                                     }
                                 });
                                 let n = d.virt.reports.load(Ordering::Relaxed);
-                                muted(ui, &crate::localized_format!("{n} reports sent", "{n} relatórios enviados", "{n} informes enviados"));
+                                muted(ui, &crate::localized_format!("{n} reports sent", "{n} relatórios enviados", "{n} informes enviados", "已发送 {n} 个报告"));
                                 if st.game_audio_open {
                                     ui.horizontal(|ui| {
                                         pill(ui, crate::i18n::tr("Game audio open"), VIOLET);
@@ -261,12 +261,12 @@ impl App {
                             ui.horizontal(|ui| {
                                 pill(ui, crate::i18n::tr("Xbox 360 kept"), FAINT);
                                 let player = slot
-                                    .map(|s| crate::localized_format!("XInput player {}", "Jogador XInput {}", "Jugador XInput {}", s + 1))
+                                    .map(|s| crate::localized_format!("XInput player {}", "Jogador XInput {}", "Jugador XInput {}", "XInput 玩家 {}", s + 1))
                                     .unwrap_or_else(|| crate::i18n::tr("its XInput slot").into());
                                 muted(
                                     ui,
                                     &crate::localized_format!(
-                                        "idle, holding {player}{}; presses Xbox buttons", "ocioso, mantendo {player}{}; envia botões Xbox", "inactivo, conserva {player}{}; pulsa botones Xbox",
+                                        "idle, holding {player}{}; presses Xbox buttons", "ocioso, mantendo {player}{}; envia botões Xbox", "inactivo, conserva {player}{}; pulsa botones Xbox", "空闲，占用 {player}{}；用于按下 Xbox 按钮",
                                         if hidden { crate::i18n::tr(", hidden from games") } else { "" }
                                     ),
                                 );
@@ -287,7 +287,7 @@ impl App {
                             note(
                                 ui,
                                 &crate::localized_format!(
-                                    "{exe} has no DualSense support, so games see the fallback controller from Profiles & games.", "{exe} não tem suporte a DualSense; será usado o controle alternativo de Perfis e jogos.", "{exe} no es compatible con DualSense, así que los juegos reciben el mando alternativo de Perfiles y juegos."
+                                    "{exe} has no DualSense support, so games see the fallback controller from Profiles & games.", "{exe} não tem suporte a DualSense; será usado o controle alternativo de Perfis e jogos.", "{exe} no es compatible con DualSense, así que los juegos reciben el mando alternativo de Perfiles y juegos.", "{exe} 不支持 DualSense，因此游戏看到的是“配置文件与游戏”中设置的备用手柄。"
                                 ),
                                 VIOLET,
                             );
@@ -299,11 +299,11 @@ impl App {
                         }
                         for pad in idle {
                             ui.horizontal(|ui| {
-                                pill(ui, &crate::localized_format!("{} connected", "{} conectado(s)", "{} conectado(s)", pad.kind().label()), GOOD);
+                                pill(ui, &crate::localized_format!("{} connected", "{} conectado(s)", "{} conectado(s)", "{} 已连接", pad.kind().label()), GOOD);
                                 muted(
                                     ui,
                                     &crate::localized_format!(
-                                        "via {} · waiting for your controller", "via {} · aguardando seu controle", "mediante {} · esperando tu mando",
+                                        "via {} · waiting for your controller", "via {} · aguardando seu controle", "mediante {} · esperando tu mando", "通过 {} · 正在等待你的手柄",
                                         pad.target.backend()
                                     ),
                                 );
@@ -358,7 +358,7 @@ impl App {
                                 note(
                                     ui,
                                     &crate::localized_format!(
-                                        "HidHide was changed outside DSZ, so DSZ {what}.", "O HidHide foi alterado fora do DSZ, então o DSZ {what}.", "HidHide se cambió fuera de DSZ, así que DSZ {what}."
+                                        "HidHide was changed outside DSZ, so DSZ {what}.", "O HidHide foi alterado fora do DSZ, então o DSZ {what}.", "HidHide se cambió fuera de DSZ, así que DSZ {what}.", "HidHide 在 DSZ 之外被修改过，因此 DSZ {what}。"
                                     ),
                                     ACCENT,
                                 );
@@ -470,7 +470,7 @@ impl App {
                             muted(ui, &crate::localized_format!(
                                 "Game haptics and speaker sound need a virtual DualSense. Games with DualSense support switch to the \"{name}\" profile, so set them there.",
                                 "A háptica e o som do alto-falante do jogo precisam de um DualSense virtual. Jogos com suporte ao DualSense mudam para o perfil \"{name}\"; ajuste-os lá.",
-                                "La háptica y el sonido del altavoz del juego necesitan un DualSense virtual. Los juegos compatibles con DualSense cambian al perfil \"{name}\"; ajústalos allí."
+                                "La háptica y el sonido del altavoz del juego necesitan un DualSense virtual. Los juegos compatibles con DualSense cambian al perfil \"{name}\"; ajústalos allí.", "游戏触觉和扬声器声音需要虚拟 DualSense。支持 DualSense 的游戏会切换到“{name}”配置文件，请在那里设置。"
                             ));
                         } else {
                             muted(ui, crate::i18n::tr("Game haptics and speaker sound need a virtual DualSense."));
@@ -497,7 +497,7 @@ impl App {
                                 meter(ui, l as f32 / 255.0, VIOLET, 90.0);
                             });
                             if g.reports > 0 {
-                                muted(ui, &crate::localized_format!("{} output report(s) from the game", "{} relatório(s) de saída do jogo", "{} informe(s) de salida del juego", g.reports));
+                                muted(ui, &crate::localized_format!("{} output report(s) from the game", "{} relatório(s) de saída do jogo", "{} informe(s) de salida del juego", "来自游戏的 {} 个输出报告", g.reports));
                             }
                             ui.add_space(6.0);
                             let testing = self.game_test.is_some();

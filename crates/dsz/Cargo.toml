@@ -20,6 +20,7 @@ crossbeam-channel = "0.5"
 log = { version = "0.4", features = ["std"] }
 cpal = "0.15"
 rfd = "0.15"
+memmap2 = "0.9"
 
 [build-dependencies]
 cc = "1"
