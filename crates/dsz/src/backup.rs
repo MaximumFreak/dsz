@@ -52,7 +52,7 @@ impl Backup {
     pub fn parse(text: &str) -> Result<Backup, String> {
         let text = text.trim_start_matches(crate::settings::BOM);
         let v: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| crate::localized_format!("This file isn't valid JSON ({e}).", "Este arquivo não contém JSON válido ({e}).", "Este archivo no contiene JSON válido ({e})."))?;
+            serde_json::from_str(text).map_err(|e| crate::localized_format!("This file isn't valid JSON ({e}).", "Este arquivo não contém JSON válido ({e}).", "Este archivo no contiene JSON válido ({e}).", "此文件不是有效的 JSON（{e}）。"))?;
         if v.get("format").and_then(|f| f.as_str()) != Some(FORMAT) {
             if serde_json::from_value::<Profile>(v.clone()).is_ok() && v.get("name").is_some() {
                 return Err(crate::i18n::tr("This is a single profile, not a full backup. Use \"Import profile…\" on the Profiles page.").into());
@@ -60,10 +60,10 @@ impl Backup {
             return Err(crate::i18n::tr("This file isn't a DSZ backup.").into());
         }
         let b: Backup =
-            serde_json::from_value(v).map_err(|e| crate::localized_format!("This backup is damaged ({e}).", "Este backup está danificado ({e}).", "Esta copia de seguridad está dañada ({e})."))?;
+            serde_json::from_value(v).map_err(|e| crate::localized_format!("This backup is damaged ({e}).", "Este backup está danificado ({e}).", "Esta copia de seguridad está dañada ({e}).", "此备份已损坏（{e}）。"))?;
         if b.version > VERSION {
             return Err(crate::localized_format!(
-                "This backup was made by a newer DSZ ({}). Update DSZ to restore it.", "Este backup foi criado em uma versão mais recente do DSZ ({}). Atualize para restaurá-lo.", "Esta copia se creó con una versión más reciente de DSZ ({}). Actualiza DSZ para restaurarla.",
+                "This backup was made by a newer DSZ ({}). Update DSZ to restore it.", "Este backup foi criado em uma versão mais recente do DSZ ({}). Atualize para restaurá-lo.", "Esta copia se creó con una versión más reciente de DSZ ({}). Actualiza DSZ para restaurarla.", "此备份由更新版本的 DSZ（{}）创建。请更新 DSZ 后再恢复。",
                 if b.app_version.is_empty() { crate::i18n::tr("unknown version") } else { &b.app_version }
             ));
         }
@@ -72,13 +72,13 @@ impl Backup {
         }
         for (i, p) in b.profiles.iter().enumerate() {
             if p.name.trim().is_empty() {
-                return Err(crate::localized_format!("Profile {} in this backup has no name.", "O perfil {} deste backup não tem nome.", "El perfil {} de esta copia no tiene nombre.", i + 1));
+                return Err(crate::localized_format!("Profile {} in this backup has no name.", "O perfil {} deste backup não tem nome.", "El perfil {} de esta copia no tiene nombre.", "此备份中的第 {} 个配置文件没有名称。", i + 1));
             }
             if b.profiles[..i]
                 .iter()
                 .any(|q| q.name.eq_ignore_ascii_case(&p.name))
             {
-                return Err(crate::localized_format!("This backup has two profiles named \"{}\".", "Este backup contém dois perfis chamados \"{}\".", "Esta copia tiene dos perfiles llamados \"{}\".", p.name));
+                return Err(crate::localized_format!("This backup has two profiles named \"{}\".", "Este backup contém dois perfis chamados \"{}\".", "Esta copia tiene dos perfiles llamados \"{}\".", "此备份中有两个名为“{}”的配置文件。", p.name));
             }
         }
         Ok(b)
@@ -92,16 +92,16 @@ impl Backup {
     pub fn summary(&self) -> String {
         let count = self.profiles.len();
         let mut s = if count == 1 {
-            crate::localized_format!("{} profile", "{} perfil", "{} perfil", count)
+            crate::localized_format!("{} profile", "{} perfil", "{} perfil", "{} 个配置文件", count)
         } else {
-            crate::localized_format!("{} profiles", "{} perfis", "{} perfiles", count)
+            crate::localized_format!("{} profiles", "{} perfis", "{} perfiles", "{} 个配置文件", count)
         };
         s.push_str(crate::i18n::tr(" and app settings"));
         if !self.created.is_empty() {
-            s.push_str(&crate::localized_format!(", made {}", ", criado em {}", ", creada el {}", self.created));
+            s.push_str(&crate::localized_format!(", made {}", ", criado em {}", ", creada el {}", "，创建于 {}", self.created));
         }
         if !self.app_version.is_empty() {
-            s.push_str(&crate::localized_format!(" by DSZ {}", " pelo DSZ {}", " con DSZ {}", self.app_version));
+            s.push_str(&crate::localized_format!(" by DSZ {}", " pelo DSZ {}", " con DSZ {}", "，由 DSZ {} 创建", self.app_version));
         }
         s
     }

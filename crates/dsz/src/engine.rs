@@ -235,7 +235,7 @@ impl Engine {
             Some(next) => {
                 let next = self.profiles.get_or_first(&next).name.clone();
                 self.switch_device_profile(device, &next, false);
-                self.toast(crate::localized_format!("Profile: {next}", "Perfil: {next}", "Perfil: {next}"));
+                self.toast(crate::localized_format!("Profile: {next}", "Perfil: {next}", "Perfil: {next}", "配置文件：{next}"));
                 device.identify_light();
             }
             None => {
@@ -363,7 +363,7 @@ impl Engine {
             self.toast(crate::localized_format!(
                 "\"{name}\" remembered for {exe}",
                 "\"{name}\" salvo para {exe}",
-                "\"{name}\" guardado para {exe}"
+                "\"{name}\" guardado para {exe}", "已为 {exe} 记住“{name}”"
             ));
         }
     }
@@ -378,7 +378,7 @@ impl Engine {
         let n = names.len() as i32;
         let next = names[((i + delta).rem_euclid(n)) as usize].clone();
         self.set_device_profile(device, &next);
-        self.toast(crate::localized_format!("Profile: {next}", "Perfil: {next}", "Perfil: {next}"));
+        self.toast(crate::localized_format!("Profile: {next}", "Perfil: {next}", "Perfil: {next}", "配置文件：{next}"));
         device.identify_light();
     }
 
@@ -414,7 +414,7 @@ impl Engine {
         }
         self.devices.write().push(d.clone());
         self.toast(crate::localized_format!(
-            "{} connected ({})", "{} conectado ({})", "{} conectado ({})",
+            "{} connected ({})", "{} conectado ({})", "{} conectado ({})", "{} 已连接（{}）",
             d.model.name(),
             if d.is_bluetooth() { "Bluetooth" } else { "USB" }
         ));
@@ -425,7 +425,7 @@ impl Engine {
         if let Some(i) = v.iter().position(|d| d.id == id) {
             let d = v.remove(i);
             drop(v);
-            self.toast(crate::localized_format!("{} disconnected", "{} desconectado", "{} desconectado", d.model.name()));
+            self.toast(crate::localized_format!("{} disconnected", "{} desconectado", "{} desconectado", "{} 已断开", d.model.name()));
         }
     }
 
@@ -440,7 +440,7 @@ impl Engine {
         entry.1 += 1;
         if entry.1 == 1 {
             self.warn_toast(crate::localized_format!(
-                "Couldn't open a controller ({e}). Another controller app or Steam Input may be holding it.", "Não foi possível abrir o controle ({e}). Outro aplicativo ou o Steam Input pode estar usando-o.", "No se pudo abrir el mando ({e}). Puede que otra aplicación o Steam Input lo esté usando."
+                "Couldn't open a controller ({e}). Another controller app or Steam Input may be holding it.", "Não foi possível abrir o controle ({e}). Outro aplicativo ou o Steam Input pode estar usando-o.", "No se pudo abrir el mando ({e}). Puede que otra aplicación o Steam Input lo esté usando.", "无法打开手柄（{e}）。可能有其他手柄应用或 Steam Input 正在占用它。"
             ));
         }
     }

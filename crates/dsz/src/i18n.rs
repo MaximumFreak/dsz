@@ -16,15 +16,18 @@ pub enum Language {
     PortugueseBrazil,
     #[serde(rename = "es")]
     Spanish,
+    #[serde(rename = "zh-CN")]
+    ChineseSimplified,
 }
 
 impl Language {
-    pub const ALL: [Self; 3] = [Self::English, Self::PortugueseBrazil, Self::Spanish];
+    pub const ALL: [Self; 4] = [Self::English, Self::PortugueseBrazil, Self::Spanish, Self::ChineseSimplified];
     pub fn label(self) -> &'static str {
         match self {
             Self::English => "English",
             Self::PortugueseBrazil => "Português (Brasil)",
             Self::Spanish => "Español",
+            Self::ChineseSimplified => "简体中文",
         }
     }
 }
@@ -32,6 +35,7 @@ impl Language {
 static LANGUAGE: AtomicU8 = AtomicU8::new(0);
 static PORTUGUESE: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 static SPANISH: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+static CHINESE: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
 pub fn set_language(language: Language) {
     LANGUAGE.store(
@@ -39,6 +43,7 @@ pub fn set_language(language: Language) {
             Language::English => 0,
             Language::PortugueseBrazil => 1,
             Language::Spanish => 2,
+            Language::ChineseSimplified => 3,
         },
         Ordering::Relaxed,
     );
@@ -47,6 +52,7 @@ pub fn language() -> Language {
     match LANGUAGE.load(Ordering::Relaxed) {
         1 => Language::PortugueseBrazil,
         2 => Language::Spanish,
+        3 => Language::ChineseSimplified,
         _ => Language::English,
     }
 }
@@ -55,6 +61,7 @@ fn catalog(language: Language) -> Option<&'static BTreeMap<String, String>> {
         Language::English => return None,
         Language::PortugueseBrazil => (&PORTUGUESE, include_str!("../locales/pt-BR.json")),
         Language::Spanish => (&SPANISH, include_str!("../locales/es.json")),
+        Language::ChineseSimplified => (&CHINESE, include_str!("../locales/zh-CN.json")),
     };
     Some(cache.get_or_init(|| serde_json::from_str(json).expect("bundled translation catalog")))
 }
@@ -72,10 +79,11 @@ pub fn tr(english: &str) -> &str {
 /// formatting specifiers and implicit named captures in every language.
 #[macro_export]
 macro_rules! localized_format {
-    ($english:literal, $portuguese:literal, $spanish:literal $($args:tt)*) => {
+    ($english:literal, $portuguese:literal, $spanish:literal, $chinese:literal $($args:tt)*) => {
         match $crate::i18n::language() {
             $crate::i18n::Language::PortugueseBrazil => format!($portuguese $($args)*),
             $crate::i18n::Language::Spanish => format!($spanish $($args)*),
+            $crate::i18n::Language::ChineseSimplified => format!($chinese $($args)*),
             $crate::i18n::Language::English => format!($english $($args)*),
         }
     };
@@ -97,12 +105,14 @@ mod tests {
         );
         assert_eq!(translate(Language::Spanish, "Settings"), "Configuración");
         assert_eq!(translate(Language::Spanish, "user supplied profile"), "user supplied profile");
+        assert_eq!(translate(Language::ChineseSimplified, "Settings"), "设置");
+        assert_eq!(translate(Language::ChineseSimplified, "user supplied profile"), "user supplied profile");
         let legacy: crate::settings::Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy.language, Language::English);
     }
     #[test]
     fn language_round_trips_without_renaming_profiles() {
-        for (id, language) in [("en", Language::English), ("pt-BR", Language::PortugueseBrazil), ("es", Language::Spanish)] {
+        for (id, language) in [("en", Language::English), ("pt-BR", Language::PortugueseBrazil), ("es", Language::Spanish), ("zh-CN", Language::ChineseSimplified)] {
             let value = format!(r#"{{"language":"{id}","default_profile":"My English Profile"}}"#);
             let s: crate::settings::Settings = serde_json::from_str(&value).unwrap();
             assert_eq!(s.language, language);
@@ -135,7 +145,9 @@ mod tests {
         let spanish = catalog(Language::Spanish).unwrap();
         assert!(spanish.len() > 650);
         assert_eq!(portuguese.keys().collect::<Vec<_>>(), spanish.keys().collect::<Vec<_>>());
-        for language in [Language::PortugueseBrazil, Language::Spanish] {
+        let chinese = catalog(Language::ChineseSimplified).unwrap();
+        assert_eq!(portuguese.keys().collect::<Vec<_>>(), chinese.keys().collect::<Vec<_>>());
+        for language in [Language::PortugueseBrazil, Language::Spanish, Language::ChineseSimplified] {
             for (english, translated) in catalog(language).unwrap() {
                 assert!(!translated.trim().is_empty(), "{english}");
                 assert_eq!(placeholders(english), placeholders(translated), "{language:?}: {english}");
@@ -154,7 +166,7 @@ mod tests {
             }
             names.push(name);
         }
-        for language in [Language::PortugueseBrazil, Language::Spanish] {
+        for language in [Language::PortugueseBrazil, Language::Spanish, Language::ChineseSimplified] {
             for name in &names {
                 assert!(catalog(language).unwrap().contains_key(name), "{language:?}: {name}");
             }
@@ -211,7 +223,7 @@ mod tests {
             for call in file.split("crate::i18n::tr(").skip(1) {
                 if call.trim_start().starts_with('"') {
                     let (english, _) = literal(call);
-                    for language in [Language::PortugueseBrazil, Language::Spanish] {
+                    for language in [Language::PortugueseBrazil, Language::Spanish, Language::ChineseSimplified] {
                         assert!(catalog(language).unwrap().contains_key(&english), "{language:?}: {english}");
                     }
                 }
@@ -219,9 +231,11 @@ mod tests {
             for call in file.split("crate::localized_format!(").skip(1) {
                 let (english, rest) = literal(call);
                 let (portuguese, rest) = literal(rest);
-                let (spanish, _) = literal(rest);
+                let (spanish, rest) = literal(rest);
+                let (chinese, _) = literal(rest);
                 assert_eq!(catalog(Language::PortugueseBrazil).unwrap().get(&english), Some(&portuguese), "{english}");
                 assert_eq!(catalog(Language::Spanish).unwrap().get(&english), Some(&spanish), "{english}");
+                assert_eq!(catalog(Language::ChineseSimplified).unwrap().get(&english), Some(&chinese), "{english}");
                 checked += 1;
             }
         }

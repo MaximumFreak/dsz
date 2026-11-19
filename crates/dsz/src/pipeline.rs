@@ -870,7 +870,7 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
         Action::Profile { name } => {
             if engine.profiles.exists(name) {
                 engine.set_device_profile(device, name);
-                engine.toast(crate::localized_format!("Profile: {name}", "Perfil: {name}", "Perfil: {name}"));
+                engine.toast(crate::localized_format!("Profile: {name}", "Perfil: {name}", "Perfil: {name}", "配置文件：{name}"));
                 device.identify_light();
             }
         }

@@ -105,7 +105,7 @@ impl App {
                     ui.label(RichText::new(crate::i18n::tr("Level")).color(MUTED));
                     meter(ui, d.speaker_level.load(Ordering::Relaxed) as f32 / 255.0, VIOLET, 184.0);
                     let (t, c) = if streaming > 0 {
-                        (crate::localized_format!("{streaming} pkt/s", "{streaming} pac/s", "{streaming} paq/s"), GOOD)
+                        (crate::localized_format!("{streaming} pkt/s", "{streaming} pac/s", "{streaming} paq/s", "{streaming} 包/秒"), GOOD)
                     } else {
                         (crate::i18n::tr("off").to_string(), FAINT)
                     };
@@ -115,7 +115,7 @@ impl App {
                 if under > 0 {
                     muted(
                         ui,
-                        &crate::localized_format!("{under} audio gap(s) smoothed over since connect", "{under} falha(s) de áudio suavizada(s) desde a conexão", "{under} corte(s) de audio suavizado(s) desde la conexión"),
+                        &crate::localized_format!("{under} audio gap(s) smoothed over since connect", "{under} falha(s) de áudio suavizada(s) desde a conexão", "{under} corte(s) de audio suavizado(s) desde la conexión", "连接以来已平滑 {under} 处音频间隙"),
                     );
                 }
                 note(ui, crate::i18n::tr("Not tried on a real DualShock 4 yet. While a source is on, the controller gets audio all the time, which uses more battery."), WARN);
@@ -189,7 +189,7 @@ impl App {
                                     let (t, c) = if !h.enabled || !bt {
                                         (crate::i18n::tr("off").to_string(), FAINT)
                                     } else if streaming > 0 {
-                                        (crate::localized_format!("{streaming} pkt/s", "{streaming} pac/s", "{streaming} paq/s"), GOOD)
+                                        (crate::localized_format!("{streaming} pkt/s", "{streaming} pac/s", "{streaming} paq/s", "{streaming} 包/秒"), GOOD)
                                     } else if d.pcm_mode.load(Ordering::Relaxed) {
                                         (crate::i18n::tr("idle").to_string(), MUTED)
                                     } else {
@@ -203,7 +203,7 @@ impl App {
                         if under > 0 {
                             muted(
                                 ui,
-                                &crate::localized_format!("{under} audio gap(s) smoothed over since connect", "{under} falha(s) de áudio suavizada(s) desde a conexão", "{under} corte(s) de audio suavizado(s) desde la conexión"),
+                                &crate::localized_format!("{under} audio gap(s) smoothed over since connect", "{under} falha(s) de áudio suavizada(s) desde a conexão", "{under} corte(s) de audio suavizado(s) desde la conexión", "连接以来已平滑 {under} 处音频间隙"),
                             );
                         }
                     }
@@ -254,7 +254,7 @@ impl App {
                             if capture.running {
                                 ui.label(
                                     RichText::new(crate::localized_format!(
-                                        "{} · {} Hz · {} ch", "{} · {} Hz · {} canais", "{} · {} Hz · {} canales",
+                                        "{} · {} Hz · {} ch", "{} · {} Hz · {} canais", "{} · {} Hz · {} canales", "{} · {} Hz · {} 声道",
                                         capture.device, capture.rate, capture.channels
                                     ))
                                     .size(12.0)
@@ -343,7 +343,7 @@ impl App {
                                 muted(ui, &crate::localized_format!(
                                     "A game's own speaker sound plays with the \"{name}\" profile's volume and amplifier.",
                                     "O som do alto-falante do próprio jogo usa o volume e o amplificador do perfil \"{name}\".",
-                                    "El sonido del altavoz del propio juego usa el volumen y el amplificador del perfil \"{name}\"."
+                                    "El sonido del altavoz del propio juego usa el volumen y el amplificador del perfil \"{name}\".", "游戏自身的扬声器声音使用“{name}”配置文件的音量和功放设置。"
                                 ));
                             }
                         }

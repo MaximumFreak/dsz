@@ -168,7 +168,7 @@ impl App {
                     .pick_file()
                 {
                     match engine.profiles.import(&f) {
-                        Ok(n) => engine.toast(crate::localized_format!("Imported \"{n}\"", "\"{n}\" importado", "\"{n}\" importado")),
+                        Ok(n) => engine.toast(crate::localized_format!("Imported \"{n}\"", "\"{n}\" importado", "\"{n}\" importado", "已导入“{n}”")),
                         Err(e) => engine.warn_toast(crate::i18n::tr(&e)),
                     }
                 }
@@ -282,7 +282,7 @@ impl App {
                                                 pill(
                                                     ui,
                                                     &crate::localized_format!(
-                                                        "{n} game{}", "{n} jogo{}", "{n} juego{}",
+                                                        "{n} game{}", "{n} jogo{}", "{n} juego{}", "{n} 个游戏{}",
                                                         if n == 1 { "" } else { "s" }
                                                     ),
                                                     VIOLET,
@@ -425,7 +425,7 @@ impl App {
                 let mut changed = false;
                 changed |= toggle_row(ui, crate::i18n::tr("Switch automatically"), "", &mut s.auto_profiles);
                 if let Some((p, exe)) = &*engine.game_override.read() {
-                    note(ui, &crate::localized_format!("{exe} is running → \"{p}\"", "{exe} em execução → \"{p}\"", "{exe} en ejecución → \"{p}\""), VIOLET);
+                    note(ui, &crate::localized_format!("{exe} is running → \"{p}\"", "{exe} em execução → \"{p}\"", "{exe} en ejecución → \"{p}\"", "{exe} 正在运行 → “{p}”"), VIOLET);
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {

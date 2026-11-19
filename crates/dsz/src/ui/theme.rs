@@ -37,6 +37,35 @@ fn load_font(paths: &[&str]) -> Option<Vec<u8>> {
     paths.iter().find_map(|p| std::fs::read(p).ok())
 }
 
+/// Microsoft YaHei UI as the last fallback, loaded the first time Chinese is
+/// picked or the language list is opened, so the other languages don't
+/// carry the ~35 MB of font files. Fonts change on the next frame.
+pub fn ensure_cjk(ctx: &egui::Context) {
+    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOADED: AtomicBool = AtomicBool::new(false);
+    if LOADED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let Some(regular) = load_font(&[r"C:\Windows\Fonts\msyh.ttc"]) else {
+        log::warn!("msyh.ttc not found; Chinese text may not render");
+        return;
+    };
+    // Face 1 of the collection is "Microsoft YaHei UI".
+    let face = |bytes: Vec<u8>| FontData { index: 1, ..FontData::from_owned(bytes) };
+    let fallback = |family| InsertFontFamily { family, priority: FontPriority::Lowest };
+    let bold = load_font(&[r"C:\Windows\Fonts\msyhbd.ttc"]);
+    let mut families = vec![fallback(FontFamily::Proportional), fallback(FontFamily::Monospace)];
+    if bold.is_none() {
+        families.push(fallback(semibold()));
+    }
+    ctx.add_font(FontInsert::new("yahei", face(regular), families));
+    if let Some(bytes) = bold {
+        ctx.add_font(FontInsert::new("yahei_b", face(bytes), vec![fallback(semibold())]));
+    }
+    ctx.request_repaint();
+}
+
 pub fn install(ctx: &egui::Context, scale: f32) {
     let mut fonts = FontDefinitions::default();
     let fallback_prop = fonts
