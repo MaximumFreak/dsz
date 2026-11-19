@@ -8,7 +8,8 @@
 //!
 //! DSZ never downloads a program itself: an app that fetches an exe and
 //! starts it is what antivirus heuristics call a downloader (Kaspersky
-//! flagged 0.3.8, which did). "Download" opens the release's `dsz.exe` in
+//! flagged 0.3.8, which did). "Download" opens the release's `dsz.exe` (on an
+//! ARM64 PC its native `dsz-arm64.exe`, when the release has one) in
 //! the browser, which scans and saves it like any download. DSZ then finds
 //! it in the Downloads folder (or is shown where it is), checks it against
 //! the SHA-256 GitHub publishes for the file, and on "Install and restart"
@@ -30,6 +31,10 @@ const LATEST: &str = "https://api.github.com/repos/MaximumFreak/dsz/releases/lat
 pub const RELEASES: &str = "https://github.com/MaximumFreak/dsz/releases";
 /// The release asset that is the app.
 const ASSET: &str = "dsz.exe";
+/// The native build for Windows on ARM. An ARM64 PC updates to it, also
+/// from the x64 exe under emulation; a release without it gives `ASSET`,
+/// which runs there under emulation.
+const ASSET_ARM64: &str = "dsz-arm64.exe";
 /// First check a little after startup, out of the way of controllers
 /// connecting; then once a day.
 const FIRST_CHECK: Duration = Duration::from_secs(20);
@@ -173,17 +178,16 @@ fn latest() -> Result<Release, String> {
         .map_err(|_| "Couldn't reach GitHub to check for updates.".to_string())?;
     let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&file);
-    parse(&text).ok_or_else(|| "GitHub's answer had no release in it.".to_string())
+    parse(&text, crate::install::native_arm64()).ok_or_else(|| "GitHub's answer had no release in it.".to_string())
 }
 
-fn parse(json: &str) -> Option<Release> {
+fn parse(json: &str, arm64: bool) -> Option<Release> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let version = v["tag_name"].as_str()?.trim_start_matches('v').to_string();
     let page = v["html_url"].as_str().unwrap_or(RELEASES).to_string();
-    let asset = v["assets"]
-        .as_array()?
-        .iter()
-        .find(|a| a["name"].as_str() == Some(ASSET))?;
+    let assets = v["assets"].as_array()?;
+    let named = |n: &str| assets.iter().find(|a| a["name"].as_str() == Some(n));
+    let asset = arm64.then(|| named(ASSET_ARM64)).flatten().or_else(|| named(ASSET))?;
     let url = asset["browser_download_url"].as_str()?.to_string();
     let size = asset["size"].as_u64();
     let sha256 = asset["digest"]
@@ -422,12 +426,29 @@ mod tests {
             "assets":[{"name":"other.zip","browser_download_url":"https://example.invalid/x"},
             {"name":"dsz.exe","browser_download_url":"https://github.com/MaximumFreak/dsz/releases/download/v0.3.8/dsz.exe",
              "size":9294336,"digest":"sha256:ef4fea4dcb25a386e63ebb4e50f55c89a36a79b4ee02d1652d425325fa4c26c2"}]}"#;
-        let r = parse(json).unwrap();
+        let r = parse(json, false).unwrap();
         assert_eq!(r.version, "0.3.8");
         assert!(r.url.ends_with("/v0.3.8/dsz.exe"));
         assert_eq!(r.size, Some(9294336));
         assert_eq!(r.sha256.unwrap()[..2], [0xef, 0x4f]);
-        assert!(parse(r#"{"tag_name":"v1","assets":[]}"#).is_none(), "no exe, no update");
+        assert!(parse(r#"{"tag_name":"v1","assets":[]}"#, false).is_none(), "no exe, no update");
+        // A release from before the ARM64 build: an ARM64 PC gets the x64 exe.
+        assert_eq!(parse(json, true).unwrap(), r);
+    }
+
+    #[test]
+    fn an_arm64_pc_gets_the_arm64_build() {
+        let json = r#"{"tag_name":"v0.4.18","assets":[
+            {"name":"dsz.exe","browser_download_url":"https://example.invalid/dsz.exe","size":1,
+             "digest":"sha256:ef4fea4dcb25a386e63ebb4e50f55c89a36a79b4ee02d1652d425325fa4c26c2"},
+            {"name":"dsz-arm64.exe","browser_download_url":"https://example.invalid/dsz-arm64.exe","size":2,
+             "digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]}"#;
+        let arm = parse(json, true).unwrap();
+        assert!(arm.url.ends_with("/dsz-arm64.exe"));
+        assert_eq!((arm.size, arm.sha256.unwrap()[0]), (Some(2), 0xba));
+        let x64 = parse(json, false).unwrap();
+        assert!(x64.url.ends_with("/dsz.exe"));
+        assert_eq!((x64.size, x64.sha256.unwrap()[0]), (Some(1), 0xef));
     }
 
     /// Asks the real GitHub: `cargo test -- --ignored asks_github`.

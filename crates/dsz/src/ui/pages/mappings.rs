@@ -452,6 +452,9 @@ impl App {
                         if m.mode == HoldStyle::Turbo && !held {
                             fit(ui, 260.0);
                             ui.add(egui::Slider::new(&mut m.turbo_ms, 30..=1000).suffix(" ms").text(crate::i18n::tr("interval")));
+                            fit(ui, 260.0);
+                            ui.add(egui::Slider::new(&mut m.turbo_variation_ms, 0..=200).suffix(" ms").text(crate::i18n::tr("variation ±")))
+                                .on_hover_text(crate::i18n::tr("Each press comes a little earlier or later, by up to this much. 0 keeps the exact interval."));
                         }
                         match m.gesture {
                             Gesture::LongPress => {

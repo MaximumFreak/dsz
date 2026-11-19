@@ -381,7 +381,10 @@ impl Composer {
             MuteLed::Pulse => 2,
             MuteLed::Toggle => toggles.mute_engaged as u8,
         };
-        if let (true, Some(m)) = (vo.game_leds, game.mute_led) {
+        // Toggle with button gives the light to the Mute button, as on a
+        // PS5, where games can't set it. Otherwise a game that sends its
+        // own mute LED (issue 50) pins it, and pressing Mute does nothing.
+        if let (true, Some(m), false) = (vo.game_leds, game.mute_led, l.mute_led == MuteLed::Toggle) {
             out.mute_led = m;
         }
         if let Some(m) = overrides.mic_led {
@@ -667,6 +670,48 @@ mod tests {
             now,
         );
         assert_eq!(game.lightbar, [1, 2, 3]);
+    }
+
+    #[test]
+    fn mute_button_keeps_its_light_from_the_game_when_toggling() {
+        let mut c = Composer::new();
+        let input = InputState::default();
+        let none = crate::device::Overrides::default();
+        let now = Instant::now();
+        let mut fb = crate::device::Feedback::default();
+        fb.game.mute_led = Some(1);
+        let mut p = Profile::default();
+        p.virtual_out.game_leds = true;
+        let mut toggles = crate::device::Toggles::default();
+        let mut led = |p: &Profile, t: &crate::device::Toggles, o: &crate::device::Overrides, fb: &Feedback| {
+            c.compose(p, &input, o, fb, t, false, 0.0, now).mute_led
+        };
+        // Toggle: the Mute button switches it, whatever the game sends.
+        p.lighting.mute_led = MuteLed::Toggle;
+        assert_eq!(led(&p, &toggles, &none, &fb), 0);
+        toggles.mute_engaged = true;
+        assert_eq!(led(&p, &toggles, &none, &fb), 1);
+        toggles.mute_engaged = false;
+        // The other settings still let the game's LED through, as before.
+        for (m, own) in [(MuteLed::Off, 0), (MuteLed::On, 1), (MuteLed::Pulse, 2)] {
+            p.lighting.mute_led = m;
+            for game in [0, 1, 2] {
+                fb.game.mute_led = Some(game);
+                assert_eq!(led(&p, &toggles, &none, &fb), game, "{m:?}");
+            }
+            fb.game.mute_led = None;
+            assert_eq!(led(&p, &toggles, &none, &fb), own, "{m:?} without a game");
+            fb.game.mute_led = Some(1);
+        }
+        // Without the game's lights, the profile, as before.
+        p.virtual_out.game_leds = false;
+        p.lighting.mute_led = MuteLed::Off;
+        assert_eq!(led(&p, &toggles, &none, &fb), 0);
+        // A mod's mic LED still beats everything.
+        p.virtual_out.game_leds = true;
+        p.lighting.mute_led = MuteLed::Toggle;
+        let modded = crate::device::Overrides { mic_led: Some(2), ..Default::default() };
+        assert_eq!(led(&p, &toggles, &modded, &fb), 2);
     }
 
     #[test]

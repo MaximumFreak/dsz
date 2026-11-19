@@ -828,6 +828,10 @@ pub struct Mapping {
     pub mode: HoldStyle,
     pub action: Action,
     pub turbo_ms: u32,
+    /// Turbo only: each interval comes out up to this much shorter or
+    /// longer, at random, so the presses don't land like a metronome.
+    /// 0 (the default) keeps every interval exactly `turbo_ms`.
+    pub turbo_variation_ms: u32,
     pub long_ms: u32,
     pub double_ms: u32,
 }
@@ -854,6 +858,7 @@ impl Default for Mapping {
             mode: HoldStyle::Hold,
             action: Action::None,
             turbo_ms: 80,
+            turbo_variation_ms: 0,
             long_ms: 500,
             double_ms: 400,
         }
@@ -1399,6 +1404,16 @@ mod tests {
         let json = serde_json::to_string(&on).unwrap();
         assert!(json.contains(r#""always_classic":true"#));
         assert_eq!(serde_json::from_str::<Profile>(&json).unwrap(), on);
+    }
+
+    #[test]
+    fn older_mappings_load_without_turbo_variation() {
+        let m: Mapping = serde_json::from_str(r#"{"button":"Cross","mode":"Turbo","turbo_ms":120}"#).unwrap();
+        assert_eq!((m.mode, m.turbo_ms, m.turbo_variation_ms), (HoldStyle::Turbo, 120, 0));
+        assert_eq!(Mapping::default().turbo_variation_ms, 0);
+        for p in Profile::starter_set() {
+            assert!(p.mappings.iter().all(|m| m.turbo_variation_ms == 0), "{}", p.name);
+        }
     }
 
     #[test]

@@ -637,7 +637,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             } else {
                 synth.rumble(heavy, light, h.rumble_intensity);
                 if let Some((seq, raised)) = held {
-                    fb.game.rumble_sent(seq, raised);
+                    fb.game.rumble_sent(seq, raised, now);
                 }
             }
             pulses.extend(fb.pulses.drain(..));

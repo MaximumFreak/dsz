@@ -96,6 +96,9 @@ pub struct HeldRumble {
     /// before a newer level came in doesn't let that one go.
     pub seq: u64,
     pub at: Instant,
+    /// When the oldest level merged into this one was set, for how long
+    /// pulses wait for a report (the session log, issue 43).
+    pub since: Instant,
 }
 
 /// A held rumble level no report took within this long is dropped rather
@@ -145,6 +148,16 @@ pub struct GameState {
     pub rumble_runs_short: u64,
     /// Pulses that reached the controller only because they were held.
     pub rumble_saved: u64,
+    /// Whether every pulse reached the controller, and on time (issue 43):
+    /// pulses merged into a level still waiting for a report (the
+    /// controller gets one pulse for them), held levels dropped or left
+    /// with no report carrying them, and how long carried ones waited.
+    pub rumble_merged: u64,
+    pub rumble_uncarried: u64,
+    pub rumble_carried: u64,
+    pub rumble_wait_total: Duration,
+    pub rumble_wait_max: Duration,
+    pub rumble_waits_long: u64,
 }
 
 impl GameState {
@@ -154,6 +167,8 @@ impl GameState {
     /// level no report has carried yet.
     pub fn set_rumble(&mut self, heavy: u8, light: u8, now: Instant) {
         let on = heavy != 0 || light != 0;
+        // A new pulse, not the game repeating the level it holds.
+        let starts = on && self.rumble_on_since.is_none();
         match (self.rumble_on_since, on) {
             (None, true) => self.rumble_on_since = Some(now),
             (Some(since), false) => {
@@ -171,12 +186,19 @@ impl GameState {
         self.rumble = on.then_some((heavy, light));
         if on {
             self.rumble_seq += 1;
-            let (h, l) = self.held_now(now).map_or((0, 0), |p| (p.heavy, p.light));
+            let waiting = self.held_now(now);
+            if waiting.is_some() {
+                self.rumble_merged += starts as u64;
+            } else if self.held.is_some() {
+                self.rumble_uncarried += 1;
+            }
+            let (h, l, since) = waiting.map_or((0, 0, now), |p| (p.heavy, p.light, p.since));
             self.held = Some(HeldRumble {
                 heavy: h.max(heavy),
                 light: l.max(light),
                 seq: self.rumble_seq,
                 at: now,
+                since,
             });
         }
     }
@@ -203,11 +225,18 @@ impl GameState {
     /// A report to the controller (or the haptic stream) carried the held
     /// level `seq` from [`GameState::rumble_to_send`]: let it go, unless a
     /// newer level came in since. `raised`: the hold made the difference.
-    pub fn rumble_sent(&mut self, seq: u64, raised: bool) {
-        if self.held.is_some_and(|p| p.seq == seq) {
+    pub fn rumble_sent(&mut self, seq: u64, raised: bool, now: Instant) {
+        if let Some(p) = self.held.filter(|p| p.seq == seq) {
             self.held = None;
             if raised {
                 self.rumble_saved += 1;
+            }
+            let wait = now.saturating_duration_since(p.since);
+            self.rumble_carried += 1;
+            self.rumble_wait_total += wait;
+            self.rumble_wait_max = self.rumble_wait_max.max(wait);
+            if wait > Duration::from_millis(8) {
+                self.rumble_waits_long += 1;
             }
         }
     }
@@ -252,6 +281,17 @@ impl Feedback {
                     g.rumble_run_min.unwrap_or_default().as_secs_f64() * 1000.0,
                     g.rumble_runs_short,
                     g.rumble_saved
+                );
+            }
+            if g.rumble_carried > 0 || g.rumble_merged > 0 || g.rumble_uncarried > 0 || g.held.is_some() {
+                log::info!(
+                    "game rumble delivery: {} held level(s) carried, after {:.1} ms on average, longest {:.1} ms, {} over 8 ms; {} pulse(s) merged into one still waiting; {} never carried",
+                    g.rumble_carried,
+                    g.rumble_wait_total.as_secs_f64() * 1000.0 / g.rumble_carried.max(1) as f64,
+                    g.rumble_wait_max.as_secs_f64() * 1000.0,
+                    g.rumble_waits_long,
+                    g.rumble_merged,
+                    g.rumble_uncarried + g.held.is_some() as u64
                 );
             }
         }
@@ -1805,7 +1845,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                     == (state.rumble_valid, state.rumble_left, state.rumble_right)
             });
             if carried {
-                device.feedback.lock().game.rumble_sent(seq, raised && wrote);
+                device.feedback.lock().game.rumble_sent(seq, raised && wrote, now);
             }
         }
 
@@ -2451,7 +2491,7 @@ mod rumble_pulse_tests {
     fn send(c: &mut Composer, d: &Device, p: &Profile, pcm: bool, now: Instant) -> (bool, u8, u8) {
         let o = compose(c, d, p, pcm, now);
         if let Some((seq, raised)) = c.take_held() {
-            d.feedback.lock().game.rumble_sent(seq, raised);
+            d.feedback.lock().game.rumble_sent(seq, raised, now);
         }
         (o.rumble_valid, o.rumble_left, o.rumble_right)
     }
@@ -2520,10 +2560,10 @@ mod rumble_pulse_tests {
         g.set_rumble(90, 0, t + Duration::from_millis(1));
         g.set_rumble(0, 0, t + Duration::from_millis(2));
         let (seq, _) = first.unwrap();
-        g.rumble_sent(seq, true);
+        g.rumble_sent(seq, true, t);
         assert_eq!(g.rumble_to_send(t + Duration::from_millis(3)).0, (111, 0), "merged and still held");
         let (_, second) = g.rumble_to_send(t + Duration::from_millis(3));
-        g.rumble_sent(second.unwrap().0, true);
+        g.rumble_sent(second.unwrap().0, true, t + Duration::from_millis(3));
         assert_eq!(g.rumble_to_send(t + Duration::from_millis(4)), ((0, 0), None));
     }
 
@@ -2535,6 +2575,31 @@ mod rumble_pulse_tests {
         g.set_rumble(0, 0, t);
         assert_eq!(g.rumble_to_send(t + PULSE_STALE - Duration::from_millis(1)).0, (111, 0));
         assert_eq!(g.rumble_to_send(t + PULSE_STALE), ((0, 0), None));
+    }
+
+    #[test]
+    fn the_session_log_counts_merged_late_and_uncarried_pulses() {
+        let mut g = GameState::default();
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        // Steady rumble the game repeats is not a merge.
+        for ms in 0..3 {
+            g.set_rumble(150, 0, at(ms));
+        }
+        assert_eq!(g.rumble_merged, 0);
+        // Two pulses before a report: one merge, carried 12 ms after the first.
+        g.set_rumble(0, 0, at(3));
+        g.set_rumble(90, 0, at(4));
+        g.set_rumble(0, 0, at(5));
+        assert_eq!(g.rumble_merged, 1);
+        let (_, held) = g.rumble_to_send(at(12));
+        g.rumble_sent(held.unwrap().0, true, at(12));
+        assert_eq!((g.rumble_carried, g.rumble_wait_max, g.rumble_waits_long), (1, Duration::from_millis(12), 1));
+        // A pulse no report took, then the next one: one never carried.
+        g.set_rumble(80, 0, at(20));
+        g.set_rumble(0, 0, at(21));
+        g.set_rumble(80, 0, at(20) + PULSE_STALE);
+        assert_eq!((g.rumble_uncarried, g.rumble_merged), (1, 1));
     }
 
     #[test]

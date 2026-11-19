@@ -6,7 +6,8 @@
 //!   has changed the attach request (`virt::usbip::PLUGIN_LAYOUTS`), so a
 //!   newer one may not attach until the app knows it. Not 0.9.7.8, which
 //!   can crash Windows (see `virt::usbip::blocked`). 0.9.7.7 and 0.9.8.0
-//!   attach when they are already installed.
+//!   attach when they are already installed. On an ARM64 PC its arm64
+//!   installer, also when DSZ itself runs as x64 under emulation.
 //! - HidHide 1.5.230: its release publishes no hash, so the installer must
 //!   carry a valid Authenticode signature from its author.
 
@@ -53,17 +54,49 @@ const fn hex32(s: &str) -> [u8; 32] {
     out
 }
 
+/// The PC's own CPU is ARM64. `IsWow64Process2` reports the native machine
+/// even to an x64 exe under emulation, where `GetNativeSystemInfo` says x64.
+pub(crate) fn native_arm64() -> bool {
+    use windows_sys::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_ARM64;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+    static ARM64: OnceLock<bool> = OnceLock::new();
+    *ARM64.get_or_init(|| {
+        let (mut process, mut native) = (0u16, 0u16);
+        if unsafe { IsWow64Process2(GetCurrentProcess(), &mut process, &mut native) } != 0 {
+            native == IMAGE_FILE_MACHINE_ARM64
+        } else {
+            cfg!(target_arch = "aarch64")
+        }
+    })
+}
+
+/// usbip-win2's driver must match the CPU: the x64 one doesn't load on ARM64.
+fn usbip_release(arm64: bool) -> Release {
+    if arm64 {
+        Release {
+            name: "usbip-win2 0.9.8.1",
+            url: "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-arm64.exe",
+            file: "USBip-0.9.8.1-arm64.exe",
+            check: Check::Sha256(hex32(
+                "cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800",
+            )),
+        }
+    } else {
+        Release {
+            name: "usbip-win2 0.9.8.1",
+            url: "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-x64.exe",
+            file: "USBip-0.9.8.1-x64.exe",
+            check: Check::Sha256(hex32(
+                "38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a",
+            )),
+        }
+    }
+}
+
 impl Package {
     fn release(self) -> Release {
         match self {
-            Package::Usbip => Release {
-                name: "usbip-win2 0.9.8.1",
-                url: "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-x64.exe",
-                file: "USBip-0.9.8.1-x64.exe",
-                check: Check::Sha256(hex32(
-                    "38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a",
-                )),
-            },
+            Package::Usbip => usbip_release(native_arm64()),
             Package::HidHide => Release {
                 name: "HidHide 1.5.230",
                 url: "https://github.com/nefarius/HidHide/releases/download/v1.5.230.0/HidHide_1.5.230_x64.exe",
@@ -299,5 +332,28 @@ mod tests {
             sha256(b"abc").unwrap(),
             hex32("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
+    }
+
+    #[test]
+    fn usbip_installer_matches_the_cpu() {
+        fn sha(r: &Release) -> [u8; 32] {
+            match r.check {
+                Check::Sha256(h) => h,
+                Check::Signer(_) => panic!("usbip-win2 is checked by hash"),
+            }
+        }
+        let x64 = usbip_release(false);
+        assert_eq!(x64.file, "USBip-0.9.8.1-x64.exe");
+        assert!(x64.url.ends_with("/v.0.9.8.1/USBip-0.9.8.1-x64.exe"));
+        assert_eq!(sha(&x64), hex32("38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a"));
+        let arm64 = usbip_release(true);
+        assert_eq!(arm64.file, "USBip-0.9.8.1-arm64.exe");
+        assert!(arm64.url.ends_with("/v.0.9.8.1/USBip-0.9.8.1-arm64.exe"));
+        assert_eq!(sha(&arm64), hex32("cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800"));
+        assert_eq!(x64.name, arm64.name);
+        // This PC's answer, whichever it is, picks one of the two.
+        assert!(Package::Usbip.release().file.starts_with("USBip-0.9.8.1-"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(native_arm64());
     }
 }
