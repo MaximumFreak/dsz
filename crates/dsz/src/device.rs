@@ -912,7 +912,8 @@ fn read_identity(dev: &HidDevice, conn: Connection, model: Model) -> (String, St
     }
     // The calibration read inside also switches a Bluetooth controller from
     // the short 0x01 report to the full 0x31 report.
-    let mirror = Mirror::read(|id, len| read_feature(dev, id, len));
+    let mut mirror = Mirror::read(|id, len| read_feature(dev, id, len));
+    mirror.firmware_from_edge = model == Model::DualSenseEdge;
     let firmware = firmware_text(&mirror);
     let mut mac = normalize_mac(&dev.info.serial);
     if mac.is_empty() || conn == Connection::Usb {
