@@ -222,6 +222,9 @@ impl SpeakerAmp {
     }
 }
 
+/// Buffer length for sound streamed to a Bluetooth DualSense: PC audio
+/// (`prime_windows`) and a game's audio through the virtual DualSense
+/// (`haptics::game`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Latency {
     Short,

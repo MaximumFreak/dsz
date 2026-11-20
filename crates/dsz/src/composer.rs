@@ -430,7 +430,8 @@ impl Composer {
         out.rumble_reduction = p.rumble.power_reduction.min(7);
         out.enhanced_rumble = p.rumble.enhanced;
         // A game's rumble level goes out in at least one report even when
-        // the game cut it before this one (`GameState::rumble_to_send`).
+        // the game cut it before this one, and a pulse it cut short stays
+        // on for PULSE_MIN (`GameState::rumble_to_send`).
         let (mut lo, mut hi) = feedback.rumble_now(now);
         let mut held = None;
         if vo.game_rumble {

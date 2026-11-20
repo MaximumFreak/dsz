@@ -106,6 +106,29 @@ pub struct HeldRumble {
 /// wired controller playing the game's haptic audio).
 pub const PULSE_STALE: Duration = Duration::from_millis(100);
 
+/// Shortest a game's rumble pulse plays on the controller (issue 43). GTA V
+/// switches its rumble on and off again 0.2 ms later, about 11 times a
+/// second, so the motors ran only until the next report: about 4 ms on
+/// Bluetooth (felt as skipping) or 8 ms while streaming ("so close"). A
+/// stop that comes sooner than this after the first report carrying the
+/// pulse waits until then; one frame at 60 fps, which is likely how long
+/// the game means a pulse to last.
+pub const PULSE_MIN: Duration = Duration::from_millis(16);
+
+/// The game's last rumble pulse, kept on until [`PULSE_MIN`] after a report
+/// first carried it.
+#[derive(Debug, Clone, Copy)]
+pub struct PulseStretch {
+    /// The level the game last set in it.
+    pub heavy: u8,
+    pub light: u8,
+    pub began: Instant,
+    /// Set when a report first carries the pulse.
+    pub until: Option<Instant>,
+    /// The game stopped it early, so it is being kept on.
+    pub cut: bool,
+}
+
 /// What a game sent to the virtual controller.
 #[derive(Debug, Default, Clone)]
 pub struct GameState {
@@ -118,6 +141,8 @@ pub struct GameState {
     /// go out; without this the zero overwrote the level before any report
     /// carried it, and those pulses never reached the controller.
     pub held: Option<HeldRumble>,
+    /// The pulse a stop cut short of [`PULSE_MIN`], or the one playing.
+    pub stretch: Option<PulseStretch>,
     pub rumble_seq: u64,
     pub right_trigger: Option<[u8; 11]>,
     pub left_trigger: Option<[u8; 11]>,
@@ -158,6 +183,29 @@ pub struct GameState {
     pub rumble_wait_total: Duration,
     pub rumble_wait_max: Duration,
     pub rumble_waits_long: u64,
+    /// Pulses a stop came too soon for, kept on to [`PULSE_MIN`] (issue 43).
+    pub rumble_stretched: u64,
+    /// Time between one pulse's start and the next's, for how often the
+    /// game pulses: the shortest, the total, and gaps under 50 ms.
+    pub rumble_last_start: Option<Instant>,
+    pub rumble_gaps: u64,
+    pub rumble_gap_min: Option<Duration>,
+    pub rumble_gap_total: Duration,
+    pub rumble_gaps_short: u64,
+    /// The highest level each motor had in a pulse, and how many pulses
+    /// used each motor.
+    pub rumble_peak: (u8, u8),
+    pub rumble_on_heavy: u64,
+    pub rumble_on_light: u64,
+    /// Whether the motors are on in the last report sent to the
+    /// controller, since when, and how long they stayed on each time:
+    /// what the controller actually played, as opposed to what the game
+    /// asked for (issue 43).
+    pub out_on_since: Option<Instant>,
+    pub out_runs: u64,
+    pub out_run_min: Option<Duration>,
+    pub out_run_max: Duration,
+    pub out_run_total: Duration,
 }
 
 impl GameState {
@@ -184,7 +232,36 @@ impl GameState {
             _ => {}
         }
         self.rumble = on.then_some((heavy, light));
+        if starts {
+            if let Some(last) = self.rumble_last_start {
+                let gap = now.saturating_duration_since(last);
+                self.rumble_gaps += 1;
+                self.rumble_gap_total += gap;
+                self.rumble_gap_min = Some(self.rumble_gap_min.map_or(gap, |m| m.min(gap)));
+                if gap < Duration::from_millis(50) {
+                    self.rumble_gaps_short += 1;
+                }
+            }
+            self.rumble_last_start = Some(now);
+            self.rumble_on_heavy += (heavy > 0) as u64;
+            self.rumble_on_light += (light > 0) as u64;
+            // Its minimum length counts from the first report that carries
+            // it (`rumble_sent`), so a pulse waiting for a report still gets
+            // all of it on the controller.
+            self.stretch = Some(PulseStretch { heavy, light, began: now, until: None, cut: false });
+        } else if on {
+            if let Some(s) = self.stretch.as_mut() {
+                s.heavy = heavy;
+                s.light = light;
+            }
+        } else if self.stretch_owed(now).is_some() {
+            if let Some(s) = self.stretch.as_mut().filter(|s| !s.cut) {
+                s.cut = true;
+                self.rumble_stretched += 1;
+            }
+        }
         if on {
+            self.rumble_peak = (self.rumble_peak.0.max(heavy), self.rumble_peak.1.max(light));
             self.rumble_seq += 1;
             let waiting = self.held_now(now);
             if waiting.is_some() {
@@ -208,11 +285,58 @@ impl GameState {
             .filter(|p| now.saturating_duration_since(p.at) < PULSE_STALE)
     }
 
-    /// The game's rumble for the next report: what it last set, raised to
-    /// any level it set that no report has carried yet. With the hold, the
-    /// held report's sequence number and whether it raised the level.
+    /// The level of a pulse that still owes the controller some of
+    /// [`PULSE_MIN`]: not carried yet (and not stale), or carried less than
+    /// that long ago.
+    fn stretch_owed(&self, now: Instant) -> Option<(u8, u8)> {
+        self.stretch
+            .filter(|s| match s.until {
+                Some(u) => now < u,
+                None => now.saturating_duration_since(s.began) < PULSE_STALE,
+            })
+            .map(|s| (s.heavy, s.light))
+    }
+
+    /// A report went out to the controller; `on`: its motors are running.
+    /// Times how long the controller actually played each burst.
+    pub fn motors_written(&mut self, on: bool, now: Instant) {
+        match (self.out_on_since, on) {
+            (None, true) => self.out_on_since = Some(now),
+            (Some(since), false) => {
+                let run = now.saturating_duration_since(since);
+                self.out_on_since = None;
+                self.out_runs += 1;
+                self.out_run_total += run;
+                self.out_run_max = self.out_run_max.max(run);
+                self.out_run_min = Some(self.out_run_min.map_or(run, |m| m.min(run)));
+            }
+            _ => {}
+        }
+    }
+
+    /// When a pulse the game already stopped ends on the controller, for
+    /// the writer to send the stop right then rather than at its next tick.
+    pub fn stretch_end(&self, now: Instant) -> Option<Instant> {
+        if self.rumble.is_some() {
+            return None;
+        }
+        self.stretch.and_then(|s| s.until).filter(|&u| now < u)
+    }
+
+    /// The game's rumble for the next report: what it last set (or a pulse
+    /// it stopped before [`PULSE_MIN`] was up), raised to any level it set
+    /// that no report has carried yet. With the hold, the held report's
+    /// sequence number and whether it raised the level.
     pub fn rumble_to_send(&self, now: Instant) -> ((u8, u8), Option<(u64, bool)>) {
-        let (h, l) = self.rumble.unwrap_or((0, 0));
+        // Before a report carries the pulse, the held level below sends it.
+        let carried_stretch = self
+            .stretch
+            .filter(|s| s.until.is_some_and(|u| now < u))
+            .map(|s| (s.heavy, s.light));
+        let (h, l) = match self.rumble {
+            Some(level) => level,
+            None => carried_stretch.unwrap_or((0, 0)),
+        };
         match self.held_now(now) {
             Some(p) => (
                 (h.max(p.heavy), l.max(p.light)),
@@ -228,6 +352,11 @@ impl GameState {
     pub fn rumble_sent(&mut self, seq: u64, raised: bool, now: Instant) {
         if let Some(p) = self.held.filter(|p| p.seq == seq) {
             self.held = None;
+            // The pulse is on the controller from now: it stays on at
+            // least PULSE_MIN, however soon the game stops it.
+            if let Some(s) = self.stretch.as_mut().filter(|s| s.until.is_none()) {
+                s.until = Some(now + PULSE_MIN);
+            }
             if raised {
                 self.rumble_saved += 1;
             }
@@ -292,6 +421,34 @@ impl Feedback {
                     g.rumble_waits_long,
                     g.rumble_merged,
                     g.rumble_uncarried + g.held.is_some() as u64
+                );
+            }
+            if g.rumble_runs > 0 {
+                log::info!(
+                    "game rumble stretch: {} pulse(s) the game stopped early kept on the controller for {} ms",
+                    g.rumble_stretched,
+                    PULSE_MIN.as_millis()
+                );
+            }
+            if g.rumble_gaps > 0 {
+                log::info!(
+                    "game rumble pattern: a pulse every {:.1} ms on average, closest {:.1} ms apart, {} under 50 ms apart; heavy motor in {} pulse(s), light in {}; highest levels heavy {}, light {}",
+                    g.rumble_gap_total.as_secs_f64() * 1000.0 / g.rumble_gaps as f64,
+                    g.rumble_gap_min.unwrap_or_default().as_secs_f64() * 1000.0,
+                    g.rumble_gaps_short,
+                    g.rumble_on_heavy,
+                    g.rumble_on_light,
+                    g.rumble_peak.0,
+                    g.rumble_peak.1
+                );
+            }
+            if g.out_runs > 0 {
+                log::info!(
+                    "controller rumble: the motors ran {} time(s) in the reports sent, {:.1} ms on average, shortest {:.1} ms, longest {:.1} ms",
+                    g.out_runs,
+                    g.out_run_total.as_secs_f64() * 1000.0 / g.out_runs as f64,
+                    g.out_run_min.unwrap_or_default().as_secs_f64() * 1000.0,
+                    g.out_run_max.as_secs_f64() * 1000.0
                 );
             }
         }
@@ -1849,6 +2006,18 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 device.feedback.lock().game.rumble_sent(seq, raised && wrote, now);
             }
         }
+        {
+            let mut fb = device.feedback.lock();
+            if wrote {
+                let on = state.rumble_valid && (state.rumble_left > 0 || state.rumble_right > 0);
+                fb.game.motors_written(on, now);
+            }
+            // A pulse the game stopped early stops on the controller once
+            // its PULSE_MIN is up, not at the tick after.
+            if let Some(end) = fb.game.stretch_end(now) {
+                next_tick = next_tick.min(end);
+            }
+        }
 
         if now.duration_since(last_rate) >= Duration::from_secs(1) {
             let secs = now.duration_since(last_rate).as_secs_f32();
@@ -2507,10 +2676,94 @@ mod rumble_pulse_tests {
         d.set_game_rumble(111, 0);
         d.set_game_rumble(0, 0);
         assert_eq!(send(&mut c, &d, &p, false, at(4)), (true, 111, 0));
-        // Carried once: the next report has the game's zero.
-        assert_eq!(send(&mut c, &d, &p, false, at(8)), (true, 0, 0));
         assert!(d.feedback.lock().game.held.is_none());
         assert_eq!(d.feedback.lock().game.rumble_saved, 1);
+        // Kept on for PULSE_MIN from that report, then the game's zero.
+        let min = PULSE_MIN.as_millis() as u64;
+        assert_eq!(send(&mut c, &d, &p, false, at(8)), (true, 111, 0));
+        assert_eq!(send(&mut c, &d, &p, false, at(4 + min - 1)), (true, 111, 0));
+        assert_eq!(send(&mut c, &d, &p, false, at(4 + min)), (true, 0, 0));
+    }
+
+    #[test]
+    fn a_short_pulse_stays_on_the_controller_for_pulse_min() {
+        let mut g = GameState::default();
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        let min = PULSE_MIN.as_millis() as u64;
+        // The game's 0.2 ms pulse; a report carries it 3 ms later.
+        g.set_rumble(111, 0, at(0));
+        g.set_rumble(0, 0, at(0) + Duration::from_micros(200));
+        let (level, held) = g.rumble_to_send(at(3));
+        assert_eq!(level, (111, 0));
+        g.rumble_sent(held.unwrap().0, true, at(3));
+        // The full PULSE_MIN counts from that report, not from the pulse.
+        assert_eq!(g.stretch_end(at(3)), Some(at(3 + min)));
+        assert_eq!(g.rumble_to_send(at(3 + min - 1)), ((111, 0), None));
+        assert_eq!(g.rumble_to_send(at(3 + min)), ((0, 0), None));
+        assert_eq!(g.stretch_end(at(3 + min)), None);
+        assert_eq!(g.rumble_stretched, 1);
+    }
+
+    #[test]
+    fn a_pulse_longer_than_pulse_min_stops_at_once() {
+        let mut g = GameState::default();
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        let min = PULSE_MIN.as_millis() as u64;
+        g.set_rumble(150, 0, at(0));
+        let (_, held) = g.rumble_to_send(at(0));
+        g.rumble_sent(held.unwrap().0, false, at(0));
+        g.set_rumble(0, 0, at(min + 5));
+        assert_eq!(g.rumble_to_send(at(min + 5)), ((0, 0), None));
+        assert_eq!(g.stretch_end(at(min + 5)), None);
+        assert_eq!(g.rumble_stretched, 0);
+    }
+
+    #[test]
+    fn a_new_pulse_during_a_stretch_takes_over_at_once() {
+        let mut g = GameState::default();
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        g.set_rumble(200, 0, at(0));
+        let (_, held) = g.rumble_to_send(at(0));
+        g.rumble_sent(held.unwrap().0, true, at(0));
+        g.set_rumble(0, 0, at(1));
+        // A weaker pulse 5 ms later plays as it is, then gets its own
+        // PULSE_MIN from the report that carries it.
+        g.set_rumble(60, 0, at(5));
+        g.set_rumble(0, 0, at(6));
+        let (level, held) = g.rumble_to_send(at(8));
+        assert_eq!(level, (60, 0));
+        g.rumble_sent(held.unwrap().0, false, at(8));
+        assert_eq!(g.rumble_to_send(at(20)), ((60, 0), None));
+        assert_eq!(g.stretch_end(at(20)), Some(at(8) + PULSE_MIN));
+        assert_eq!(g.rumble_stretched, 2);
+    }
+
+    #[test]
+    fn the_session_log_times_the_pattern_and_what_the_controller_played() {
+        let mut g = GameState::default();
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        for (start, level) in [(0u64, (111, 0)), (90, (0, 70)), (130, (120, 0))] {
+            g.set_rumble(level.0, level.1, at(start));
+            g.set_rumble(0, 0, at(start + 1));
+        }
+        assert_eq!(g.rumble_gaps, 2);
+        assert_eq!(g.rumble_gap_min, Some(Duration::from_millis(40)));
+        assert_eq!(g.rumble_gaps_short, 1);
+        assert_eq!((g.rumble_on_heavy, g.rumble_on_light), (2, 1));
+        assert_eq!(g.rumble_peak, (120, 70));
+        g.motors_written(true, at(0));
+        g.motors_written(true, at(8));
+        g.motors_written(false, at(16));
+        g.motors_written(false, at(24));
+        g.motors_written(true, at(90));
+        g.motors_written(false, at(110));
+        assert_eq!(g.out_runs, 2);
+        assert_eq!(g.out_run_min, Some(Duration::from_millis(16)));
+        assert_eq!(g.out_run_max, Duration::from_millis(20));
     }
 
     #[test]
@@ -2565,7 +2818,9 @@ mod rumble_pulse_tests {
         assert_eq!(g.rumble_to_send(t + Duration::from_millis(3)).0, (111, 0), "merged and still held");
         let (_, second) = g.rumble_to_send(t + Duration::from_millis(3));
         g.rumble_sent(second.unwrap().0, true, t + Duration::from_millis(3));
-        assert_eq!(g.rumble_to_send(t + Duration::from_millis(4)), ((0, 0), None));
+        // Let go; the last pulse then plays out its PULSE_MIN.
+        assert_eq!(g.rumble_to_send(t + Duration::from_millis(4)), ((90, 0), None));
+        assert_eq!(g.rumble_to_send(t + Duration::from_millis(3) + PULSE_MIN), ((0, 0), None));
     }
 
     #[test]

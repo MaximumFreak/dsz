@@ -23,19 +23,28 @@
 //! Playback starts again once `PRIME` is back rather than the whole
 //! target, so a dropout is not also a target's worth of silence, and the
 //! rest of the target fills by reading up to `CATCH_UP` slower.
+//!
+//! The haptics Latency setting picks the targets: Short stays at `PRIME`,
+//! Medium starts there and grows to `MAX_PRIME`, Long starts at
+//! `MAX_PRIME` and grows to `LONG_MAX_PRIME`, for a PC that holds the
+//! audio back longer than 64 ms now and then (issue 49).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::dsp::resample_window;
+use crate::profile::Latency;
 
 /// Frames per window at the `0x32` haptics rate (32 samples at 3 kHz).
 pub const WINDOW: usize = 512;
 /// Backlog the reader aims for at first, in frames (about 32 ms), and
 /// what it waits for after running dry.
 const PRIME: usize = 3 * WINDOW;
-/// Deepest backlog it grows to after dropouts (about 64 ms).
+/// Deepest backlog it grows to after dropouts (about 64 ms), and where
+/// Long latency starts.
 const MAX_PRIME: usize = 6 * WINDOW;
+/// Deepest backlog with Long latency (about 96 ms).
+const LONG_MAX_PRIME: usize = 9 * WINDOW;
 /// Past the target by this much the backlog is cut back to the target.
 const MAX_OVER: usize = 8 * WINDOW;
 /// Audio back within this long after running dry was a dropout, not the
@@ -49,6 +58,16 @@ const MAX_SKEW: f64 = 0.005;
 const CATCH_UP: f64 = 0.01;
 /// Speaker fade length in frames (5 ms).
 const FADE: usize = 240;
+
+/// The backlog a Latency setting starts at and the deepest dropouts can
+/// grow it to, in frames.
+fn targets(latency: Latency) -> (usize, usize) {
+    match latency {
+        Latency::Short => (PRIME, PRIME),
+        Latency::Medium => (PRIME, MAX_PRIME),
+        Latency::Long => (MAX_PRIME, LONG_MAX_PRIME),
+    }
+}
 
 /// Interleaved 4-channel 16-bit PCM at 48 kHz.
 pub trait PcmSource: Send + Sync {
@@ -106,6 +125,11 @@ pub struct GameReader {
     primed: bool,
     /// Backlog the reader aims for, frames.
     prime: usize,
+    latency: Latency,
+    /// Where `prime` starts and how far dropouts can grow it, from
+    /// `latency`.
+    start: usize,
+    max: usize,
     /// When the audio last ran dry, until it is back.
     starved_at: Option<Instant>,
     /// The source's restart count at the last read.
@@ -131,9 +155,14 @@ pub struct GameReader {
 
 impl GameReader {
     pub fn new() -> Self {
+        let latency = Latency::Medium;
+        let (start, max) = targets(latency);
         GameReader {
             primed: false,
-            prime: PRIME,
+            prime: start,
+            latency,
+            start,
+            max,
             starved_at: None,
             restarts_seen: 0,
             grown: false,
@@ -142,7 +171,7 @@ impl GameReader {
             pcm: vec![0; (WINDOW + WINDOW / 64 + 2) * 4],
             raw_speaker: Vec::with_capacity(WINDOW * 2),
             prev_speaker: [0.0; 2],
-            fill: PRIME as f64,
+            fill: start as f64,
             acc: 0.0,
             win: GameWindow {
                 haptics: Vec::with_capacity(WINDOW * 2),
@@ -152,6 +181,32 @@ impl GameReader {
             },
             dropped: AtomicU64::new(0),
         }
+    }
+
+    /// Follow the haptics Latency setting. A change takes effect at once:
+    /// a deeper target fills by reading slower, a shallower one drains by
+    /// reading faster.
+    pub fn set_latency(&mut self, latency: Latency) {
+        if latency == self.latency {
+            return;
+        }
+        let (start, max) = targets(latency);
+        log::info!(
+            "game audio latency {:?}: buffering {} to {} ms",
+            latency,
+            start * 1000 / 48_000,
+            max * 1000 / 48_000
+        );
+        self.latency = latency;
+        self.start = start;
+        self.max = max;
+        self.prime = self.prime.clamp(start, max);
+        // Growth already cut back by the clamp is not taken back again.
+        self.grown &= self.prime > start;
+    }
+
+    pub fn latency(&self) -> Latency {
+        self.latency
     }
 
     /// The backlog the reader aims for, in milliseconds. Growth from a
@@ -178,7 +233,7 @@ impl GameReader {
                 self.starved_at = None;
                 if self.grown {
                     self.grown = false;
-                    self.prime -= WINDOW;
+                    self.prime = (self.prime - WINDOW).max(self.start);
                 }
             }
             if filled < PRIME.min(self.prime) {
@@ -243,7 +298,7 @@ impl GameReader {
             // Refill deeper, so the restart already has the larger cushion,
             // unless the stream itself ended or started again.
             self.starved_at = (!restarted).then(Instant::now);
-            self.grown = !restarted && self.prime < MAX_PRIME;
+            self.grown = !restarted && self.prime < self.max;
             if self.grown {
                 self.prime += WINDOW;
             }
@@ -378,7 +433,7 @@ impl PcmSource for TestSource {
         if self.finished() {
             0
         } else {
-            MAX_PRIME
+            LONG_MAX_PRIME
         }
     }
     fn read(&self, out: &mut [i16]) -> usize {
@@ -514,6 +569,43 @@ mod tests {
         *src.0.lock() = PRIME;
         r.take(&src, WINDOW).unwrap();
         assert_eq!((r.underruns, r.prime), (0, PRIME));
+    }
+
+    #[test]
+    fn latency_sets_where_the_buffer_starts_and_how_far_it_grows() {
+        let dropout = |r: &mut GameReader, src: &Fake| {
+            *src.0.lock() = 0;
+            r.take(src, WINDOW);
+            *src.0.lock() = LONG_MAX_PRIME;
+            r.take(src, WINDOW).unwrap();
+        };
+        let src = Fake(parking_lot::Mutex::new(PRIME));
+        // Short never grows.
+        let mut r = GameReader::new();
+        r.set_latency(Latency::Short);
+        r.take(&src, WINDOW).unwrap();
+        for _ in 0..5 {
+            dropout(&mut r, &src);
+        }
+        assert_eq!((r.underruns, r.prime, r.buffer_ms()), (5, PRIME, 32));
+        // Long starts at 64 ms, plays once 32 ms is there, and grows to 96 ms.
+        let mut r = GameReader::new();
+        r.set_latency(Latency::Long);
+        assert_eq!(r.buffer_ms(), 64);
+        *src.0.lock() = PRIME;
+        assert!(r.take(&src, WINDOW).is_some());
+        for _ in 0..5 {
+            dropout(&mut r, &src);
+        }
+        assert_eq!((r.prime, r.buffer_ms()), (LONG_MAX_PRIME, 96));
+        // Back to Medium: the target comes down to its limit.
+        r.set_latency(Latency::Medium);
+        assert_eq!(r.buffer_ms(), 64);
+        r.set_latency(Latency::Short);
+        assert_eq!(r.buffer_ms(), 32);
+        // And up again: Long's start.
+        r.set_latency(Latency::Long);
+        assert_eq!(r.buffer_ms(), 64);
     }
 
     #[test]

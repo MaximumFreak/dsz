@@ -251,10 +251,11 @@ impl AudioSession {
         let Some(start) = self.start else { return };
         let gaps = src.map(|s| s.take_arrival_gaps()).unwrap_or_default();
         log::info!(
-            "game audio closed after {} s: {} dropout(s) in the game's audio, buffering {} ms, {} frames cut, {} stream underrun(s); it stopped arriving {} time(s) for {} ms or more, longest {} ms",
+            "game audio closed after {} s: {} dropout(s) in the game's audio, buffering {} ms ({:?} latency), {} frames cut, {} stream underrun(s); it stopped arriving {} time(s) for {} ms or more, longest {} ms",
             start.elapsed().as_secs(),
             game.underruns - self.underruns,
             game.buffer_ms(),
+            game.latency(),
             game.dropped.load(Ordering::Relaxed) - self.dropped,
             device.stats.stream_underruns.load(Ordering::Relaxed) - self.stream,
             gaps.count,
@@ -358,6 +359,7 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
     while !device.stop.load(Ordering::Acquire) {
         let profile = cache.get(engine, device);
         let h = &profile.haptics;
+        game.set_latency(h.latency);
         let vo = &profile.virtual_out;
         // The recording device belongs to the virtual pad, which a held
         // profile doesn't change, so neither does its microphone.
@@ -625,7 +627,8 @@ pub fn run(engine: &Arc<Engine>, device: &Arc<Device>) {
             let mut held = None;
             if profile.virtual_out.game_rumble {
                 // A level the game set and cut since the last block still
-                // plays for one block (issue 43; `GameState::rumble_to_send`).
+                // plays, for PULSE_MIN at least (issue 43;
+                // `GameState::rumble_to_send`).
                 let ((gh, gl), pending) = fb.game.rumble_to_send(now);
                 heavy = heavy.max(gh);
                 light = light.max(gl);
