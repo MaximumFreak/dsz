@@ -147,6 +147,24 @@ impl Default for Lighting {
 pub struct Triggers {
     pub left: TriggerEffect,
     pub right: TriggerEffect,
+    /// L2's effect plays only while R2 is held, and R2's only while L2 is
+    /// (issue 62), as games that aim with one trigger and shoot with the
+    /// other do, so menus don't fight back. Only the profile's own effect
+    /// waits; a game's or a mod's plays as sent. Off: always, as before.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub left_needs_r2: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub right_needs_l2: bool,
+    /// How far the other trigger has to be pulled to count as held, in
+    /// percent of its travel.
+    #[serde(skip_serializing_if = "is_default_hold_at")]
+    pub hold_at: u8,
+}
+
+pub const DEFAULT_HOLD_AT: u8 = 10;
+
+fn is_default_hold_at(v: &u8) -> bool {
+    *v == DEFAULT_HOLD_AT
 }
 
 impl Default for Triggers {
@@ -154,6 +172,9 @@ impl Default for Triggers {
         Triggers {
             left: TriggerEffect::Off,
             right: TriggerEffect::Off,
+            left_needs_r2: false,
+            right_needs_l2: false,
+            hold_at: DEFAULT_HOLD_AT,
         }
     }
 }
@@ -1389,6 +1410,36 @@ mod tests {
             let q: Profile = serde_json::from_str(&s).unwrap();
             assert_eq!(p, q);
         }
+    }
+
+    #[test]
+    fn trigger_conditions_are_off_and_left_out_until_turned_on() {
+        let p: Profile = serde_json::from_str(
+            r#"{"name":"Old","triggers":{"left":{"type":"off"},"right":{"type":"feedback","position":2,"strength":5}}}"#,
+        )
+        .unwrap();
+        assert!(!p.triggers.left_needs_r2 && !p.triggers.right_needs_l2);
+        assert_eq!(p.triggers.hold_at, DEFAULT_HOLD_AT);
+        assert_eq!(
+            p.triggers.right,
+            TriggerEffect::Feedback {
+                position: 2,
+                strength: 5
+            }
+        );
+        for p in Profile::starter_set() {
+            assert!(!p.triggers.left_needs_r2 && !p.triggers.right_needs_l2, "{}", p.name);
+            let json = serde_json::to_string(&p).unwrap();
+            for field in ["left_needs_r2", "right_needs_l2", "hold_at"] {
+                assert!(!json.contains(field), "{} {field}", p.name);
+            }
+        }
+        let mut on = Profile::default();
+        on.triggers.right_needs_l2 = true;
+        on.triggers.hold_at = 25;
+        let json = serde_json::to_string(&on).unwrap();
+        assert!(json.contains(r#""right_needs_l2":true"#) && json.contains(r#""hold_at":25"#));
+        assert_eq!(serde_json::from_str::<Profile>(&json).unwrap(), on);
     }
 
     #[test]

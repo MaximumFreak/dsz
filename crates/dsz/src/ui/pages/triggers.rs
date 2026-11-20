@@ -73,7 +73,7 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
         (
             crate::i18n::tr("Galloping"),
             TriggerEffect::Galloping {
-                start: 0,
+                start: 1,
                 end: 9,
                 first_foot: 2,
                 second_foot: 5,
@@ -104,7 +104,7 @@ fn presets() -> Vec<(&'static str, TriggerEffect)> {
     ]
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
     Off,
     Feedback,
@@ -150,7 +150,7 @@ fn default_for(k: Kind) -> TriggerEffect {
             strength: 7,
         },
         Kind::Vibration => TriggerEffect::Vibration {
-            position: 0,
+            position: 1,
             amplitude: 6,
             frequency: 25,
         },
@@ -174,7 +174,7 @@ fn default_for(k: Kind) -> TriggerEffect {
             snap: 7,
         },
         Kind::Galloping => TriggerEffect::Galloping {
-            start: 0,
+            start: 1,
             end: 9,
             first_foot: 2,
             second_foot: 5,
@@ -438,6 +438,20 @@ fn editor(ui: &mut egui::Ui, id: &str, e: &mut TriggerEffect) {
             ui.label(RichText::new(format!("{:02X?}", b)).monospace().color(TEXT));
         }
     }
+    // The released trigger rests in zone 0, so a vibration that starts
+    // there never stops (issue 61). The built-in ones start at zone 1.
+    if matches!(
+        kind(e),
+        Kind::Vibration | Kind::MultiVibration | Kind::Galloping | Kind::Machine
+    ) && e.runs_at_rest()
+    {
+        ui.add_space(6.0);
+        note(ui, crate::i18n::tr("From zone 0, the trigger vibrates even when released, which uses battery. Start at zone 1 to keep it still until you pull."), WARN);
+    } else if kind(e) == Kind::Preset && e.runs_at_rest() {
+        // Vibrate pulse starts at zone 0 as game mods expect; say so here.
+        ui.add_space(6.0);
+        note(ui, crate::i18n::tr("This preset vibrates even when the trigger is released, which uses battery."), WARN);
+    }
 }
 
 impl App {
@@ -469,11 +483,13 @@ impl App {
             } else {
                 ("R2", input.r2)
             };
-            let e = if left {
-                &mut p.triggers.left
+            let t = &mut p.triggers;
+            let (e, needs_other) = if left {
+                (&mut t.left, &mut t.left_needs_r2)
             } else {
-                &mut p.triggers.right
+                (&mut t.right, &mut t.right_needs_l2)
             };
+            let hold_at = &mut t.hold_at;
             card(ui, title, "", |ui| {
                 zone_strip(ui, e, pressure);
                 ui.add_space(8.0);
@@ -495,6 +511,20 @@ impl App {
                 });
                 ui.add_space(10.0);
                 editor(ui, title, e);
+                ui.add_space(6.0);
+                toggle_row(
+                    ui,
+                    if left {
+                        crate::i18n::tr("Only while R2 is held")
+                    } else {
+                        crate::i18n::tr("Only while L2 is held")
+                    },
+                    crate::i18n::tr("Waits until you hold the other trigger, like aiming before you shoot. A game's own effects play as sent."),
+                    needs_other,
+                );
+                if *needs_other {
+                    slider_row(ui, crate::i18n::tr("Counts as held from"), "", hold_at, 1..=90, "%");
+                }
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
                     if button(
@@ -525,6 +555,34 @@ impl App {
             } else {
                 p.triggers.left = e;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn built_in_effects_keep_the_released_trigger_still() {
+        // Issue 61: a vibrating effect from zone 0 runs while the trigger
+        // rests. None of the presets or new-effect defaults do that.
+        for (name, e) in presets() {
+            assert!(!e.runs_at_rest(), "{name}");
+        }
+        for k in [
+            Kind::Feedback,
+            Kind::Weapon,
+            Kind::Vibration,
+            Kind::Slope,
+            Kind::MultiFeedback,
+            Kind::MultiVibration,
+            Kind::Bow,
+            Kind::Galloping,
+            Kind::Machine,
+            Kind::Preset,
+        ] {
+            assert!(!default_for(k).runs_at_rest(), "{k:?}");
         }
     }
 }

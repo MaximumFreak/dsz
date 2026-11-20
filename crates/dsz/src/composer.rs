@@ -35,6 +35,23 @@ pub struct Composer {
     /// Lightbar level for the idle power-off countdown, 1 while in use;
     /// see [`idle_fade`]. Set by the writer before each report.
     pub idle_level: f32,
+    /// L2 and R2 count as held for the other trigger's "only while held"
+    /// effect; see [`trigger_held`].
+    l2_held: bool,
+    r2_held: bool,
+}
+
+/// Whether a trigger counts as held for the other trigger's "only while
+/// held" effect (issue 62): pulled to `hold_at` percent of its travel, and
+/// let go below two thirds of that, so a finger resting at the point
+/// doesn't flick the effect on and off.
+pub fn trigger_held(was: bool, value: u8, hold_at: u8) -> bool {
+    let on = (hold_at.clamp(1, 95) as u32 * 255 + 50) / 100;
+    if was {
+        value as u32 > on * 2 / 3
+    } else {
+        value as u32 >= on
+    }
 }
 
 pub fn hsv(h: f32, s: f32, v: f32) -> [u8; 3] {
@@ -172,6 +189,8 @@ impl Composer {
             held: None,
             blend: None,
             idle_level: 1.0,
+            l2_held: false,
+            r2_held: false,
         }
     }
 
@@ -392,17 +411,28 @@ impl Composer {
         }
 
         // Triggers
-        // Mod overrides, then what the game sent, then the profile.
+        // Mod overrides, then what the game sent, then the profile. The
+        // profile's effect can wait for the other trigger to be held.
+        let t = &p.triggers;
+        self.l2_held = trigger_held(self.l2_held, input.l2, t.hold_at);
+        self.r2_held = trigger_held(self.r2_held, input.r2, t.hold_at);
+        let own = |e: &ds_proto::TriggerEffect, needs: bool, held: bool| {
+            if needs && !held {
+                ds_proto::trigger::OFF
+            } else {
+                e.encode()
+            }
+        };
         let gl = game.left_trigger.filter(|_| vo.game_triggers);
         let gr = game.right_trigger.filter(|_| vo.game_triggers);
         out.left_trigger = overrides
             .left_trigger
             .or(gl)
-            .unwrap_or_else(|| p.triggers.left.encode());
+            .unwrap_or_else(|| own(&t.left, t.left_needs_r2, self.r2_held));
         out.right_trigger = overrides
             .right_trigger
             .or(gr)
-            .unwrap_or_else(|| p.triggers.right.encode());
+            .unwrap_or_else(|| own(&t.right, t.right_needs_l2, self.l2_held));
         if let Some((l2, r2, until)) = feedback.trigger_preview {
             if now < until {
                 if let Some(b) = l2 {
@@ -713,6 +743,88 @@ mod tests {
         p.lighting.mute_led = MuteLed::Toggle;
         let modded = crate::device::Overrides { mic_led: Some(2), ..Default::default() };
         assert_eq!(led(&p, &toggles, &modded, &fb), 2);
+    }
+
+    #[test]
+    fn trigger_conditions_off_keep_the_reports() {
+        // Off (the default), the profile's effects go out as they always
+        // did, whatever the triggers do.
+        let mut p = Profile::default();
+        p.triggers.left = ds_proto::TriggerEffect::Feedback { position: 2, strength: 5 };
+        p.triggers.right = ds_proto::TriggerEffect::Weapon { start: 3, end: 6, strength: 7 };
+        let none = crate::device::Overrides::default();
+        let toggles = crate::device::Toggles::default();
+        let fb = crate::device::Feedback::default();
+        let now = Instant::now();
+        let bytes = |o: &OutputState| {
+            let mut b = [0u8; 128];
+            o.build(ds_proto::Connection::Bluetooth, &mut b).to_vec()
+        };
+        let mut c = Composer::new();
+        let mut plain = Composer::new();
+        for (l2, r2) in [(0, 0), (255, 0), (0, 255), (30, 200), (255, 255), (0, 0)] {
+            let input = InputState { l2, r2, ..Default::default() };
+            let o = c.compose(&p, &input, &none, &fb, &toggles, false, 0.0, now);
+            assert_eq!(o.left_trigger, p.triggers.left.encode());
+            assert_eq!(o.right_trigger, p.triggers.right.encode());
+            // The pull doesn't change any byte of the report.
+            let rest = plain.compose(&p, &InputState::default(), &none, &fb, &toggles, false, 0.0, now);
+            assert_eq!(bytes(&o), bytes(&rest), "{l2} {r2}");
+        }
+    }
+
+    #[test]
+    fn trigger_effect_waits_for_the_other_trigger() {
+        let mut p = Profile::default();
+        let shoot = ds_proto::TriggerEffect::Weapon { start: 3, end: 6, strength: 7 };
+        let aim = ds_proto::TriggerEffect::Feedback { position: 1, strength: 3 };
+        p.triggers.right = shoot.clone();
+        p.triggers.left = aim.clone();
+        p.triggers.right_needs_l2 = true;
+        let none = crate::device::Overrides::default();
+        let toggles = crate::device::Toggles::default();
+        let fb = crate::device::Feedback::default();
+        let now = Instant::now();
+        let mut c = Composer::new();
+        let mut at = |l2: u8, r2: u8| {
+            let input = InputState { l2, r2, ..Default::default() };
+            let o = c.compose(&p, &input, &none, &fb, &toggles, false, 0.0, now);
+            (o.left_trigger, o.right_trigger)
+        };
+        let off = ds_proto::trigger::OFF;
+        // R2 is free until L2 is held; L2's own effect is untouched.
+        assert_eq!(at(0, 0), (aim.encode(), off));
+        assert_eq!(at(0, 255), (aim.encode(), off));
+        assert_eq!(at(20, 0).1, off, "under 10 %");
+        assert_eq!(at(26, 0).1, shoot.encode(), "10 %");
+        // Let go only below two thirds of the point.
+        assert_eq!(at(18, 0).1, shoot.encode());
+        assert_eq!(at(16, 0).1, off);
+        assert_eq!(at(255, 255), (aim.encode(), shoot.encode()));
+        assert_eq!(at(0, 255).1, off);
+
+        // A game's or a mod's effect plays as sent.
+        let mut fb = crate::device::Feedback::default();
+        fb.game.right_trigger = Some([0x26, 1, 2, 3, 4, 5, 6, 0, 0, 9, 0]);
+        let mut p2 = p.clone();
+        p2.virtual_out.game_triggers = true;
+        let o = Composer::new().compose(&p2, &InputState::default(), &none, &fb, &toggles, false, 0.0, now);
+        assert_eq!(o.right_trigger, [0x26, 1, 2, 3, 4, 5, 6, 0, 0, 9, 0]);
+        let modded = crate::device::Overrides { right_trigger: Some(shoot.encode()), ..Default::default() };
+        let o = Composer::new().compose(&p, &InputState::default(), &modded, &crate::device::Feedback::default(), &toggles, false, 0.0, now);
+        assert_eq!(o.right_trigger, shoot.encode());
+    }
+
+    #[test]
+    fn trigger_held_has_hysteresis() {
+        assert!(!trigger_held(false, 0, 10));
+        assert!(trigger_held(false, 26, 10));
+        assert!(trigger_held(true, 18, 10));
+        assert!(!trigger_held(true, 17, 10));
+        // Out-of-range settings still work.
+        assert!(trigger_held(false, 3, 0));
+        assert!(!trigger_held(false, 200, 100));
+        assert!(trigger_held(false, 255, 100));
     }
 
     #[test]

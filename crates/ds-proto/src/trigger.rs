@@ -408,6 +408,16 @@ impl TriggerEffect {
         matches!(self.encode()[0], 0x26 | 0x23 | 0x27 | 0x06)
     }
 
+    /// A vibrating effect (vibration, zones: vibration, galloping, machine)
+    /// whose first zone is zone 0. The released trigger rests in zone 0, so
+    /// the firmware keeps its motor running at the set frequency even while
+    /// the trigger isn't pulled (issue 61).
+    pub fn runs_at_rest(&self) -> bool {
+        let b = self.encode();
+        let mask = u16::from_le_bytes([b[1], b[2]]);
+        matches!(b[0], 0x26 | 0x23 | 0x27) && mask & 1 != 0
+    }
+
     /// Effect from a UDP mod-API trigger update: the mod's trigger mode
     /// plus its parameters. Modes 0..=18 and their parameters are as game
     /// mods define them; 19..=26 follow Nielk1's trigger effect generator
@@ -668,6 +678,72 @@ mod tests {
         .encode();
         assert_eq!(b[0], 0x25);
         assert_eq!(u16::from_le_bytes([b[1], b[2]]), (1 << 2) | (1 << 3));
+    }
+
+    #[test]
+    fn vibrating_from_zone_0_runs_at_rest() {
+        let gallop = |start| TriggerEffect::Galloping {
+            start,
+            end: 9,
+            first_foot: 2,
+            second_foot: 5,
+            frequency: 5,
+        };
+        let vib = |position| TriggerEffect::Vibration {
+            position,
+            amplitude: 6,
+            frequency: 25,
+        };
+        let machine = |start| TriggerEffect::Machine {
+            start,
+            end: 9,
+            amp_a: 2,
+            amp_b: 6,
+            frequency: 7,
+            period: 4,
+        };
+        assert!(gallop(0).runs_at_rest());
+        assert!(!gallop(1).runs_at_rest());
+        assert!(vib(0).runs_at_rest());
+        assert!(!vib(1).runs_at_rest());
+        assert!(machine(0).runs_at_rest());
+        assert!(!machine(1).runs_at_rest());
+        let mut zones = [0, 3, 5, 0, 0, 0, 0, 0, 0, 0];
+        let multi = |amplitudes| TriggerEffect::MultiVibration {
+            amplitudes,
+            frequency: 20,
+        };
+        assert!(!multi(zones).runs_at_rest());
+        zones[0] = 1;
+        assert!(multi(zones).runs_at_rest());
+        assert!(TriggerPreset::VibratePulse.effect().runs_at_rest());
+        // Resistance from zone 0 holds the trigger still: no motor at rest.
+        for e in [
+            TriggerEffect::Off,
+            TriggerEffect::Feedback {
+                position: 0,
+                strength: 8,
+            },
+            TriggerEffect::Slope {
+                start: 0,
+                end: 9,
+                start_strength: 1,
+                end_strength: 8,
+            },
+            TriggerEffect::Bow {
+                start: 0,
+                end: 6,
+                strength: 6,
+                snap: 7,
+            },
+            TriggerEffect::Vibration {
+                position: 0,
+                amplitude: 6,
+                frequency: 0,
+            },
+        ] {
+            assert!(!e.runs_at_rest(), "{e:?}");
+        }
     }
 
     #[test]
