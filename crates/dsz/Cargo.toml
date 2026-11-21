@@ -12,19 +12,20 @@ path = "src/main.rs"
 
 [dependencies]
 ds-proto = { path = "../ds-proto" }
-eframe = { version = "0.32", default-features = false, features = ["glow", "accesskit"] }
+eframe = { version = "0.32", default-features = false, features = ["glow"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 log = { version = "0.4", features = ["std"] }
-cpal = "0.15"
 rfd = "0.15"
 memmap2 = "0.9"
+memchr = "2"
 
 [build-dependencies]
 cc = "1"
 png = "0.18"
+serde_json = "1"
 winresource = "0.1"
 
 [dependencies.windows-sys]

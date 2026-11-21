@@ -198,16 +198,17 @@ features = [
 ]
 default-features = false
 
-[target.'cfg(any(target_os = "windows"))'.dependencies.winapi]
-version = "0.3.9"
-features = ["winuser"]
-
 [target.'cfg(any(target_os = "windows"))'.dependencies.windows-sys]
 version = "0.59"
 features = [
     "Win32_Foundation",
     "Win32_UI_Shell",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
 ]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.egui-wgpu]
@@ -218,7 +219,7 @@ default-features = false
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.egui-winit]
 version = "0.32.3"
-features = ["clipboard"]
+features = []
 default-features = false
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.glutin]
@@ -236,11 +237,6 @@ default-features = false
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.home]
 version = "0.5.9"
 optional = true
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.image]
-version = "0.25"
-features = ["png"]
-default-features = false
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.pollster]
 version = "0.4"

@@ -251,11 +251,16 @@ fn open_find(path: &Path, needles: &[&'static str]) -> Option<&'static str> {
     find_any(std::fs::File::open(path).ok()?, needles)
 }
 
-/// Stream `r` once and return the first of `needles` found.
+const SCAN_CHUNK: usize = 256 << 10;
+
+/// Stream `r` once and return the first of `needles` found (SIMD via `memchr`).
 fn find_any(mut r: impl Read, needles: &[&'static str]) -> Option<&'static str> {
     let longest = needles.iter().map(|m| m.len()).max()?;
-    let firsts: Vec<u8> = needles.iter().filter_map(|m| m.bytes().next()).collect();
-    let mut buf = vec![0u8; (8 << 20) + longest];
+    let finders: Vec<(&'static str, memchr::memmem::Finder<'static>)> = needles
+        .iter()
+        .map(|&m| (m, memchr::memmem::Finder::new(m.as_bytes())))
+        .collect();
+    let mut buf = vec![0u8; SCAN_CHUNK + longest];
     let mut keep = 0usize;
     loop {
         let n = r.read(&mut buf[keep..]).ok()?;
@@ -263,12 +268,17 @@ fn find_any(mut r: impl Read, needles: &[&'static str]) -> Option<&'static str> 
             return None;
         }
         let data = &buf[..keep + n];
-        for i in 0..data.len() {
-            if firsts.contains(&data[i]) {
-                if let Some(m) = needles.iter().find(|m| data[i..].starts_with(m.as_bytes())) {
-                    return Some(m);
+        let mut best: Option<(usize, &'static str)> = None;
+        for &(m, ref f) in &finders {
+            let limit = best.map_or(data.len(), |(pos, _)| (pos + m.len()).min(data.len()));
+            if let Some(pos) = f.find(&data[..limit]) {
+                if best.is_none_or(|(b, _)| pos < b) {
+                    best = Some((pos, m));
                 }
             }
+        }
+        if let Some((_, m)) = best {
+            return Some(m);
         }
         keep = (longest - 1).min(data.len());
         let len = data.len();
@@ -282,13 +292,27 @@ fn find_marker(mut r: impl Read) -> Option<&'static str> {
     const WIDE: &[u8] = b"D\0u\0a\0l\0S\0e\0n\0s\0e\0";
     const HID: &[u8] = b"hid.dll";
     let (mut wide, mut hid) = (false, false);
+    let finders: [(&'static str, memchr::memmem::Finder<'static>); 11] = [
+        (MARKERS[0], memchr::memmem::Finder::new(MARKERS[0].as_bytes())),
+        (MARKERS[1], memchr::memmem::Finder::new(MARKERS[1].as_bytes())),
+        (MARKERS[2], memchr::memmem::Finder::new(MARKERS[2].as_bytes())),
+        (MARKERS[3], memchr::memmem::Finder::new(MARKERS[3].as_bytes())),
+        (MARKERS[4], memchr::memmem::Finder::new(MARKERS[4].as_bytes())),
+        (MARKERS[5], memchr::memmem::Finder::new(MARKERS[5].as_bytes())),
+        (MARKERS[6], memchr::memmem::Finder::new(MARKERS[6].as_bytes())),
+        (MARKERS[7], memchr::memmem::Finder::new(MARKERS[7].as_bytes())),
+        (MARKERS[8], memchr::memmem::Finder::new(MARKERS[8].as_bytes())),
+        (MARKERS[9], memchr::memmem::Finder::new(MARKERS[9].as_bytes())),
+        (MARKERS[10], memchr::memmem::Finder::new(MARKERS[10].as_bytes())),
+    ];
+    let wide_finder = memchr::memmem::Finder::new(WIDE);
     let longest = MARKERS
         .iter()
         .map(|m| m.len())
         .chain([WIDE.len(), HID.len()])
         .max()
         .unwrap_or(1);
-    let mut buf = vec![0u8; (8 << 20) + longest];
+    let mut buf = vec![0u8; SCAN_CHUNK + longest];
     let mut keep = 0usize;
     loop {
         let n = r.read(&mut buf[keep..]).ok()?;
@@ -296,27 +320,31 @@ fn find_marker(mut r: impl Read) -> Option<&'static str> {
             return (wide && hid).then_some(WIDE_WITH_HID);
         }
         let data = &buf[..keep + n];
-        // Every marker starts with one of a few letters; jump between those.
-        let mut i = 0;
-        while i < data.len() {
-            match data[i] {
-                b'l' | b's' | b'A' | b'd' | b'D' | b'0' | b'S' => {
-                    for m in MARKERS {
-                        let mb = m.as_bytes();
-                        if data[i..].starts_with(mb) {
-                            return Some(m);
-                        }
-                    }
-                    wide |= data[i..].starts_with(WIDE);
+        let mut best: Option<(usize, &'static str)> = None;
+        for &(m, ref f) in &finders {
+            let limit = best.map_or(data.len(), |(pos, _)| (pos + m.len()).min(data.len()));
+            if let Some(pos) = f.find(&data[..limit]) {
+                if best.is_none_or(|(b, _)| pos < b) {
+                    best = Some((pos, m));
                 }
-                b'h' | b'H' => {
-                    hid |= data[i..]
-                        .get(..HID.len())
-                        .is_some_and(|w| w.eq_ignore_ascii_case(HID));
-                }
-                _ => {}
             }
-            i += 1;
+        }
+        if let Some((_, m)) = best {
+            return Some(m);
+        }
+        if !wide && wide_finder.find(data).is_some() {
+            wide = true;
+        }
+        if !hid {
+            for i in memchr::memchr2_iter(b'h', b'H', data) {
+                if data[i..]
+                    .get(..HID.len())
+                    .is_some_and(|w| w.eq_ignore_ascii_case(HID))
+                {
+                    hid = true;
+                    break;
+                }
+            }
         }
         keep = (longest - 1).min(data.len());
         let len = data.len();

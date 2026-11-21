@@ -23,6 +23,7 @@ pub mod probe;
 pub mod streamer;
 pub mod synth;
 pub mod usb;
+pub mod wasapi;
 
 /// One log line with the game feedback settings a controller plays with, so
 /// a log shows which profile and levels were in force (issue 29).

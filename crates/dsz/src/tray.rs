@@ -171,6 +171,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_DEVICECHANGE => {
+            if let Some(e) = ENGINE.get() {
+                e.wake_hotplug();
+            }
+            0
+        }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }
@@ -283,6 +289,18 @@ pub fn start(engine: Arc<Engine>, on_show: impl Fn() + Send + Sync + 'static) {
             set_tip(&mut nid, "DSZ");
             Shell_NotifyIconW(NIM_ADD, &nid);
 
+            // Listen for HID plug/unplug events so the hotplug loop wakes immediately.
+            let hid_guid = windows_sys::core::GUID::from_u128(0x4D1E55B2_F16F_11CF_88CB_001111000030);
+            let mut filter: DEV_BROADCAST_DEVICEINTERFACE_W = std::mem::zeroed();
+            filter.dbcc_size = std::mem::size_of::<DEV_BROADCAST_DEVICEINTERFACE_W>() as u32;
+            filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+            filter.dbcc_classguid = hid_guid;
+            let dev_notify = RegisterDeviceNotificationW(
+                hwnd as _,
+                &filter as *const _ as *const std::ffi::c_void,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            );
+
             // Update the tooltip with battery levels now and then.
             SetTimer(hwnd, 1, 5000, None);
             let mut msg: MSG = std::mem::zeroed();
@@ -310,6 +328,9 @@ pub fn start(engine: Arc<Engine>, on_show: impl Fn() + Send + Sync + 'static) {
                 }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+            if !dev_notify.is_null() {
+                UnregisterDeviceNotification(dev_notify);
             }
             Shell_NotifyIconW(NIM_DELETE, &nid);
         })

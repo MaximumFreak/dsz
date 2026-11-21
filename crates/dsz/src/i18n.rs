@@ -1,11 +1,9 @@
 //! Display-only localization. Profile identifiers, protocol strings, CLI page
 //! keys and user-supplied names never depend on the interface language.
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    OnceLock,
-};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+include!(concat!(env!("OUT_DIR"), "/i18n_table.rs"));
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
@@ -33,9 +31,6 @@ impl Language {
 }
 
 static LANGUAGE: AtomicU8 = AtomicU8::new(0);
-static PORTUGUESE: OnceLock<BTreeMap<String, String>> = OnceLock::new();
-static SPANISH: OnceLock<BTreeMap<String, String>> = OnceLock::new();
-static CHINESE: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
 pub fn set_language(language: Language) {
     LANGUAGE.store(
@@ -56,23 +51,24 @@ pub fn language() -> Language {
         _ => Language::English,
     }
 }
-fn catalog(language: Language) -> Option<&'static BTreeMap<String, String>> {
-    let (cache, json) = match language {
-        Language::English => return None,
-        Language::PortugueseBrazil => (&PORTUGUESE, include_str!("../locales/pt-BR.json")),
-        Language::Spanish => (&SPANISH, include_str!("../locales/es.json")),
-        Language::ChineseSimplified => (&CHINESE, include_str!("../locales/zh-CN.json")),
-    };
-    Some(cache.get_or_init(|| serde_json::from_str(json).expect("bundled translation catalog")))
-}
 pub fn translate(language: Language, english: &str) -> &str {
-    catalog(language)
-        .and_then(|c| c.get(english))
-        .map(String::as_str)
+    let table = match language {
+        Language::English => return english,
+        Language::PortugueseBrazil => PT_BR,
+        Language::Spanish => ES,
+        Language::ChineseSimplified => ZH_CN,
+    };
+    KEYS.binary_search(&english)
+        .map(|i| table[i])
         .unwrap_or(english)
 }
 pub fn tr(english: &str) -> &str {
     translate(language(), english)
+}
+
+#[inline(never)]
+pub fn fmt(args: std::fmt::Arguments<'_>) -> String {
+    std::fmt::format(args)
 }
 
 /// Format literals stay at the call site so Rust checks arguments,
@@ -81,10 +77,10 @@ pub fn tr(english: &str) -> &str {
 macro_rules! localized_format {
     ($english:literal, $portuguese:literal, $spanish:literal, $chinese:literal $($args:tt)*) => {
         match $crate::i18n::language() {
-            $crate::i18n::Language::PortugueseBrazil => format!($portuguese $($args)*),
-            $crate::i18n::Language::Spanish => format!($spanish $($args)*),
-            $crate::i18n::Language::ChineseSimplified => format!($chinese $($args)*),
-            $crate::i18n::Language::English => format!($english $($args)*),
+            $crate::i18n::Language::PortugueseBrazil => $crate::i18n::fmt(format_args!($portuguese $($args)*)),
+            $crate::i18n::Language::Spanish => $crate::i18n::fmt(format_args!($spanish $($args)*)),
+            $crate::i18n::Language::ChineseSimplified => $crate::i18n::fmt(format_args!($chinese $($args)*)),
+            $crate::i18n::Language::English => $crate::i18n::fmt(format_args!($english $($args)*)),
         }
     };
 }
@@ -92,6 +88,17 @@ macro_rules! localized_format {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    fn catalog(language: Language) -> Option<BTreeMap<String, String>> {
+        let json = match language {
+            Language::English => return None,
+            Language::PortugueseBrazil => include_str!("../locales/pt-BR.json"),
+            Language::Spanish => include_str!("../locales/es.json"),
+            Language::ChineseSimplified => include_str!("../locales/zh-CN.json"),
+        };
+        Some(serde_json::from_str(json).expect("bundled translation catalog"))
+    }
     #[test]
     fn english_is_preserved_and_missing_strings_fall_back() {
         assert_eq!(translate(Language::English, "Settings"), "Settings");
@@ -150,7 +157,8 @@ mod tests {
         for language in [Language::PortugueseBrazil, Language::Spanish, Language::ChineseSimplified] {
             for (english, translated) in catalog(language).unwrap() {
                 assert!(!translated.trim().is_empty(), "{english}");
-                assert_eq!(placeholders(english), placeholders(translated), "{language:?}: {english}");
+                assert_eq!(placeholders(&english), placeholders(&translated), "{language:?}: {english}");
+                assert_eq!(translate(language, &english), translated, "{language:?}: {english}");
             }
         }
     }
@@ -233,9 +241,9 @@ mod tests {
                 let (portuguese, rest) = literal(rest);
                 let (spanish, rest) = literal(rest);
                 let (chinese, _) = literal(rest);
-                assert_eq!(catalog(Language::PortugueseBrazil).unwrap().get(&english), Some(&portuguese), "{english}");
-                assert_eq!(catalog(Language::Spanish).unwrap().get(&english), Some(&spanish), "{english}");
-                assert_eq!(catalog(Language::ChineseSimplified).unwrap().get(&english), Some(&chinese), "{english}");
+                assert_eq!(translate(Language::PortugueseBrazil, &english), portuguese, "{english}");
+                assert_eq!(translate(Language::Spanish, &english), spanish, "{english}");
+                assert_eq!(translate(Language::ChineseSimplified, &english), chinese, "{english}");
                 checked += 1;
             }
         }

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use super::wasapi;
 use parking_lot::Mutex;
 
 use super::dsp::{full_clip, resample_window, Limiter};
@@ -290,7 +290,7 @@ impl std::fmt::Display for OpenError {
 
 /// An open playback stream on the controller's sound card.
 struct Output {
-    _stream: cpal::Stream,
+    _stream: wasapi::Stream,
     name: String,
 }
 
@@ -310,59 +310,35 @@ fn endpoint_name(device: &Device) -> Result<String, String> {
 impl Output {
     fn open(device: &Device, shared: Arc<Shared>) -> Result<Output, OpenError> {
         let name = endpoint_name(device)?;
-        let host = cpal::default_host();
-        let mut found: Vec<cpal::Device> = host
-            .output_devices()
-            .map_err(|e| e.to_string())?
-            .filter(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .collect();
-        if found.len() != 1 {
-            return Err(format!("{} playback devices are named \"{name}\"", found.len()).into());
-        }
-        let out = found.remove(0);
-        let config = out.default_output_config().map_err(|e| e.to_string())?;
-        let channels = config.channels() as usize;
-        if channels < 4 {
-            return Err(OpenError::Channels(format!(
-                "\"{name}\" is set to {channels} channels; the actuators need 4 (Sound settings → the controller → Configure → Quadraphonic)"
-            )));
-        }
-        let rate = config.sample_rate().0;
-        let mut render = Render::new(shared.clone(), rate);
+        let target_name = name.clone();
         let failed = shared.clone();
-        let on_error = move |e: cpal::StreamError| {
-            log::warn!("game haptics over USB: playback error: {e}");
-            failed.failed.store(true, Ordering::Release);
-        };
-        let cfg: cpal::StreamConfig = config.config();
-        let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => out.build_output_stream(
-                &cfg,
-                move |data: &mut [f32], _| render.fill(data, channels),
-                on_error,
-                None,
-            ),
-            cpal::SampleFormat::I16 => {
-                let mut buf: Vec<f32> = Vec::new();
-                out.build_output_stream(
-                    &cfg,
-                    move |data: &mut [i16], _| {
-                        buf.resize(data.len(), 0.0);
-                        render.fill(&mut buf, channels);
-                        for (d, s) in data.iter_mut().zip(&buf) {
-                            *d = (s * 32767.0).round() as i16;
-                        }
-                    },
-                    on_error,
-                    None,
-                )
-            }
-            f => return Err(format!("unsupported sample format {f:?}").into()),
-        }
-        .map_err(|e| e.to_string())?;
-        stream.play().map_err(|e| e.to_string())?;
-        log::info!("game audio over USB: playing on \"{name}\" ({channels} ch, {rate} Hz)");
-        Ok(Output { _stream: stream, name })
+        let (info, stream) = wasapi::open_render(
+            move |n| n == target_name,
+            name.clone(),
+            4,
+            move |rate, channels| {
+                let mut render = Render::new(shared, rate);
+                Box::new(move |data: &mut [f32]| render.fill(data, channels))
+            },
+            move |e| {
+                log::warn!("game haptics over USB: playback error: {e}");
+                failed.failed.store(true, Ordering::Release);
+            },
+        )
+        .map_err(|e| match e {
+            wasapi::RenderError::Channels(s) => OpenError::Channels(s),
+            wasapi::RenderError::Other(s) => OpenError::Other(s),
+        })?;
+        log::info!(
+            "game audio over USB: playing on \"{}\" ({} ch, {} Hz)",
+            info.name,
+            info.channels,
+            info.rate
+        );
+        Ok(Output {
+            _stream: stream,
+            name: info.name,
+        })
     }
 }
 

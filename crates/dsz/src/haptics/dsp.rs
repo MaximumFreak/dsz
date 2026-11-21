@@ -158,8 +158,9 @@ pub fn resample_window(prev: &mut [f32; 2], input: &[[f32; 2]], out: &mut [[f32;
 /// 412.5 Hz). Windowed sinc (Kaiser, 32 taps, cutoff 20.5 kHz), so the
 /// highs stay clean, unlike linear interpolation.
 pub struct Squeeze {
-    /// Input not yet fully used; `buf[0]` is input frame `base`.
+    /// Input not yet fully used; `buf[head]` is input frame `base`.
     buf: Vec<[f32; 2]>,
+    head: usize,
     base: u64,
     /// Next output frame.
     n: u64,
@@ -170,6 +171,7 @@ pub struct Squeeze {
 const SQUEEZE_NUM: u64 = 16;
 const SQUEEZE_DEN: u64 = 15;
 const SQUEEZE_HALF: usize = 16;
+const SQUEEZE_COMPACT_AT: usize = 4096;
 
 impl Squeeze {
     pub fn new() -> Squeeze {
@@ -208,8 +210,11 @@ impl Squeeze {
         }
         // Start with a kernel's worth of silence (less two frames), so every
         // 1024 frames in give exactly 960 out from the first call.
+        let mut buf = Vec::with_capacity(SQUEEZE_COMPACT_AT + 1024);
+        buf.resize(2 * SQUEEZE_HALF - 2, [0.0; 2]);
         Squeeze {
-            buf: vec![[0.0; 2]; 2 * SQUEEZE_HALF - 2],
+            buf,
+            head: 0,
             base: 0,
             n: 0,
             table,
@@ -219,7 +224,8 @@ impl Squeeze {
     /// Push `input` and append every output frame it completes to `out`.
     pub fn run(&mut self, input: &[[f32; 2]], out: &mut Vec<[f32; 2]>) {
         self.buf.extend_from_slice(input);
-        let end = self.base + self.buf.len() as u64;
+        let live = &self.buf[self.head..];
+        let end = self.base + live.len() as u64;
         loop {
             let pos = self.n * SQUEEZE_NUM;
             let i = pos / SQUEEZE_DEN + SQUEEZE_HALF as u64 - 1;
@@ -229,18 +235,24 @@ impl Squeeze {
             let first = (i + 1 - SQUEEZE_HALF as u64 - self.base) as usize;
             let row = &self.table[(pos % SQUEEZE_DEN) as usize];
             let mut acc = [0f32; 2];
-            for (t, f) in row.iter().zip(&self.buf[first..first + 2 * SQUEEZE_HALF]) {
+            for (t, f) in row.iter().zip(&live[first..first + 2 * SQUEEZE_HALF]) {
                 acc[0] += t * f[0];
                 acc[1] += t * f[1];
             }
             out.push(acc);
             self.n += 1;
         }
-        // Drop input no later output needs.
+        // Advance past input no later output needs; compact only periodically.
         let need = self.n * SQUEEZE_NUM / SQUEEZE_DEN;
-        let drop = need.saturating_sub(self.base).min(self.buf.len() as u64) as usize;
-        self.buf.drain(..drop);
+        let drop = need.saturating_sub(self.base).min(live.len() as u64) as usize;
+        self.head += drop;
         self.base += drop as u64;
+        if self.head >= SQUEEZE_COMPACT_AT {
+            let rem = self.buf.len() - self.head;
+            self.buf.copy_within(self.head.., 0);
+            self.buf.truncate(rem);
+            self.head = 0;
+        }
     }
 }
 

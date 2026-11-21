@@ -452,7 +452,7 @@ impl App {
                         } else if !ready {
                             note(ui, crate::i18n::tr("Connect over Bluetooth and select a virtual controller on the Virtual controller page to expose the microphone to Windows."), WARN);
                         } else {
-                            let toggled = d.toggles.lock().mute_engaged;
+                            let toggled = d.toggles.load().mute_engaged;
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(crate::i18n::tr("Microphone level")).color(MUTED));
                                 meter(ui, d.microphone.peak() as f32 / 255.0, VIOLET, 184.0);

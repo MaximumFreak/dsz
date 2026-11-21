@@ -996,11 +996,8 @@ pub fn probe(what: &str) {
             println!("+{:>5} ms removed", t0.elapsed().as_millis());
         }
         "default-audio" => {
-            use cpal::traits::{DeviceTrait, HostTrait};
-            let host = cpal::default_host();
-            let name = |d: Option<cpal::Device>| d.and_then(|d| d.name().ok()).unwrap_or_default();
-            println!("default output: {}", name(host.default_output_device()));
-            println!("default input: {}", name(host.default_input_device()));
+            println!("default output: {}", crate::haptics::wasapi::default_device_name(false));
+            println!("default input: {}", crate::haptics::wasapi::default_device_name(true));
             super::audio_default::describe();
         }
         _ => println!(
@@ -1022,40 +1019,39 @@ fn secs_arg(default: u64) -> u64 {
 fn play_tone(delay: u64, secs: u64) -> std::thread::JoinHandle<Option<()>> {
     use std::time::Duration;
     std::thread::spawn(move || {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         std::thread::sleep(Duration::from_secs(delay));
-        let host = cpal::default_host();
-        let dev = host.output_devices().ok()?.find(|d| {
-            let n = d.name().unwrap_or_default();
+        let names = crate::haptics::wasapi::output_device_names();
+        let target = names.into_iter().find(|n| {
             println!("output device: {n}");
             n.contains("Wireless Controller") || n.contains("DualSense")
         })?;
-        let cfg = cpal::StreamConfig {
-            channels: 4,
-            sample_rate: cpal::SampleRate(48_000),
-            buffer_size: cpal::BufferSize::Default,
-        };
-        let mut t = 0f32;
-        let s = dev
-            .build_output_stream(
-                &cfg,
-                move |d: &mut [f32], _| {
-                    for f in d.chunks_mut(4) {
-                        let v = (t * 2.0 * std::f32::consts::PI * 150.0 / 48_000.0).sin();
+        let match_target = target.clone();
+        let (info, _stream) = crate::haptics::wasapi::open_render(
+            move |n| n == match_target,
+            target,
+            4,
+            move |rate, channels| {
+                let mut t = 0f32;
+                let step = 2.0 * std::f32::consts::PI * 150.0 / rate as f32;
+                Box::new(move |d: &mut [f32]| {
+                    for f in d.chunks_mut(channels) {
+                        let v = (t * step).sin();
                         f[0] = v * 0.1;
                         f[1] = v * 0.2;
                         f[2] = v * 0.5;
                         f[3] = v * 0.9;
                         t += 1.0;
                     }
-                },
-                |e| println!("tone stream error: {e}"),
-                None,
-            )
-            .map_err(|e| println!("tone stream failed: {e}"))
-            .ok()?;
-        s.play().ok()?;
-        println!("playing test tone on {}", dev.name().unwrap_or_default());
+                })
+            },
+            |e| println!("tone stream error: {e}"),
+        )
+        .map_err(|e| match e {
+            crate::haptics::wasapi::RenderError::Channels(s)
+            | crate::haptics::wasapi::RenderError::Other(s) => println!("tone stream failed: {s}"),
+        })
+        .ok()?;
+        println!("playing test tone on {}", info.name);
         std::thread::sleep(Duration::from_secs(secs));
         Some(())
     })

@@ -63,9 +63,7 @@ fn set_title_and_icon(_title: &str, _icon_data: Option<&IconData>) -> AppIconSta
 
     #[cfg(target_os = "windows")]
     {
-        if let Some(icon_data) = _icon_data {
-            return set_app_icon_windows(icon_data);
-        }
+        return set_app_icon_windows(_icon_data);
     }
 
     #[cfg(target_os = "macos")]
@@ -76,124 +74,111 @@ fn set_title_and_icon(_title: &str, _icon_data: Option<&IconData>) -> AppIconSta
 }
 
 /// Set icon for Windows applications.
+///
+/// Loads the embedded multi-size `.ico` resource (ID 1) directly via `LoadImageW`,
+/// falling back to a 32-bit DIB icon from `icon_data` if no resource is embedded.
 #[cfg(target_os = "windows")]
 #[expect(unsafe_code)]
-fn set_app_icon_windows(icon_data: &IconData) -> AppIconStatus {
-    use crate::icon_data::IconDataExt as _;
-    use winapi::um::winuser;
+fn set_app_icon_windows(icon_data: Option<&IconData>) -> AppIconStatus {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateIconFromResourceEx, GetSystemMetrics, LoadImageW, SendMessageW, HICON, ICON_BIG,
+        ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, SM_CXICON, SM_CXSMICON, WM_SETICON,
+    };
 
-    // We would get fairly far already with winit's `set_window_icon` (which is exposed to eframe) actually!
-    // However, it only sets ICON_SMALL, i.e. doesn't allow us to set a higher resolution icon for the task bar.
-    // Also, there is scaling issues, detailed below.
-
-    // TODO(andreas): This does not set the task bar icon for when our application is started from python.
-    //      Things tried so far:
-    //      * Querying for an owning window and setting icon there (there doesn't seem to be an owning window)
-    //      * using undocumented SetConsoleIcon method (successfully queried via GetProcAddress)
-
-    // SAFETY: WinApi function without side-effects.
-    let window_handle = unsafe { winuser::GetActiveWindow() };
+    // SAFETY: Win32 query with no side effects.
+    let window_handle = unsafe { GetActiveWindow() };
     if window_handle.is_null() {
-        // The Window isn't available yet. Try again later!
         return AppIconStatus::NotSetTryAgain;
     }
 
-    fn create_hicon_with_scale(
-        unscaled_image: &image::RgbaImage,
-        target_size: i32,
-    ) -> winapi::shared::windef::HICON {
-        let image_scaled = image::imageops::resize(
-            unscaled_image,
-            target_size as _,
-            target_size as _,
-            image::imageops::Lanczos3,
-        );
-
-        // Creating transparent icons with WinApi is a huge mess.
-        // We'd need to go through CreateIconIndirect's ICONINFO struct which then
-        // takes a mask HBITMAP and a color HBITMAP and creating each of these is pain.
-        // Instead we workaround this by creating a png which CreateIconFromResourceEx magically understands.
-        // This is a pretty horrible hack as we spend a lot of time encoding, but at least the code is a lot shorter.
-        let mut image_scaled_bytes: Vec<u8> = Vec::new();
-        if image_scaled
-            .write_to(
-                &mut std::io::Cursor::new(&mut image_scaled_bytes),
-                image::ImageFormat::Png,
+    fn load_or_make_hicon(icon_data: Option<&IconData>, target_size: i32) -> HICON {
+        // SAFETY: Loads icon resource ID 1 from the current module if present.
+        let res = unsafe {
+            LoadImageW(
+                GetModuleHandleW(std::ptr::null()),
+                1 as *const u16,
+                IMAGE_ICON,
+                target_size,
+                target_size,
+                LR_DEFAULTCOLOR,
             )
-            .is_err()
-        {
+        };
+        if !res.is_null() {
+            return res as HICON;
+        }
+        let Some(icon) = icon_data else {
+            return std::ptr::null_mut();
+        };
+        let (w, h) = (icon.width as usize, icon.height as usize);
+        if w == 0 || h == 0 || icon.rgba.len() != w * h * 4 {
             return std::ptr::null_mut();
         }
-
-        // SAFETY: Creating an HICON which should be readonly on our data.
+        let mask_row = w.div_ceil(32) * 4;
+        let mut dib = Vec::with_capacity(40 + w * h * 4 + mask_row * h);
+        dib.extend_from_slice(&40u32.to_le_bytes());
+        dib.extend_from_slice(&(w as i32).to_le_bytes());
+        dib.extend_from_slice(&((2 * h) as i32).to_le_bytes());
+        dib.extend_from_slice(&1u16.to_le_bytes());
+        dib.extend_from_slice(&32u16.to_le_bytes());
+        dib.extend_from_slice(&[0u8; 24]);
+        for y in (0..h).rev() {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                dib.extend_from_slice(&[
+                    icon.rgba[i + 2],
+                    icon.rgba[i + 1],
+                    icon.rgba[i],
+                    icon.rgba[i + 3],
+                ]);
+            }
+        }
+        dib.resize(dib.len() + mask_row * h, 0);
+        // SAFETY: `dib` is a valid 32-bit BI_RGB DIB icon buffer for the call's duration.
         unsafe {
-            winuser::CreateIconFromResourceEx(
-                image_scaled_bytes.as_mut_ptr(),
-                image_scaled_bytes.len() as u32,
-                1,           // Means this is an icon, not a cursor.
-                0x00030000,  // Version number of the HICON
-                target_size, // Note that this method can scale, but it does so *very* poorly. So let's avoid that!
+            CreateIconFromResourceEx(
+                dib.as_ptr(),
+                dib.len() as u32,
+                1,
+                0x00030000,
                 target_size,
-                winuser::LR_DEFAULTCOLOR,
+                target_size,
+                LR_DEFAULTCOLOR,
             )
         }
     }
 
-    let unscaled_image = match icon_data.to_image() {
-        Ok(unscaled_image) => unscaled_image,
-        Err(err) => {
-            log::warn!("Invalid icon: {err}");
-            return AppIconStatus::NotSetIgnored;
-        }
-    };
-
-    // Only setting ICON_BIG with the icon size for big icons (SM_CXICON) works fine
-    // but the scaling it does then for the small icon is pretty bad.
-    // Instead we set the correct sizes manually and take over the scaling ourselves.
-    // For this to work we first need to set the big icon and then the small one.
-    //
-    // Note that ICON_SMALL may be used even if we don't render a title bar as it may be used in alt+tab!
-    {
-        // SAFETY: WinAPI getter function with no known side effects.
-        let icon_size_big = unsafe { winuser::GetSystemMetrics(winuser::SM_CXICON) };
-        let icon_big = create_hicon_with_scale(&unscaled_image, icon_size_big);
-        if icon_big.is_null() {
-            log::warn!("Failed to create HICON (for big icon) from embedded png data.");
-            return AppIconStatus::NotSetIgnored; // We could try independently with the small icon but what's the point, it would look bad!
-        } else {
-            // SAFETY: Unsafe WinApi function, takes objects previously created with WinAPI, all checked for null prior.
-            unsafe {
-                winuser::SendMessageW(
-                    window_handle,
-                    winuser::WM_SETICON,
-                    winuser::ICON_BIG as usize,
-                    icon_big as isize,
-                );
-            }
-        }
-    }
-    {
-        // SAFETY: WinAPI getter function with no known side effects.
-        let icon_size_small = unsafe { winuser::GetSystemMetrics(winuser::SM_CXSMICON) };
-        let icon_small = create_hicon_with_scale(&unscaled_image, icon_size_small);
-        if icon_small.is_null() {
-            log::warn!("Failed to create HICON (for small icon) from embedded png data.");
-            return AppIconStatus::NotSetIgnored;
-        } else {
-            // SAFETY: Unsafe WinApi function, takes objects previously created with WinAPI, all checked for null prior.
-            unsafe {
-                winuser::SendMessageW(
-                    window_handle,
-                    winuser::WM_SETICON,
-                    winuser::ICON_SMALL as usize,
-                    icon_small as isize,
-                );
-            }
+    // SAFETY: Win32 metric queries with no side effects.
+    let icon_size_big = unsafe { GetSystemMetrics(SM_CXICON) };
+    let icon_big = load_or_make_hicon(icon_data, icon_size_big);
+    if !icon_big.is_null() {
+        // SAFETY: Valid window handle and HICON.
+        unsafe {
+            SendMessageW(window_handle, WM_SETICON, ICON_BIG as usize, icon_big as isize);
         }
     }
 
-    // It _probably_ worked out.
-    AppIconStatus::Set
+    // SAFETY: Win32 metric query with no side effects.
+    let icon_size_small = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    let icon_small = load_or_make_hicon(icon_data, icon_size_small);
+    if !icon_small.is_null() {
+        // SAFETY: Valid window handle and HICON.
+        unsafe {
+            SendMessageW(
+                window_handle,
+                WM_SETICON,
+                ICON_SMALL as usize,
+                icon_small as isize,
+            );
+        }
+    }
+
+    if icon_big.is_null() && icon_small.is_null() {
+        AppIconStatus::NotSetIgnored
+    } else {
+        AppIconStatus::Set
+    }
 }
 
 /// Set icon & app title for `MacOS` applications.

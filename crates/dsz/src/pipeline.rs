@@ -97,7 +97,7 @@ impl Rest {
 
     /// Accelerometer axes gravity mostly runs along over the run.
     fn upright_axes(&self) -> [bool; 3] {
-        let mid: Vec<f32> = (0..3).map(|k| (self.accel_lo[k] + self.accel_hi[k]) * 0.5).collect();
+        let mid = [0, 1, 2].map(|k| (self.accel_lo[k] + self.accel_hi[k]) * 0.5);
         let len = (mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2]).sqrt();
         [0, 1, 2].map(|k| mid[k].abs() > 0.7 * len)
     }
@@ -204,9 +204,7 @@ impl Gyro {
                 if now.duration_since(self.still_since.unwrap()) > Duration::from_millis(1500)
                     && self.still_n > 100
                 {
-                    let avg: Vec<f32> = (0..3)
-                        .map(|k| (self.still_sum[k] / self.still_n as f64) as f32)
-                        .collect();
+                    let avg = [0, 1, 2].map(|k| (self.still_sum[k] / self.still_n as f64) as f32);
                     for k in 0..3 {
                         self.bias[k] = if self.calibrated {
                             self.bias[k] * 0.6 + avg[k] * 0.4
@@ -847,11 +845,12 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
         Action::NextProfile => engine.cycle_profile(device, 1),
         Action::PreviousProfile => engine.cycle_profile(device, -1),
         Action::ToggleGyroMouse => {
-            let mut t = device.toggles.lock();
-            let on = !t.gyro_toggled_on;
-            t.gyro_toggled_on = on;
-            t.gyro = Some(on);
-            drop(t);
+            let mut on = false;
+            device.toggles.update(|t| {
+                on = !t.gyro_toggled_on;
+                t.gyro_toggled_on = on;
+                t.gyro = Some(on);
+            });
             engine.toast(if on {
                 crate::i18n::tr("Gyro on")
             } else {
@@ -860,7 +859,7 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
         }
         Action::ToggleTouchpadMouse => {
             let live = device.live.lock().touch_mouse_active;
-            device.toggles.lock().touchpad = Some(!live);
+            device.toggles.update(|t| t.touchpad = Some(!live));
             engine.toast(if live {
                 crate::i18n::tr("Touchpad mouse off")
             } else {
@@ -1134,7 +1133,7 @@ impl Pipeline {
             .clamp(0.001, 0.03);
         self.last_at = Some(now);
 
-        let toggles = *device.toggles.lock();
+        let toggles = device.toggles.load();
 
         // Gyro
         if device.calibrate_request.swap(false, Ordering::AcqRel) {
@@ -1225,9 +1224,7 @@ impl Pipeline {
             && (profile.lighting.mute_led == MuteLed::Toggle
                 || (device.microphone.enabled() && profile.microphone.mute_button))
         {
-            let mut t = device.toggles.lock();
-            t.mute_engaged = !t.mute_engaged;
-            drop(t);
+            device.toggles.update(|t| t.mute_engaged = !t.mute_engaged);
             // Gate capture immediately: the idle media clock can otherwise
             // sleep for 100 ms after the Mute LED has already changed.
             if device.microphone.enabled() {

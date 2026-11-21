@@ -10,13 +10,70 @@ mod icon_art;
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     build_opus(&manifest.join("..").join("..").join("vendor").join("opus"));
+    build_i18n(&manifest, &out);
     println!("cargo:rerun-if-changed=src/icon_art.rs");
     println!("cargo:rerun-if-changed=assets/pads.json");
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         embed_resources(&out);
     }
+}
+
+/// Generate a single deduplicated static lookup table for all bundled locales.
+/// Avoids storing 3 copies of every English key in `.rdata` and removes
+/// runtime JSON parsing + `BTreeMap` allocations.
+fn build_i18n(manifest: &Path, out: &Path) {
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+
+    let locales = manifest.join("locales");
+    let load = |name: &str| -> BTreeMap<String, String> {
+        let p = locales.join(name);
+        println!("cargo:rerun-if-changed={}", p.display());
+        let text = std::fs::read_to_string(&p).expect("read locale json");
+        serde_json::from_str(&text).expect("parse locale json")
+    };
+    let pt = load("pt-BR.json");
+    let es = load("es.json");
+    let zh = load("zh-CN.json");
+
+    let mut keys: Vec<&str> = pt
+        .keys()
+        .chain(es.keys())
+        .chain(zh.keys())
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+
+    let mut code = String::with_capacity(200_000);
+    let write_slice = |code: &mut String, name: &str, items: &[&str]| {
+        let _ = writeln!(code, "static {name}: &[&str] = &[");
+        for s in items {
+            let _ = writeln!(code, "    {s:?},");
+        }
+        code.push_str("];\n");
+    };
+
+    write_slice(&mut code, "KEYS", &keys);
+    let pt_vals: Vec<&str> = keys
+        .iter()
+        .map(|k| pt.get(*k).map(String::as_str).unwrap_or(*k))
+        .collect();
+    let es_vals: Vec<&str> = keys
+        .iter()
+        .map(|k| es.get(*k).map(String::as_str).unwrap_or(*k))
+        .collect();
+    let zh_vals: Vec<&str> = keys
+        .iter()
+        .map(|k| zh.get(*k).map(String::as_str).unwrap_or(*k))
+        .collect();
+    write_slice(&mut code, "PT_BR", &pt_vals);
+    write_slice(&mut code, "ES", &es_vals);
+    write_slice(&mut code, "ZH_CN", &zh_vals);
+
+    std::fs::write(out.join("i18n_table.rs"), code).expect("write i18n_table.rs");
 }
 
 /// Source files listed under `var` in one of libopus's `*_sources.mk`.
@@ -44,7 +101,9 @@ fn mk_list(dir: &Path, mk: &str, var: &str) -> Vec<PathBuf> {
 }
 
 /// libopus, float build, portable C (no CPU dispatch): two 10 ms frames
-/// per speaker report are cheap enough without SIMD.
+/// per speaker report are cheap enough without SIMD. Excludes multistream,
+/// projection, and mapping-matrix sources, and enables `/Gy` `/Gw` so
+/// `/OPT:REF,ICF` strips unreferenced code and tables.
 fn build_opus(dir: &Path) {
     println!("cargo:rerun-if-changed={}", dir.display());
     let mut files = Vec::new();
@@ -52,10 +111,18 @@ fn build_opus(dir: &Path) {
         ("celt_sources.mk", "CELT_SOURCES"),
         ("silk_sources.mk", "SILK_SOURCES"),
         ("silk_sources.mk", "SILK_SOURCES_FLOAT"),
-        ("opus_sources.mk", "OPUS_SOURCES"),
         ("opus_sources.mk", "OPUS_SOURCES_FLOAT"),
     ] {
         files.extend(mk_list(dir, mk, var));
+    }
+    for src in [
+        "src/opus.c",
+        "src/opus_decoder.c",
+        "src/opus_encoder.c",
+        "src/extensions.c",
+        "src/repacketizer.c",
+    ] {
+        files.push(dir.join(src));
     }
     let version = std::fs::read_to_string(dir.join("package_version"))
         .ok()
@@ -74,6 +141,8 @@ fn build_opus(dir: &Path) {
         .define("HAVE_LRINT", None)
         .define("HAVE_LRINTF", None)
         .define("PACKAGE_VERSION", format!("\"{version}\"").as_str())
+        .flag_if_supported("/Gy")
+        .flag_if_supported("/Gw")
         .opt_level(2)
         .warnings(false)
         .compile("opus");

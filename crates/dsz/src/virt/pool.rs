@@ -105,6 +105,7 @@ struct Parked {
     /// Its own nodes, hidden from all but explorer.exe and Game Bar.
     ids: Vec<String>,
     apps: Vec<std::path::PathBuf>,
+    apps_checked: Instant,
     since: Instant,
     checked: Instant,
     /// Hidden before Windows first saw it: nothing running then found it.
@@ -117,11 +118,13 @@ struct Parked {
 
 impl Parked {
     fn visible() -> Parked {
+        let now = Instant::now();
         Parked {
             ids: Vec::new(),
             apps: Vec::new(),
-            since: Instant::now(),
-            checked: Instant::now(),
+            apps_checked: now,
+            since: now,
+            checked: now,
             born_hidden: false,
             hidden_at: SystemTime::now(),
         }
@@ -496,7 +499,16 @@ impl Pool {
                 ids.push(id);
             }
         }
-        let apps = super::companion::readers();
+        let now = Instant::now();
+        let refresh_apps = parked.as_ref().is_none_or(|p| {
+            p.apps.is_empty() || now.saturating_duration_since(p.apps_checked) >= PARK_EVERY_LATE
+        });
+        let (apps, apps_checked) = if refresh_apps {
+            (super::companion::readers(), now)
+        } else {
+            let p = parked.as_ref().unwrap();
+            (p.apps.clone(), p.apps_checked)
+        };
         let same = parked.as_ref().is_some_and(|p| p.ids == ids && p.apps == apps);
         if !same {
             if let Err(e) = engine.hider.set_with_apps(key, ids.clone(), apps.clone()) {
@@ -520,8 +532,9 @@ impl Pool {
         *parked = Some(Parked {
             ids,
             apps,
+            apps_checked,
             since,
-            checked: Instant::now(),
+            checked: now,
             born_hidden,
             hidden_at,
         });
@@ -584,6 +597,7 @@ impl Pool {
             raw_check: Mutex::new(RawCheck::new()),
             parked: Mutex::new(Some(Parked {
                 apps: if hidden.is_empty() { Vec::new() } else { apps },
+                apps_checked: Instant::now(),
                 ids: hidden,
                 since: Instant::now(),
                 checked: Instant::now() - PARK_EVERY_LATE,

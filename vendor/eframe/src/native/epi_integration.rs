@@ -253,6 +253,45 @@ impl EpiIntegration {
             self.can_drag_window = true;
         }
 
+        #[cfg(target_os = "windows")]
+        if let winit::event::WindowEvent::KeyboardInput {
+            event:
+                winit::event::KeyEvent {
+                    state: winit::event::ElementState::Pressed,
+                    logical_key,
+                    physical_key,
+                    ..
+                },
+            ..
+        } = event
+        {
+            let mods = egui_winit.egui_input().modifiers;
+            let is_paste = matches!(
+                logical_key,
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Paste)
+            ) || (mods.ctrl
+                && !mods.alt
+                && (matches!(
+                    logical_key,
+                    winit::keyboard::Key::Character(s) if s.eq_ignore_ascii_case("v")
+                ) || matches!(
+                    physical_key,
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyV)
+                )))
+                || (mods.shift
+                    && !mods.ctrl
+                    && !mods.alt
+                    && matches!(
+                        logical_key,
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Insert)
+                    ));
+            if is_paste {
+                if let Some(text) = win_clipboard_get_text() {
+                    egui_winit.set_clipboard_text(text);
+                }
+            }
+        }
+
         egui_winit.on_window_event(window, event)
     }
 
@@ -363,8 +402,91 @@ impl EpiIntegration {
 }
 
 fn load_default_egui_icon() -> egui::IconData {
-    profiling::function_scope!();
-    crate::icon_data::from_png_bytes(&include_bytes!("../../data/icon.png")[..]).unwrap()
+    egui::IconData::default()
+}
+
+/// Read UTF-16 text from the Windows clipboard (`CF_UNICODETEXT`).
+#[cfg(target_os = "windows")]
+#[expect(unsafe_code)]
+pub(crate) fn win_clipboard_get_text() -> Option<String> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, OpenClipboard,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+
+    const CF_UNICODETEXT: u32 = 13;
+
+    // SAFETY: Standard Win32 clipboard sequence; lock/unlock and close are paired.
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let result = (|| {
+            let handle = GetClipboardData(CF_UNICODETEXT);
+            if handle.is_null() {
+                return None;
+            }
+            let ptr = GlobalLock(handle) as *const u16;
+            if ptr.is_null() {
+                return None;
+            }
+            let mut len = 0usize;
+            while *ptr.add(len) != 0 {
+                len += 1;
+            }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            GlobalUnlock(handle);
+            Some(text)
+        })();
+        CloseClipboard();
+        result
+    }
+}
+
+/// Write UTF-16 text to the Windows clipboard (`CF_UNICODETEXT`).
+#[cfg(target_os = "windows")]
+#[expect(unsafe_code)]
+pub(crate) fn win_clipboard_set_text(text: &str) {
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = wide.len() * std::mem::size_of::<u16>();
+
+    // SAFETY: Allocates moveable global memory, copies NUL-terminated UTF-16, hands ownership to Windows on success.
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return;
+        }
+        EmptyClipboard();
+        let mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if !mem.is_null() {
+            let ptr = GlobalLock(mem) as *mut u16;
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+                GlobalUnlock(mem);
+                if SetClipboardData(CF_UNICODETEXT, mem).is_null() {
+                    GlobalFree(mem);
+                }
+            } else {
+                GlobalFree(mem);
+            }
+        }
+        CloseClipboard();
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn win_clipboard_handle_output(platform_output: &egui::PlatformOutput) {
+    for cmd in &platform_output.commands {
+        if let egui::OutputCommand::CopyText(text) = cmd {
+            win_clipboard_set_text(text);
+        }
+    }
 }
 
 #[cfg(feature = "persistence")]

@@ -408,9 +408,104 @@ pub(crate) fn has_our_serial(id: &str) -> bool {
 
 // ------------------------------------------------------------------ audio
 
+/// Fixed-capacity ring buffer of interleaved `i16` samples, replacing
+/// per-sample `VecDeque::push_back` / `drain`.
+struct SampleRing {
+    buf: Box<[i16]>,
+    head: usize,
+    len: usize,
+}
+
+impl SampleRing {
+    fn new(cap: usize) -> Self {
+        SampleRing {
+            buf: vec![0i16; cap].into_boxed_slice(),
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn cap(&self) -> usize {
+        self.buf.len()
+    }
+
+    fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+
+    fn drop_front(&mut self, n: usize) {
+        let n = n.min(self.len);
+        self.head = (self.head + n) % self.cap();
+        self.len -= n;
+    }
+
+    fn read_into(&mut self, dst: &mut [i16]) -> usize {
+        let n = dst.len().min(self.len);
+        if n == 0 {
+            return 0;
+        }
+        let cap = self.cap();
+        let first = n.min(cap - self.head);
+        dst[..first].copy_from_slice(&self.buf[self.head..self.head + first]);
+        if first < n {
+            dst[first..n].copy_from_slice(&self.buf[..n - first]);
+        }
+        self.head = (self.head + n) % cap;
+        self.len -= n;
+        n
+    }
+
+    fn push_pcm_le(&mut self, pcm: &[u8], samples: usize, gain: f32) {
+        if samples == 0 {
+            return;
+        }
+        let cap = self.cap();
+        // If incoming data exceeds capacity, keep only the tail that fits.
+        let skip = samples.saturating_sub(cap);
+        let take = samples - skip;
+        let over = (self.len + take).saturating_sub(cap);
+        if over > 0 {
+            self.drop_front(over);
+        }
+        let mut tail = (self.head + self.len) % cap;
+        let chunks = &pcm.as_chunks::<2>().0[skip..skip + take];
+        if gain == 1.0 {
+            let mut off = 0;
+            while off < take {
+                let run = (take - off).min(cap - tail);
+                for (dst, c) in self.buf[tail..tail + run]
+                    .iter_mut()
+                    .zip(&chunks[off..off + run])
+                {
+                    *dst = i16::from_le_bytes(*c);
+                }
+                tail += run;
+                if tail == cap {
+                    tail = 0;
+                }
+                off += run;
+            }
+        } else {
+            for (k, c) in chunks.iter().enumerate() {
+                let mut v = i16::from_le_bytes(*c);
+                if (skip + k) % d::RENDER_CHANNELS < 2 {
+                    v = (v as f32 * gain) as i16;
+                }
+                self.buf[tail] = v;
+                tail += 1;
+                if tail == cap {
+                    tail = 0;
+                }
+            }
+        }
+        self.len += take;
+    }
+}
+
 /// The game's 4-channel render stream, as the haptics streamer reads it.
 pub struct AudioRing {
-    q: Mutex<VecDeque<i16>>,
+    q: Mutex<SampleRing>,
     pub frames_in: AtomicU64,
     /// When PCM last arrived, and the pauses between arrivals.
     arrivals: Mutex<(Option<Instant>, ArrivalGaps)>,
@@ -467,7 +562,7 @@ impl RenderStats {
 impl AudioRing {
     fn new() -> AudioRing {
         AudioRing {
-            q: Mutex::new(VecDeque::with_capacity(RING_FRAMES * d::RENDER_CHANNELS)),
+            q: Mutex::new(SampleRing::new(RING_FRAMES * d::RENDER_CHANNELS)),
             frames_in: AtomicU64::new(0),
             arrivals: Mutex::new((None, ArrivalGaps::default())),
             transport: Mutex::new(RenderStats::default()),
@@ -484,23 +579,10 @@ impl AudioRing {
                 a.1.note(now - last);
             }
         }
-        let mut q = self.q.lock();
         let frames = pcm.len() / (2 * d::RENDER_CHANNELS);
-        for (i, c) in pcm
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .take(frames * d::RENDER_CHANNELS)
-            .enumerate()
-        {
-            let mut v = i16::from_le_bytes([c[0], c[1]]);
-            if i % d::RENDER_CHANNELS < 2 && gain != 1.0 {
-                v = (v as f32 * gain) as i16;
-            }
-            q.push_back(v);
-        }
-        let over = q.len().saturating_sub(RING_FRAMES * d::RENDER_CHANNELS);
-        q.drain(..over);
+        self.q
+            .lock()
+            .push_pcm_le(pcm, frames * d::RENDER_CHANNELS, gain);
         self.frames_in.fetch_add(frames as u64, Ordering::Relaxed);
     }
 
@@ -513,20 +595,16 @@ impl AudioRing {
 
 impl PcmSource for AudioRing {
     fn filled_frames(&self) -> usize {
-        self.q.lock().len() / d::RENDER_CHANNELS
+        self.q.lock().len / d::RENDER_CHANNELS
     }
     fn read(&self, out: &mut [i16]) -> usize {
         let mut q = self.q.lock();
-        let frames = (out.len() / d::RENDER_CHANNELS).min(q.len() / d::RENDER_CHANNELS);
-        for (o, v) in out.iter_mut().zip(q.drain(..frames * d::RENDER_CHANNELS)) {
-            *o = v;
-        }
+        let frames = (out.len() / d::RENDER_CHANNELS).min(q.len / d::RENDER_CHANNELS);
+        q.read_into(&mut out[..frames * d::RENDER_CHANNELS]);
         frames
     }
     fn drop_frames(&self, n: usize) {
-        let mut q = self.q.lock();
-        let n = (n * d::RENDER_CHANNELS).min(q.len());
-        q.drain(..n);
+        self.q.lock().drop_front(n * d::RENDER_CHANNELS);
     }
     fn take_arrival_gaps(&self) -> ArrivalGaps {
         std::mem::take(&mut self.arrivals.lock().1)
@@ -2139,6 +2217,29 @@ mod tests {
         std::thread::sleep(ArrivalGaps::LATE + Duration::from_millis(5));
         r.push(&frame, 1.0);
         assert_eq!(r.take_arrival_gaps().count, 0, "a closed stream is no pause");
+    }
+
+    #[test]
+    fn sample_ring_wraps_and_reads_slices() {
+        let mut ring = SampleRing::new(8);
+        let pcm: Vec<u8> = [1i16, 2, 3, 4, 5, 6, 7, 8]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        ring.push_pcm_le(&pcm, 8, 1.0);
+        let mut out = [0i16; 6];
+        assert_eq!(ring.read_into(&mut out), 6);
+        assert_eq!(out, [1, 2, 3, 4, 5, 6]);
+        // Wrap around the ring end and verify slice-split read.
+        let pcm2: Vec<u8> = [9i16, 10, 11, 12, 13, 14]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        ring.push_pcm_le(&pcm2, 6, 1.0);
+        let mut out2 = [0i16; 8];
+        assert_eq!(ring.read_into(&mut out2), 8);
+        assert_eq!(out2, [7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(ring.len, 0);
     }
 
     #[test]

@@ -208,10 +208,40 @@ pub fn run(engine: Arc<Engine>) {
     let mut stack: Vec<String> = Vec::new();
     // Process id -> scan result, checked once per process.
     let mut checked: HashMap<u32, Checked> = HashMap::new();
+    let mut procs: Vec<(u32, String)> = Vec::with_capacity(256);
+    let mut pids: Vec<u32> = Vec::with_capacity(256);
+    let mut prev_pids: Vec<u32> = Vec::new();
+    let mut pid_set: HashSet<u32> = HashSet::with_capacity(256);
+    let mut names: HashSet<String> = HashSet::with_capacity(256);
+    let mut ds_dirs: HashSet<String> = HashSet::new();
+    let mut ds_games: Vec<(String, String)> = Vec::new();
+    let mut plain_games: Vec<String> = Vec::new();
+    let mut last_key: Option<(u64, u64, bool)> = None;
+    let mut last_wait = 1500u64;
+
     while !engine.shutdown.load(Ordering::Acquire) {
-        let procs = crate::platform::process_list();
-        let names: std::collections::HashSet<String> =
-            procs.iter().map(|(_, n)| n.clone()).collect();
+        crate::platform::process_list_into(&mut procs);
+        pids.clear();
+        pids.extend(procs.iter().map(|(p, _)| *p));
+        pids.sort_unstable();
+        let dismissed_some = engine.game_dismissed.lock().is_some();
+        let cur_key = (
+            engine.settings_revision(),
+            engine.profiles.revision(),
+            dismissed_some,
+        );
+        if last_key == Some(cur_key) && pids == prev_pids {
+            std::thread::sleep(Duration::from_millis(last_wait));
+            continue;
+        }
+        prev_pids.clear();
+        prev_pids.extend_from_slice(&pids);
+        last_key = Some(cur_key);
+
+        names.clear();
+        for (_, n) in &procs {
+            names.insert(n.clone());
+        }
 
         let (auto, rules, auto_ds, ds_profile, fallback_pad) = {
             let s = engine.settings.read();
@@ -226,10 +256,12 @@ pub fn run(engine: Arc<Engine>) {
         let fallback_on = matches!(fallback_pad, FallbackPad::Xbox360 | FallbackPad::DualShock4);
         // Games without a rule. Programs already running when the app
         // starts are checked too, so a game started first still counts.
-        let mut ds_games: Vec<(String, String)> = Vec::new();
-        let mut plain_games: Vec<String> = Vec::new();
+        ds_games.clear();
+        plain_games.clear();
         if auto && (auto_ds || fallback_on) {
-            checked.retain(|pid, _| procs.iter().any(|(p, _)| p == pid));
+            pid_set.clear();
+            pid_set.extend(pids.iter().copied());
+            checked.retain(|pid, _| pid_set.contains(pid));
             for (pid, name) in &procs {
                 if rules
                     .iter()
@@ -243,11 +275,14 @@ pub fn run(engine: Arc<Engine>) {
                     })
                 });
             }
-            let ds_dirs: HashSet<String> = checked
-                .values()
-                .filter(|c| c.dualsense.is_some())
-                .filter_map(|c| c.dir.clone())
-                .collect();
+            ds_dirs.clear();
+            for c in checked.values() {
+                if c.dualsense.is_some() {
+                    if let Some(d) = &c.dir {
+                        ds_dirs.insert(d.clone());
+                    }
+                }
+            }
             for (pid, name) in &procs {
                 if rules
                     .iter()
@@ -383,12 +418,12 @@ pub fn run(engine: Arc<Engine>) {
                 d.identify_light();
             }
         }
-        let wait = if rules.is_empty() && !auto_ds && !fallback_on {
+        last_wait = if rules.is_empty() && !auto_ds && !fallback_on {
             3000
         } else {
             1500
         };
-        std::thread::sleep(Duration::from_millis(wait));
+        std::thread::sleep(Duration::from_millis(last_wait));
     }
 }
 

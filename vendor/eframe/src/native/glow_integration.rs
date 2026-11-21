@@ -646,6 +646,8 @@ impl GlowWinitRunning<'_> {
         let gl_surface = viewport.gl_surface.as_ref().unwrap();
         let egui_winit = viewport.egui_winit.as_mut().unwrap();
 
+        #[cfg(target_os = "windows")]
+        super::epi_integration::win_clipboard_handle_output(&platform_output);
         egui_winit.handle_platform_output(&window, platform_output);
 
         let clipped_primitives = integration.egui_ctx.tessellate(shapes, pixels_per_point);
@@ -691,7 +693,12 @@ impl GlowWinitRunning<'_> {
                         egui_winit.egui_input_mut().events.push(egui::Event::Copy);
                     }
                     ActionRequested::Paste => {
-                        if let Some(contents) = egui_winit.clipboard_text() {
+                        #[cfg(target_os = "windows")]
+                        let contents = super::epi_integration::win_clipboard_get_text()
+                            .or_else(|| egui_winit.clipboard_text());
+                        #[cfg(not(target_os = "windows"))]
+                        let contents = egui_winit.clipboard_text();
+                        if let Some(contents) = contents {
                             let contents = contents.replace("\r\n", "\n");
                             if !contents.is_empty() {
                                 egui_winit
@@ -1536,6 +1543,8 @@ fn render_immediate_viewport(
         }
     }
 
+    #[cfg(target_os = "windows")]
+    super::epi_integration::win_clipboard_handle_output(&platform_output);
     egui_winit.handle_platform_output(window, platform_output);
 
     event_loop_context::with_current_event_loop(|event_loop| {

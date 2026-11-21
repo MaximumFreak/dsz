@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::device::Device;
 use crate::haptics::audio::AudioHub;
@@ -62,6 +62,8 @@ pub struct Engine {
     pub pads: crate::virt::Pool,
     /// The helper Xbox pad for Xbox buttons on profiles without one.
     pub companion: crate::virt::companion::Companion,
+    /// Woken by `WM_DEVICECHANGE` (HID arrival/removal) or shutdown.
+    hotplug_wake: (Mutex<bool>, Condvar),
 }
 
 /// How often HidHide's settings are checked against what DSZ set up. A
@@ -137,7 +139,21 @@ impl Engine {
             open_failures: Mutex::new(HashMap::new()),
             pads: Default::default(),
             companion: Default::default(),
+            hotplug_wake: (Mutex::new(false), Condvar::new()),
         })
+    }
+
+    pub fn wake_hotplug(&self) {
+        *self.hotplug_wake.0.lock() = true;
+        self.hotplug_wake.1.notify_all();
+    }
+
+    fn wait_hotplug(&self, timeout: Duration) {
+        let mut woken = self.hotplug_wake.0.lock();
+        if !*woken {
+            self.hotplug_wake.1.wait_for(&mut woken, timeout);
+        }
+        *woken = false;
     }
 
     pub fn settings_revision(&self) -> u64 {
@@ -499,7 +515,7 @@ impl Engine {
                         e.settings_save_later();
                     }
                     drop(e);
-                    std::thread::sleep(Duration::from_millis(if watcher.busy() { 100 } else { 500 }));
+                    watcher.wait();
                 }
             })
             .unwrap();
@@ -561,7 +577,14 @@ impl Engine {
                 last_hide_check = Instant::now();
                 self.repair_hidhide();
             }
-            std::thread::sleep(Duration::from_millis(700));
+            // Event-driven via WM_DEVICECHANGE on the tray window; use a short
+            // retry interval only while an open failure backoff is active.
+            let wait = if !self.open_failures.lock().is_empty() {
+                Duration::from_millis(700)
+            } else {
+                HIDE_CHECK_EVERY
+            };
+            self.wait_hotplug(wait);
         }
         for d in self.device_list() {
             d.stop.store(true, Ordering::Release);
@@ -607,6 +630,7 @@ impl Engine {
     /// Stop everything and leave controllers calm. Waits briefly.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        self.wake_hotplug();
         for d in self.device_list() {
             d.stop.store(true, Ordering::Release);
         }

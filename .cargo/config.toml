@@ -1,10 +1,10 @@
 # Static CRT: no vcruntime140.dll dependency, so the exe runs on PCs without the VC++ redistributable.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/OPT:REF", "-C", "link-arg=/OPT:ICF"]
 
 # The same for the native Windows on ARM build (dsz-arm64.exe):
 # `rustup target add aarch64-pc-windows-msvc` and Visual Studio's
 # "MSVC ARM64/ARM64EC build tools" component, then
 # `cargo build --release --target aarch64-pc-windows-msvc`.
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/OPT:REF", "-C", "link-arg=/OPT:ICF"]

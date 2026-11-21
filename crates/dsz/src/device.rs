@@ -465,12 +465,65 @@ impl Feedback {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Toggles {
     pub gyro: Option<bool>,
     pub touchpad: Option<bool>,
     pub mute_engaged: bool,
     pub gyro_toggled_on: bool,
+}
+
+/// Lock-free atomic storage for [`Toggles`], read on every HID input report.
+#[derive(Default)]
+pub struct AtomicToggles(AtomicU32);
+
+impl AtomicToggles {
+    fn pack(t: Toggles) -> u32 {
+        let opt = |o: Option<bool>| match o {
+            None => 0u32,
+            Some(false) => 1,
+            Some(true) => 2,
+        };
+        opt(t.gyro)
+            | (opt(t.touchpad) << 2)
+            | (u32::from(t.mute_engaged) << 4)
+            | (u32::from(t.gyro_toggled_on) << 5)
+    }
+
+    fn unpack(v: u32) -> Toggles {
+        let opt = |bits: u32| match bits & 3 {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        };
+        Toggles {
+            gyro: opt(v),
+            touchpad: opt(v >> 2),
+            mute_engaged: (v & (1 << 4)) != 0,
+            gyro_toggled_on: (v & (1 << 5)) != 0,
+        }
+    }
+
+    #[inline]
+    pub fn load(&self) -> Toggles {
+        Self::unpack(self.0.load(Ordering::Acquire))
+    }
+
+    pub fn update(&self, mut f: impl FnMut(&mut Toggles)) {
+        let mut cur = self.0.load(Ordering::Relaxed);
+        loop {
+            let mut t = Self::unpack(cur);
+            f(&mut t);
+            let next = Self::pack(t);
+            match self
+                .0
+                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Relaxed)
+            {
+                Ok(_) => return,
+                Err(v) => cur = v,
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -528,7 +581,7 @@ pub struct Device {
     pub link: Mutex<Link>,
     pub overrides: Mutex<Overrides>,
     pub feedback: Mutex<Feedback>,
-    pub toggles: Mutex<Toggles>,
+    pub toggles: AtomicToggles,
     /// A profile in use only while a mapping's buttons are held.
     pub held_profile: Mutex<Option<crate::engine::HeldProfile>>,
     pub stream_tx: Sender<StreamPacket>,
@@ -645,7 +698,7 @@ impl Device {
     /// idle-off timer are as if it were off.
     pub fn apply_microphone(&self, mic: &crate::profile::Microphone) {
         let enabled = mic.enabled && self.virt.microphone_ready();
-        let muted = mic.muted || (mic.mute_button && self.toggles.lock().mute_engaged);
+        let muted = mic.muted || (mic.mute_button && self.toggles.load().mute_engaged);
         let listening = self.virt.microphone_open();
         self.set_microphone(enabled, muted || !listening, mic.gain_percent, mic.source);
     }
@@ -1421,7 +1474,7 @@ pub fn run(engine: Arc<Engine>, info: DeviceInfo, id: u64) {
         link: Mutex::new(Link::Opening),
         overrides: Mutex::new(Overrides::default()),
         feedback: Mutex::new(Feedback::default()),
-        toggles: Mutex::new(Toggles::default()),
+        toggles: AtomicToggles::default(),
         held_profile: Mutex::new(None),
         stream_tx: tx,
         stream_rx: rx,
@@ -2002,7 +2055,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         };
         let input = device.live.lock().input;
         let overrides = device.overrides.lock().clone();
-        let toggles = *device.toggles.lock();
+        let toggles = device.toggles.load();
         let mut state = {
             let mut fb = device.feedback.lock();
             fb.prune(now);
@@ -2197,7 +2250,7 @@ impl Device {
             link: Mutex::new(Link::Live),
             overrides: Mutex::new(Overrides::default()),
             feedback: Mutex::new(Feedback::default()),
-            toggles: Mutex::new(Toggles::default()),
+            toggles: AtomicToggles::default(),
             held_profile: Mutex::new(None),
             stream_tx,
             stream_rx,
@@ -2264,6 +2317,28 @@ mod microphone_tests {
     use ds_proto::output::{Microphone, MicrophoneSource};
 
     #[test]
+    fn atomic_toggles_round_trip_every_combination() {
+        let at = AtomicToggles::default();
+        assert_eq!(at.load(), Toggles::default());
+        for gyro in [None, Some(false), Some(true)] {
+            for touchpad in [None, Some(false), Some(true)] {
+                for mute_engaged in [false, true] {
+                    for gyro_toggled_on in [false, true] {
+                        let want = Toggles {
+                            gyro,
+                            touchpad,
+                            mute_engaged,
+                            gyro_toggled_on,
+                        };
+                        at.update(|t| *t = want);
+                        assert_eq!(at.load(), want);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_profile_without_a_usable_microphone_changes_nothing() {
         let d = Device::for_test(Connection::Bluetooth, "");
         let mut mic = crate::profile::Microphone {
@@ -2272,7 +2347,7 @@ mod microphone_tests {
             gain_percent: 50,
             ..Default::default()
         };
-        d.toggles.lock().mute_engaged = true;
+        d.toggles.update(|t| t.mute_engaged = true);
         d.apply_microphone(&mic);
         // On, but with no virtual DualSense to record from.
         mic.enabled = true;

@@ -1,8 +1,10 @@
 //! Helpers for loading [`egui::IconData`].
 
+#[cfg(target_arch = "wasm32")]
 use egui::IconData;
 
 /// Helpers for working with [`IconData`].
+#[cfg(target_arch = "wasm32")]
 pub trait IconDataExt {
     /// Convert into [`image::RgbaImage`]
     ///
@@ -21,12 +23,14 @@ pub trait IconDataExt {
 ///
 /// # Errors
 /// If this is not a valid png.
+#[cfg(target_arch = "wasm32")]
 pub fn from_png_bytes(png_bytes: &[u8]) -> Result<IconData, image::ImageError> {
     profiling::function_scope!();
     let image = image::load_from_memory(png_bytes)?;
     Ok(from_image(image))
 }
 
+#[cfg(target_arch = "wasm32")]
 fn from_image(image: image::DynamicImage) -> IconData {
     let image = image.into_rgba8();
     IconData {
@@ -36,6 +40,7 @@ fn from_image(image: image::DynamicImage) -> IconData {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 impl IconDataExt for IconData {
     fn to_image(&self) -> Result<image::RgbaImage, String> {
         profiling::function_scope!();

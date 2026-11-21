@@ -1,4 +1,4 @@
-//! System-audio capture (WASAPI loopback through cpal) fanned out to every
+//! System-audio capture (direct WASAPI loopback) fanned out to every
 //! controller that wants it. One capture stream serves all controllers.
 
 use std::collections::VecDeque;
@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
+
+use super::wasapi;
 
 /// Half a second at 48 kHz; older audio is dropped.
 const FIFO_MAX: usize = 24_000;
@@ -111,14 +112,17 @@ impl AudioHub {
             .map(|s| s.device.clone())
     }
 
-    fn push(&self, frames: &[[f32; 2]], rate: u32) {
-        let subs: Vec<Arc<Sub>> = self
-            .subs
-            .lock()
-            .iter()
-            .filter_map(|w| w.upgrade())
-            .collect();
-        for s in subs {
+    fn push(&self, frames: &[[f32; 2]], rate: u32, scratch: &mut Vec<Arc<Sub>>) {
+        scratch.clear();
+        {
+            let subs = self.subs.lock();
+            for w in subs.iter() {
+                if let Some(s) = w.upgrade() {
+                    scratch.push(s);
+                }
+            }
+        }
+        for s in scratch.drain(..) {
             s.rate.store(rate, Ordering::Relaxed);
             if !s.queue {
                 continue;
@@ -133,32 +137,15 @@ impl AudioHub {
     }
 
     pub fn output_devices() -> Vec<String> {
-        let host = cpal::default_host();
-        host.output_devices()
-            .map(|it| it.filter_map(|d| d.name().ok()).collect())
-            .unwrap_or_default()
-    }
-
-    fn find_device(name: &str) -> Option<cpal::Device> {
-        let host = cpal::default_host();
-        if name.is_empty() {
-            return host.default_output_device();
-        }
-        host.output_devices()
-            .ok()?
-            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .or_else(|| host.default_output_device())
+        wasapi::output_device_names()
     }
 
     fn default_name() -> String {
-        cpal::default_host()
-            .default_output_device()
-            .and_then(|d| d.name().ok())
-            .unwrap_or_default()
+        wasapi::default_device_name(false)
     }
 
     fn run(self: Arc<Self>) {
-        let mut current: Option<(String, String, cpal::Stream)> = None; // (wanted, resolved name, stream)
+        let mut current: Option<(String, String, wasapi::Stream)> = None; // (wanted, resolved name, stream)
         let failed = Arc::new(AtomicBool::new(false));
         let mut last_check = Instant::now() - Duration::from_secs(10);
         loop {
@@ -214,86 +201,43 @@ impl AudioHub {
         self: &Arc<Self>,
         want: &str,
         failed: Arc<AtomicBool>,
-    ) -> Result<(String, cpal::Stream), String> {
-        let dev = Self::find_device(want).ok_or("no audio output device")?;
-        let name = dev.name().unwrap_or_default();
-        let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
-        let rate = cfg.sample_rate().0;
-        let channels = cfg.channels().max(1);
-        let config: cpal::StreamConfig = cfg.config();
-        let err_flag = failed.clone();
-        let err_fn = move |e: cpal::StreamError| {
-            log::warn!("audio stream error: {e}");
-            err_flag.store(true, Ordering::Release);
-        };
+    ) -> Result<(String, wasapi::Stream), String> {
         let hub = self.clone();
-        let ch = channels as usize;
-        let mut scratch: Vec<[f32; 2]> = Vec::with_capacity(4096);
-        let mut handle = move |data: &[f32]| {
-            scratch.clear();
-            let mut peak = 0f32;
-            for frame in data.chunks_exact(ch) {
-                let (l, r) = if ch == 1 {
-                    (frame[0], frame[0])
-                } else {
-                    (frame[0], frame[1])
-                };
-                peak = peak.max(l.abs()).max(r.abs());
-                scratch.push([l, r]);
-            }
-            let old = f32::from_bits(hub.peak.load(Ordering::Relaxed));
-            hub.peak
-                .store((peak.max(old * 0.85)).to_bits(), Ordering::Relaxed);
-            let prev = f32::from_bits(hub.loudness.load(Ordering::Relaxed));
-            let level = crate::audio_led::next_level(prev, &scratch, rate);
-            hub.loudness.store(level.to_bits(), Ordering::Relaxed);
-            hub.last_audio_ms
-                .store(hub.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
-            hub.push(&scratch, rate);
-        };
-        let stream = match cfg.sample_format() {
-            cpal::SampleFormat::F32 => dev.build_input_stream(
-                &config,
-                move |d: &[f32], _: &cpal::InputCallbackInfo| handle(d),
-                err_fn,
-                None,
-            ),
-            cpal::SampleFormat::I16 => {
-                let mut buf: Vec<f32> = Vec::new();
-                dev.build_input_stream(
-                    &config,
-                    move |d: &[i16], _: &cpal::InputCallbackInfo| {
-                        buf.clear();
-                        buf.extend(d.iter().map(|&s| s as f32 / 32768.0));
-                        handle(&buf)
-                    },
-                    err_fn,
-                    None,
-                )
-            }
-            cpal::SampleFormat::I32 => {
-                let mut buf: Vec<f32> = Vec::new();
-                dev.build_input_stream(
-                    &config,
-                    move |d: &[i32], _: &cpal::InputCallbackInfo| {
-                        buf.clear();
-                        buf.extend(d.iter().map(|&s| s as f32 / 2_147_483_648.0));
-                        handle(&buf)
-                    },
-                    err_fn,
-                    None,
-                )
-            }
-            f => return Err(format!("unsupported sample format {f:?}")),
-        }
-        .map_err(|e| e.to_string())?;
-        stream.play().map_err(|e| e.to_string())?;
-        log::info!("capturing system audio from \"{name}\" at {rate} Hz, {channels} ch");
+        let mut sub_scratch: Vec<Arc<Sub>> = Vec::with_capacity(4);
+        let err_flag = failed.clone();
+        let (info, stream) = wasapi::open_loopback(
+            want,
+            move |frames, rate| {
+                let mut peak = 0f32;
+                for f in frames {
+                    peak = peak.max(f[0].abs()).max(f[1].abs());
+                }
+                let old = f32::from_bits(hub.peak.load(Ordering::Relaxed));
+                hub.peak
+                    .store((peak.max(old * 0.85)).to_bits(), Ordering::Relaxed);
+                let prev = f32::from_bits(hub.loudness.load(Ordering::Relaxed));
+                let level = crate::audio_led::next_level(prev, frames, rate);
+                hub.loudness.store(level.to_bits(), Ordering::Relaxed);
+                hub.last_audio_ms
+                    .store(hub.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+                hub.push(frames, rate, &mut sub_scratch);
+            },
+            move |e| {
+                log::warn!("audio stream error: {e}");
+                err_flag.store(true, Ordering::Release);
+            },
+        )?;
+        let name = info.name;
+        log::info!(
+            "capturing system audio from \"{name}\" at {} Hz, {} ch",
+            info.rate,
+            info.channels
+        );
         *self.status.lock() = CaptureStatus {
             running: true,
             device: name.clone(),
-            rate,
-            channels,
+            rate: info.rate,
+            channels: info.channels,
             error: None,
         };
         Ok((name, stream))

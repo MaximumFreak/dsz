@@ -8,8 +8,11 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::{Condvar, Mutex};
 use windows_sys::core::GUID;
 use windows_sys::Win32::System::Com::*;
 
@@ -17,10 +20,119 @@ use super::win;
 
 const CLSID_MM_DEVICE_ENUMERATOR: GUID = GUID::from_u128(0xBCDE0395_E52F_467C_8E3D_C4579291692E);
 const IID_IMM_DEVICE_ENUMERATOR: GUID = GUID::from_u128(0xA95664D2_9614_4F35_A746_DE8DB63617E6);
+const IID_IMM_NOTIFICATION_CLIENT: GUID = GUID::from_u128(0x7991EEC9_7E89_4D85_8390_6C703CEC60C0);
+const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_C000_000000000046);
 const CLSID_POLICY_CONFIG: GUID = GUID::from_u128(0x870AF99C_171D_4F9E_AF0D_E63DF40C2BC9);
 const IID_IPOLICY_CONFIG: GUID = GUID::from_u128(0xF8679F50_850A_41CF_9C72_430F290290C8);
 /// `PKEY_Device_InstanceId`.
 const PKEY_INSTANCE_ID: GUID = GUID::from_u128(0x78C34FC8_104A_4ACA_9EA4_524D52996E57);
+
+#[repr(C)]
+struct NotifyPropertyKey {
+    fmtid: GUID,
+    pid: u32,
+}
+
+#[repr(C)]
+struct NotifyVtbl {
+    query_interface: unsafe extern "system" fn(*mut NotifyClient, *const GUID, *mut *mut c_void) -> i32,
+    add_ref: unsafe extern "system" fn(*mut NotifyClient) -> u32,
+    release: unsafe extern "system" fn(*mut NotifyClient) -> u32,
+    on_device_state_changed: unsafe extern "system" fn(*mut NotifyClient, *const u16, u32) -> i32,
+    on_device_added: unsafe extern "system" fn(*mut NotifyClient, *const u16) -> i32,
+    on_device_removed: unsafe extern "system" fn(*mut NotifyClient, *const u16) -> i32,
+    on_default_device_changed: unsafe extern "system" fn(*mut NotifyClient, i32, i32, *const u16) -> i32,
+    on_property_value_changed: unsafe extern "system" fn(*mut NotifyClient, *const u16, NotifyPropertyKey) -> i32,
+}
+
+#[repr(C)]
+struct NotifyClient {
+    vtbl: *const NotifyVtbl,
+    refs: AtomicU32,
+    signal: Arc<(Mutex<bool>, Condvar)>,
+}
+
+static NOTIFY_VTBL: NotifyVtbl = NotifyVtbl {
+    query_interface: notify_qi,
+    add_ref: notify_add_ref,
+    release: notify_release,
+    on_device_state_changed: notify_state,
+    on_device_added: notify_added,
+    on_device_removed: notify_removed,
+    on_default_device_changed: notify_default,
+    on_property_value_changed: notify_prop,
+};
+
+unsafe extern "system" fn notify_qi(
+    this: *mut NotifyClient,
+    riid: *const GUID,
+    ppv: *mut *mut c_void,
+) -> i32 {
+    if ppv.is_null() {
+        return -2147467261; // E_POINTER
+    }
+    if !riid.is_null()
+        && (win::same_guid(&*riid, &IID_IUNKNOWN)
+            || win::same_guid(&*riid, &IID_IMM_NOTIFICATION_CLIENT))
+    {
+        notify_add_ref(this);
+        *ppv = this as *mut c_void;
+        0
+    } else {
+        *ppv = null_mut();
+        -2147467262 // E_NOINTERFACE
+    }
+}
+
+unsafe extern "system" fn notify_add_ref(this: *mut NotifyClient) -> u32 {
+    (*this).refs.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+unsafe extern "system" fn notify_release(this: *mut NotifyClient) -> u32 {
+    let prev = (*this).refs.fetch_sub(1, Ordering::Release);
+    if prev == 1 {
+        std::sync::atomic::fence(Ordering::Acquire);
+        drop(Box::from_raw(this));
+        0
+    } else {
+        prev - 1
+    }
+}
+
+fn wake_signal(this: *mut NotifyClient) {
+    let sig = unsafe { &(*this).signal };
+    *sig.0.lock() = true;
+    sig.1.notify_all();
+}
+
+unsafe extern "system" fn notify_state(this: *mut NotifyClient, _: *const u16, _: u32) -> i32 {
+    wake_signal(this);
+    0
+}
+unsafe extern "system" fn notify_added(this: *mut NotifyClient, _: *const u16) -> i32 {
+    wake_signal(this);
+    0
+}
+unsafe extern "system" fn notify_removed(this: *mut NotifyClient, _: *const u16) -> i32 {
+    wake_signal(this);
+    0
+}
+unsafe extern "system" fn notify_default(
+    this: *mut NotifyClient,
+    _: i32,
+    _: i32,
+    _: *const u16,
+) -> i32 {
+    wake_signal(this);
+    0
+}
+unsafe extern "system" fn notify_prop(
+    _: *mut NotifyClient,
+    _: *const u16,
+    _: NotifyPropertyKey,
+) -> i32 {
+    0
+}
 
 /// (data flow, role): render/capture × console/multimedia/communications.
 const SLOTS: [(i32, i32); 6] = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)];
@@ -367,7 +479,35 @@ pub struct Watcher {
     seen: HashMap<String, Instant>,
     /// Endpoints known to be ours or not.
     known: HashMap<String, bool>,
+    /// Reusable per-tick scratch maps.
+    active: [HashMap<String, bool>; 2],
+    unsure: Vec<String>,
+    /// Cached enumerator & notification client (created lazily on the watcher thread).
+    en: Option<Com>,
+    notify_client: Option<*mut NotifyClient>,
+    notify_signal: Arc<(Mutex<bool>, Condvar)>,
     started: bool,
+}
+
+// `Watcher` is constructed on the watcher thread and never shared concurrently;
+// `en` and `notify_client` are created lazily inside `tick()` on the owning MTA thread.
+unsafe impl Send for Watcher {}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        if let Some(client) = self.notify_client.take() {
+            if let Some(en) = &self.en {
+                unsafe {
+                    let unreg: unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32 =
+                        en.method(7);
+                    let _ = unreg(en.0, client as *mut c_void);
+                }
+            }
+            unsafe {
+                notify_release(client);
+            }
+        }
+    }
 }
 
 impl Watcher {
@@ -379,8 +519,51 @@ impl Watcher {
             handled: Default::default(),
             seen: HashMap::new(),
             known: HashMap::new(),
+            active: Default::default(),
+            unsure: Vec::new(),
+            en: None,
+            notify_client: None,
+            notify_signal: Arc::new((Mutex::new(false), Condvar::new())),
             started: false,
         }
+    }
+
+    fn ensure_enumerator(&mut self) -> Option<&Com> {
+        if self.en.is_none() {
+            let en = create(&CLSID_MM_DEVICE_ENUMERATOR, &IID_IMM_DEVICE_ENUMERATOR)?;
+            let client = Box::into_raw(Box::new(NotifyClient {
+                vtbl: &NOTIFY_VTBL,
+                refs: AtomicU32::new(1),
+                signal: self.notify_signal.clone(),
+            }));
+            unsafe {
+                let reg: unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32 = en.method(6);
+                if reg(en.0, client as *mut c_void) >= 0 {
+                    self.notify_client = Some(client);
+                } else {
+                    notify_release(client);
+                }
+            }
+            self.en = Some(en);
+        }
+        self.en.as_ref()
+    }
+
+    /// Wait until an audio endpoint/default change fires or the fallback
+    /// interval elapses (100 ms while settling a fresh arrival, else 5 s).
+    pub fn wait(&self) {
+        let max_wait = if self.busy() {
+            Duration::from_millis(100)
+        } else if self.notify_client.is_some() {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(500)
+        };
+        let mut dirty = self.notify_signal.0.lock();
+        if !*dirty {
+            self.notify_signal.1.wait_for(&mut dirty, max_wait);
+        }
+        *dirty = false;
     }
 
     /// Whether an endpoint appeared recently (worth looking often).
@@ -393,17 +576,19 @@ impl Watcher {
 
     /// Look once and act. True when `prefs` changed.
     pub fn tick(&mut self) -> bool {
-        let Some(en) = create(&CLSID_MM_DEVICE_ENUMERATOR, &IID_IMM_DEVICE_ENUMERATOR) else {
+        if self.ensure_enumerator().is_none() {
             return false;
-        };
+        }
+        let en = self.en.as_ref().unwrap();
         let now = Instant::now();
         // Endpoints present before the first look count as old.
         let old = now.checked_sub(ARRIVAL_WINDOW + SETTLE).unwrap_or(now);
-        let mut active: [HashMap<String, bool>; 2] = Default::default();
-        // Too new to tell whose: a not-ours answer may just be early.
-        let mut unsure: Vec<String> = Vec::new();
-        for (f, map) in active.iter_mut().enumerate() {
-            for id in active_endpoints(&en, f as i32) {
+        self.active[0].clear();
+        self.active[1].clear();
+        self.unsure.clear();
+        for f in 0..2 {
+            let map = &mut self.active[f];
+            for id in active_endpoints(en, f as i32) {
                 let first = *self
                     .seen
                     .entry(id.clone())
@@ -411,11 +596,11 @@ impl Watcher {
                 let ours = match self.known.get(&id) {
                     Some(&o) => o,
                     None => {
-                        let o = is_ours(&en, &id);
+                        let o = is_ours(en, &id);
                         if o || now.duration_since(first) >= SETTLE {
                             self.known.insert(id.clone(), o);
                         } else {
-                            unsure.push(id.clone());
+                            self.unsure.push(id.clone());
                         }
                         o
                     }
@@ -423,6 +608,8 @@ impl Watcher {
                 map.insert(id, ours);
             }
         }
+        let active = &self.active;
+        let unsure = &self.unsure;
         self.seen
             .retain(|id, _| active[0].contains_key(id) || active[1].contains_key(id));
         let seen = &self.seen;
@@ -435,7 +622,7 @@ impl Watcher {
         let mut changed = false;
         for (i, &(flow, role)) in SLOTS.iter().enumerate() {
             let here = &active[flow as usize];
-            let Some(cur) = default_id(&en, flow, role) else {
+            let Some(cur) = default_id(en, flow, role) else {
                 continue;
             };
             if !self.started {

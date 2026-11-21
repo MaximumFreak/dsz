@@ -265,10 +265,16 @@ pub fn process_names() -> std::collections::HashSet<String> {
 /// Running processes as (process id, lower-case exe name).
 pub fn process_list() -> Vec<(u32, String)> {
     let mut out = Vec::new();
+    process_list_into(&mut out);
+    out
+}
+
+pub fn process_list_into(out: &mut Vec<(u32, String)>) {
+    out.clear();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
-            return out;
+            return;
         }
         let mut e: PROCESSENTRY32W = std::mem::zeroed();
         e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -290,7 +296,6 @@ pub fn process_list() -> Vec<(u32, String)> {
         }
         CloseHandle(snap);
     }
-    out
 }
 
 /// Full image path of a process, when we may query it.

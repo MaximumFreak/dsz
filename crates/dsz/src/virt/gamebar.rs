@@ -124,8 +124,24 @@ pub fn on_screen() -> bool {
     probe(&mut HashMap::new())
 }
 
+#[cfg(test)]
 fn is_task_view_class(class: &str) -> bool {
-    TASK_VIEW_CLASSES.contains(&class)
+    let wide: Vec<u16> = class.encode_utf16().collect();
+    is_task_view_class_utf16(&wide)
+}
+
+fn is_task_view_class_utf16(class: &[u16]) -> bool {
+    TASK_VIEW_CLASSES.iter().any(|&name| {
+        let mut a = class.iter().copied();
+        let mut b = name.bytes().map(u16::from);
+        loop {
+            match (a.next(), b.next()) {
+                (Some(x), Some(y)) if x == y => {}
+                (None, None) => return true,
+                _ => return false,
+            }
+        }
+    })
 }
 
 fn is_explorer_exe(name: &str) -> bool {
@@ -145,7 +161,7 @@ fn switcher_in_front(names: &mut HashMap<u32, bool>) -> Option<usize> {
         GetWindowThreadProcessId(hwnd, &mut pid);
         (hwnd as usize, GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32))
     };
-    if pid == 0 || len <= 0 || !is_task_view_class(&String::from_utf16_lossy(&class[..len as usize])) {
+    if pid == 0 || len <= 0 || !is_task_view_class_utf16(&class[..len as usize]) {
         return None;
     }
     let explorer = *names.entry(pid).or_insert_with(|| {
@@ -177,7 +193,7 @@ pub fn run(engine: Arc<Engine>) {
     let mut names_at = Instant::now();
     while !engine.shutdown.load(Ordering::Acquire) {
         // Only a parked Xbox pad acts on it.
-        let wanted = engine.device_list().iter().any(|d| d.virt.has_parked());
+        let wanted = engine.devices.read().iter().any(|d| d.virt.has_parked());
         let now = if wanted {
             if names_at.elapsed() >= NAMES_FOR {
                 names.clear();
@@ -192,7 +208,12 @@ pub fn run(engine: Arc<Engine>) {
             log::info!("Game Bar {}", if now { "opened: controller input goes to it" } else { "closed" });
         }
         task_view = if wanted {
-            task_view_follows(task_view, switcher_in_front(&mut explorers), guide_age())
+            let age = guide_age();
+            if task_view.is_some() || age.is_some_and(|a| a <= GUIDE_OPENS_WITHIN) {
+                task_view_follows(task_view, switcher_in_front(&mut explorers), age)
+            } else {
+                None
+            }
         } else {
             None
         };

@@ -7,7 +7,7 @@
 - **Game haptics and adaptive triggers over Bluetooth.** Games with native DualSense support normally only do this over a USB cable.
 - **Automatic DualSense mode.** When you launch a game, DSZ detects whether it supports the DualSense natively. If it does, DSZ switches to a virtual DualSense, so the game's own haptics and adaptive triggers work. For a Steam, GOG, or Xbox app game that doesn't, you choose the virtual controller: DualShock 4, Xbox 360, or the profile's own. It switches back when the game closes. ([How it works](#automatic-dualsense-switching))
 - **The rest of the controller:** lighting, adaptive triggers in any game, system audio as haptics, touchpad and gyro mouse, button mapping, and per-game profiles.
-- **Extremely fast and lightweight:** a single `.exe` with nothing to install. It starts in about 0.2 s and uses under 1% CPU in the tray. ([Performance](#performance))
+- **Extremely fast and lightweight:** a single ~5.4 MB `.exe` with nothing to install. It starts in under 0.2 s and uses under 1% CPU in the tray. ([Performance](#performance))
 - **Free and open source**, with no account or license check.
 
 ### What to know first
@@ -24,18 +24,18 @@ Measured on one PC with a DualSense Edge over Bluetooth (about 670 input reports
 | | DSZ | Another DualSense app |
 |---|---|---|
 | **Startup** | | |
-| Window visible after launch | about 0.2 s | a few seconds |
-| Virtual controller ready | about 0.2 s | several seconds |
+| Window visible after launch | about 0.16 s | a few seconds |
+| Virtual controller ready | about 0.18 s | several seconds |
 | **Input lag** (controller to virtual controller) | | |
 | Typical | a few hundredths of a ms | about the same |
 | Worst case | under 1 ms | occasional hitches of tens of ms |
 | **Game trigger feedback** (game sends an effect, until the trigger motor moves) | | |
 | Typical | about 30 ms | about 40 ms |
 | **Window open, controller in use** | | |
-| CPU (% of one core) | about 7% | about 3× more |
+| CPU (% of one core) | about 4% | about 5× more |
 | Memory | about 100 MB | about 4× more |
 | **In the tray, game rumble playing** | | |
-| CPU (% of one core) | under 1% | about 2× more |
+| CPU (% of one core) | under 1% | about 2–3× more |
 | Memory | about 100 MB | about 4× more |
 
 Trigger feedback includes both Bluetooth trips and the trigger motor starting, so most of it is the controller itself.
