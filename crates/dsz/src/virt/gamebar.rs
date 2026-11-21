@@ -118,6 +118,12 @@ fn probe(names: &mut HashMap<u32, bool>) -> bool {
     hits >= 4
 }
 
+/// The overlay covers the screen right now. A one-off probe for the log,
+/// separate from the watcher (which only runs for a parked pad).
+pub fn on_screen() -> bool {
+    probe(&mut HashMap::new())
+}
+
 fn is_task_view_class(class: &str) -> bool {
     TASK_VIEW_CLASSES.contains(&class)
 }

@@ -4,15 +4,18 @@ members = ["crates/ds-proto", "crates/dsz"]
 
 [workspace.package]
 edition = "2021"
-version = "0.4.21"
+version = "0.4.22"
 license = "MIT"
 
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level = "s"
+lto = "fat"
 codegen-units = 1
 panic = "unwind"
 strip = true
+
+[profile.release.package.ds-proto]
+opt-level = 3
 
 [profile.dev]
 opt-level = 1

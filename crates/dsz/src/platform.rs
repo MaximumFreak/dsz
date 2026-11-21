@@ -432,6 +432,23 @@ pub fn foreground_elevated() -> bool {
     }
 }
 
+/// File name of the program that owns the window in front, when we may ask.
+pub fn foreground_exe() -> Option<String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let mut pid = 0u32;
+    unsafe {
+        let w = GetForegroundWindow();
+        if w.is_null() {
+            return None;
+        }
+        GetWindowThreadProcessId(w, &mut pid);
+    }
+    if pid == 0 {
+        return None;
+    }
+    process_path(pid).and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+}
+
 /// Start this exe again as administrator, after Windows asks the user.
 /// False when it didn't start (the prompt was declined).
 pub fn start_elevated(args: &str) -> bool {

@@ -1297,6 +1297,62 @@ fn controller_apps(running: &std::collections::HashSet<String>) -> Vec<&'static 
     CONTROLLER_APPS.iter().copied().filter(|a| running.contains(*a)).collect()
 }
 
+/// Input with no controller state for this long shows as "No signal".
+const QUIET_AFTER: Duration = Duration::from_millis(1500);
+/// Log at most this many "No signal" stops per connection.
+const QUIET_LOGS: u32 = 20;
+
+/// What the reader got since the last controller state. Issue 63: Game Bar
+/// opening put a controller on "No signal" and the log said nothing.
+#[derive(Default)]
+struct SinceState {
+    timeouts: u32,
+    errors: u32,
+    bad_crc: u32,
+    other: u32,
+}
+
+impl SinceState {
+    fn describe(&self) -> String {
+        let parts: Vec<String> = [
+            (self.timeouts, "reads timed out"),
+            (self.errors, "reads failed"),
+            (self.bad_crc, "reports failed the CRC"),
+            (self.other, "other packets"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
+        if parts.is_empty() {
+            "nothing read".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
+/// Whether Game Bar is up and which program is in front, for the log.
+fn quiet_context() -> String {
+    format!(
+        "Game Bar {}, window in front: {}",
+        if crate::virt::gamebar::on_screen() { "on screen" } else { "not on screen" },
+        crate::platform::foreground_exe().unwrap_or_else(|| "unknown".to_string())
+    )
+}
+
+#[cfg(test)]
+mod since_state_tests {
+    use super::*;
+
+    #[test]
+    fn names_only_what_happened() {
+        assert_eq!(SinceState::default().describe(), "nothing read");
+        let s = SinceState { timeouts: 15, bad_crc: 2, ..Default::default() };
+        assert_eq!(s.describe(), "15 reads timed out, 2 reports failed the CRC");
+    }
+}
+
 fn quick_charge_disconnect(mac: String) -> bool {
     // Tests record the address. A real one would talk to the Bluetooth radio.
     #[cfg(test)]
@@ -1546,6 +1602,8 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     let mut sensor_ts: Option<u32> = None;
     let mut last_packet = Instant::now();
     let mut last_kind = 0u8;
+    let mut since_state = SinceState::default();
+    let mut quiet_logs = 0u32;
 
     while !device.stop.load(Ordering::Acquire) {
         match reader.read(100) {
@@ -1595,6 +1653,7 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                         let now = Instant::now();
                         device.stats.reports.fetch_add(1, Ordering::Relaxed);
                         count_since += 1;
+                        let silent = now.duration_since(last_input);
                         last_input = now;
                         if !state.full
                             && now.duration_since(last_short_retry) > Duration::from_secs(1)
@@ -1609,12 +1668,23 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                         if is_active(&state, &prev) {
                             *device.last_activity.lock() = now;
                         }
-                        {
+                        let was_quiet = {
                             let mut link = device.link.lock();
+                            let quiet = *link == Link::Quiet;
                             if *link != Link::Live {
                                 *link = Link::Live;
                             }
+                            quiet
+                        };
+                        if was_quiet && quiet_logs <= QUIET_LOGS {
+                            log::info!(
+                                "{} input back after {} ms; {}",
+                                device.model.name(),
+                                silent.as_millis(),
+                                quiet_context()
+                            );
                         }
+                        since_state = SinceState::default();
                         let raw = if device.model.is_dualshock4() {
                             if state.full {
                                 state.sensor_ts =
@@ -1637,8 +1707,10 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                     }
                     Err(ParseError::BadCrc) => {
                         device.stats.crc_errors.fetch_add(1, Ordering::Relaxed);
+                        since_state.bad_crc += 1;
                     }
                     Err(ParseError::NotState(2)) => {
+                        since_state.other += 1;
                         if let Some(packet) = crate::haptics::capture::Capture::packet(buf) {
                             // A voice call is activity even when no buttons
                             // move. Muted/disabled capture retains idle-off.
@@ -1654,10 +1726,10 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                             }
                         }
                     }
-                    Err(_) => {}
+                    Err(_) => since_state.other += 1,
                 }
             }
-            Ok(None) => {}
+            Ok(None) => since_state.timeouts += 1,
             Err(e) => {
                 if hid::is_fatal(&e) {
                     log::info!("input stream closed: {e}");
@@ -1666,6 +1738,7 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                     break;
                 }
                 errors += 1;
+                since_state.errors += 1;
                 if errors % 50 == 1 {
                     log::warn!("read error (retrying): {e}");
                 }
@@ -1673,10 +1746,27 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             }
         }
         let now = Instant::now();
-        if now.duration_since(last_input) > Duration::from_millis(1500) {
-            let mut link = device.link.lock();
-            if *link == Link::Live {
-                *link = Link::Quiet;
+        if now.duration_since(last_input) > QUIET_AFTER {
+            let went_quiet = {
+                let mut link = device.link.lock();
+                let live = *link == Link::Live;
+                if live {
+                    *link = Link::Quiet;
+                }
+                live
+            };
+            if went_quiet {
+                quiet_logs += 1;
+                if quiet_logs <= QUIET_LOGS {
+                    log::warn!(
+                        "{} input stopped: no controller state for {} ms ({}); {}{}",
+                        device.model.name(),
+                        now.duration_since(last_input).as_millis(),
+                        since_state.describe(),
+                        quiet_context(),
+                        if quiet_logs == QUIET_LOGS { "; further stops on this connection aren't logged" } else { "" }
+                    );
+                }
             }
         }
         if now.duration_since(last_rate) >= Duration::from_secs(1) {

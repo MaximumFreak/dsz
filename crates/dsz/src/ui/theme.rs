@@ -79,57 +79,52 @@ pub fn ensure_cjk(ctx: &egui::Context) {
 }
 
 pub fn install(ctx: &egui::Context, scale: f32) {
-    let mut fonts = FontDefinitions::default();
-    let fallback_prop = fonts
+    // Only Windows' own fonts: egui's bundled ones (1.4 MB of the exe) were
+    // never drawn, except emoji, which Segoe UI Symbol covers.
+    let mut fonts = FontDefinitions::empty();
+    let mut add = |name: &str, paths: &[&str]| {
+        let bytes = load_font(paths)?;
+        fonts
+            .font_data
+            .insert(name.into(), Arc::new(FontData::from_static(bytes)));
+        Some(name.to_string())
+    };
+    let regular = add(
+        "segoe",
+        &[
+            r"C:\Windows\Fonts\segoeui.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\tahoma.ttf",
+        ],
+    );
+    let semi = add(
+        "segoe_sb",
+        &[
+            r"C:\Windows\Fonts\seguisb.ttf",
+            r"C:\Windows\Fonts\segoeuib.ttf",
+        ],
+    );
+    // Symbols (arrows, shapes, emoji) for icons and glyphs.
+    let symbols = add("segoe_sym", &[r"C:\Windows\Fonts\seguisym.ttf"]);
+    let mono = add(
+        "consolas",
+        &[r"C:\Windows\Fonts\consola.ttf", r"C:\Windows\Fonts\cour.ttf"],
+    );
+    if regular.is_none() {
+        log::error!(r"no system font found in C:\Windows\Fonts; text won't show");
+    }
+    let family = |first: &[&Option<String>]| -> Vec<String> {
+        first.iter().filter_map(|f| (*f).clone()).collect()
+    };
+    fonts
         .families
-        .get(&FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
-
-    if let Some(bytes) = load_font(&[r"C:\Windows\Fonts\segoeui.ttf"]) {
-        fonts
-            .font_data
-            .insert("segoe".into(), Arc::new(FontData::from_static(bytes)));
-        fonts
-            .families
-            .get_mut(&FontFamily::Proportional)
-            .unwrap()
-            .insert(0, "segoe".into());
-    }
-    let mut sb = Vec::new();
-    if let Some(bytes) = load_font(&[
-        r"C:\Windows\Fonts\seguisb.ttf",
-        r"C:\Windows\Fonts\segoeuib.ttf",
-    ]) {
-        fonts
-            .font_data
-            .insert("segoe_sb".into(), Arc::new(FontData::from_static(bytes)));
-        sb.push("segoe_sb".to_string());
-    }
-    // Symbols (arrows, shapes) for icons and glyphs.
-    if let Some(bytes) = load_font(&[r"C:\Windows\Fonts\seguisym.ttf"]) {
-        fonts
-            .font_data
-            .insert("segoe_sym".into(), Arc::new(FontData::from_static(bytes)));
-        fonts
-            .families
-            .get_mut(&FontFamily::Proportional)
-            .unwrap()
-            .push("segoe_sym".into());
-        sb.push("segoe_sym".into());
-    }
-    if let Some(bytes) = load_font(&[r"C:\Windows\Fonts\consola.ttf"]) {
-        fonts
-            .font_data
-            .insert("consolas".into(), Arc::new(FontData::from_static(bytes)));
-        fonts
-            .families
-            .get_mut(&FontFamily::Monospace)
-            .unwrap()
-            .insert(0, "consolas".into());
-    }
-    sb.extend(fallback_prop);
-    fonts.families.insert(semibold(), sb);
+        .insert(FontFamily::Proportional, family(&[&regular, &symbols]));
+    fonts
+        .families
+        .insert(FontFamily::Monospace, family(&[&mono, &regular, &symbols]));
+    fonts
+        .families
+        .insert(semibold(), family(&[&semi, &symbols, &regular]));
     ctx.set_fonts(fonts);
 
     // A zoom on top of Windows' own display scale, so it follows the window

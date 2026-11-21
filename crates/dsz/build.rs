@@ -102,9 +102,14 @@ fn embed_resources(out: &Path) {
     }
 }
 
-/// An `.ico` with one 32-bit BMP image per size, drawn by `icon_art`.
+/// An `.ico` with one image per size, drawn by `icon_art`: 32-bit BMP up to
+/// 64 px, PNG at 256 (as Windows' own icons do; a 256 px BMP is 260 KB of
+/// the exe, the PNG about a tenth of that).
 fn ico_file(sizes: &[usize]) -> Vec<u8> {
-    let images: Vec<Vec<u8>> = sizes.iter().map(|&s| bmp_image(s)).collect();
+    let images: Vec<Vec<u8>> = sizes
+        .iter()
+        .map(|&s| if s >= 256 { png_image(s) } else { bmp_image(s) })
+        .collect();
     let mut f = Vec::new();
     // ICONDIR: reserved, type 1 (icon), count.
     f.extend_from_slice(&0u16.to_le_bytes());
@@ -125,6 +130,19 @@ fn ico_file(sizes: &[usize]) -> Vec<u8> {
         f.extend_from_slice(&img);
     }
     f
+}
+
+fn png_image(size: usize) -> Vec<u8> {
+    let rgba = icon_art::icon_rgba(size);
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, size as u32, size as u32);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::High);
+    let mut w = enc.write_header().expect("icon PNG header");
+    w.write_image_data(&rgba).expect("icon PNG");
+    w.finish().expect("icon PNG");
+    out
 }
 
 /// BITMAPINFOHEADER, bottom-up BGRA pixels, then an empty AND mask (the
