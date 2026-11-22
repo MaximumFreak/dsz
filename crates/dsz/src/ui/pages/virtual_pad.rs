@@ -427,6 +427,24 @@ impl App {
                             crate::i18n::tr("DualSense mode"),
                             &mut vo.game_triggers,
                         );
+                        if vo.game_triggers && vo.kind == VirtualKind::DualSense {
+                            slider_row(
+                                ui,
+                                crate::i18n::tr("L2 effect strength"),
+                                crate::i18n::tr("100% is as the game sends it; 0% turns it off"),
+                                &mut vo.left_game_trigger_strength,
+                                0..=100,
+                                "%",
+                            );
+                            slider_row(
+                                ui,
+                                crate::i18n::tr("R2 effect strength"),
+                                crate::i18n::tr("100% is as the game sends it; 0% turns it off"),
+                                &mut vo.right_game_trigger_strength,
+                                0..=100,
+                                "%",
+                            );
+                        }
                         toggle_row(
                             ui,
                             crate::i18n::tr("Lightbar and LEDs"),

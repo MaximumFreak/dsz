@@ -25,6 +25,7 @@ mod platform;
 mod portable;
 mod profile;
 mod settings;
+mod stall;
 mod tray;
 mod udp;
 mod ui;

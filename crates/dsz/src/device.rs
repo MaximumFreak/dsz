@@ -1657,10 +1657,28 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
     let mut last_kind = 0u8;
     let mut since_state = SinceState::default();
     let mut quiet_logs = 0u32;
+    // Issue 63: input held back while Game Bar is open.
+    let mut stall = crate::stall::Stall::new(device.model, device.conn);
 
     while !device.stop.load(Ordering::Acquire) {
-        match reader.read(100) {
-            Ok(Some(buf)) => {
+        let ask = stall.ask(Instant::now(), last_input, prev.full);
+        let timeout = stall.read_ms();
+        let got = match reader.read(timeout) {
+            Ok(None) => match ask {
+                Some(id) => match reader.current(id, crate::stall::ASK_TIMEOUT_MS) {
+                    Ok(Some(buf)) => Ok(Some((buf, true))),
+                    Ok(None) | Err(_) => {
+                        stall.ask_failed();
+                        Ok(None)
+                    }
+                },
+                None => Ok(None),
+            },
+            Ok(Some(buf)) => Ok(Some((buf, false))),
+            Err(e) => Err(e),
+        };
+        match got {
+            Ok(Some((buf, asked))) => {
                 errors = 0;
                 let gap = last_packet.elapsed();
                 last_packet = Instant::now();
@@ -1691,7 +1709,9 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                         ds_proto::input::parse(buf, device.conn, device.model, false)
                     }
                 } else {
-                    ds_proto::input::parse(buf, device.conn, device.model, check_crc)
+                    // An asked-for report is always checked: it skips the
+                    // stream, and with it any doubt about what it is.
+                    ds_proto::input::parse(buf, device.conn, device.model, check_crc || asked)
                 };
                 let kind = match &parsed {
                     Err(ParseError::NotState(k)) => *k,
@@ -1701,9 +1721,30 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                     last_kind = kind;
                     device.flight.input_kind(kind);
                 }
+                if asked && !matches!(parsed, Ok(ref st) if st.full) {
+                    // Anything but full input state ends asking until the
+                    // stream is back.
+                    stall.ask_failed();
+                    continue;
+                }
                 match parsed {
                     Ok(mut state) => {
                         let now = Instant::now();
+                        let was_asking = stall.asking();
+                        if !stall.accept(asked, state.sensor_ts, now) {
+                            // Already have newer state from an ask.
+                            continue;
+                        }
+                        if stall.asking() != was_asking {
+                            log::info!(
+                                "{}",
+                                if was_asking {
+                                    "input stream back"
+                                } else {
+                                    "input stream held back (Game Bar open?): reading current reports"
+                                }
+                            );
+                        }
                         device.stats.reports.fetch_add(1, Ordering::Relaxed);
                         count_since += 1;
                         let silent = now.duration_since(last_input);

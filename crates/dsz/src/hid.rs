@@ -295,7 +295,20 @@ pub struct Reader<'a> {
     ev: Event,
     buf: Box<[u8]>,
     pending: bool,
+    /// For [`Reader::current`]; made on its first use.
+    ask: Option<Ask>,
 }
+
+/// A current-input-report request's own OVERLAPPED, beside the pending read.
+struct Ask {
+    ov: Box<OVERLAPPED>,
+    ev: Event,
+    buf: Box<[u8]>,
+}
+
+/// `IOCTL_HID_GET_INPUT_REPORT` (hidclass.h): the current input report,
+/// as `HidD_GetInputReport` asks for it, but overlapped.
+const IOCTL_HID_GET_INPUT_REPORT: u32 = 0x000B_01A2;
 
 unsafe impl Send for Reader<'_> {}
 
@@ -310,7 +323,56 @@ impl<'a> Reader<'a> {
             ev,
             buf: vec![0u8; dev.info.input_len.max(64)].into_boxed_slice(),
             pending: false,
+            ask: None,
         })
+    }
+
+    /// Ask the controller for its current input report `id`, waiting up to
+    /// `timeout_ms`. A pending stream read stays queued. `Ok(None)`: no
+    /// answer in time (the request is cancelled).
+    pub fn current(&mut self, id: u8, timeout_ms: u32) -> io::Result<Option<&[u8]>> {
+        if self.ask.is_none() {
+            let ev = Event::new()?;
+            let mut ov: Box<OVERLAPPED> = Box::new(unsafe { std::mem::zeroed() });
+            ov.hEvent = ev.0.raw();
+            let buf = vec![0u8; self.dev.info.input_len.max(64)].into_boxed_slice();
+            self.ask = Some(Ask { ov, ev, buf });
+        }
+        let h = self.dev.io.raw();
+        let ask = self.ask.as_mut().unwrap();
+        ask.buf.fill(0);
+        ask.buf[0] = id;
+        unsafe {
+            ResetEvent(ask.ev.0.raw());
+            let mut got = 0u32;
+            let ok = DeviceIoControl(
+                h,
+                IOCTL_HID_GET_INPUT_REPORT,
+                null(),
+                0,
+                ask.buf.as_mut_ptr() as *mut c_void,
+                ask.buf.len() as u32,
+                &mut got,
+                &mut *ask.ov,
+            );
+            if ok == 0 {
+                let err = GetLastError();
+                if err != ERROR_IO_PENDING {
+                    return Err(io::Error::from_raw_os_error(err as i32));
+                }
+                if WaitForSingleObject(ask.ev.0.raw(), timeout_ms) != WAIT_OBJECT_0 {
+                    // Not left in flight: the buffer is reused next time.
+                    CancelIoEx(h, &*ask.ov);
+                    GetOverlappedResult(h, &*ask.ov, &mut got, 1);
+                    return Ok(None);
+                }
+                if GetOverlappedResult(h, &*ask.ov, &mut got, 0) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            let n = (got as usize).min(ask.buf.len());
+            Ok(Some(&ask.buf[..n]))
+        }
     }
 
     /// Wait up to `timeout_ms` for one report. `Ok(None)` is a timeout; the

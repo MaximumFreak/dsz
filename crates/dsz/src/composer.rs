@@ -423,8 +423,14 @@ impl Composer {
                 e.encode()
             }
         };
-        let gl = game.left_trigger.filter(|_| vo.game_triggers);
-        let gr = game.right_trigger.filter(|_| vo.game_triggers);
+        let gl = game
+            .left_trigger
+            .filter(|_| vo.game_triggers)
+            .map(|b| ds_proto::trigger::scale_effect(b, vo.left_game_trigger_strength));
+        let gr = game
+            .right_trigger
+            .filter(|_| vo.game_triggers)
+            .map(|b| ds_proto::trigger::scale_effect(b, vo.right_game_trigger_strength));
         out.left_trigger = overrides
             .left_trigger
             .or(gl)
@@ -813,6 +819,49 @@ mod tests {
         let modded = crate::device::Overrides { right_trigger: Some(shoot.encode()), ..Default::default() };
         let o = Composer::new().compose(&p, &InputState::default(), &modded, &crate::device::Feedback::default(), &toggles, false, 0.0, now);
         assert_eq!(o.right_trigger, shoot.encode());
+    }
+
+    #[test]
+    fn game_trigger_strength_scales_only_the_game_effects() {
+        let none = crate::device::Overrides::default();
+        let toggles = crate::device::Toggles::default();
+        let now = Instant::now();
+        let game_l = ds_proto::TriggerEffect::Weapon { start: 2, end: 6, strength: 8 }.encode();
+        let game_r: ds_proto::trigger::EffectBytes = [0x26, 0x0F, 0, 0xFF, 0x0F, 0, 0, 0, 0, 30, 0];
+        let mut fb = crate::device::Feedback::default();
+        fb.game.left_trigger = Some(game_l);
+        fb.game.right_trigger = Some(game_r);
+        let mut p = Profile::default();
+        p.virtual_out.game_triggers = true;
+        let bytes = |o: &OutputState| {
+            let mut b = [0u8; 128];
+            o.build(ds_proto::Connection::Bluetooth, &mut b).to_vec()
+        };
+        // At 100 % (the default) the game's bytes go out as sent, and the
+        // whole report is what it was before the setting existed.
+        let full = Composer::new().compose(&p, &InputState::default(), &none, &fb, &toggles, false, 0.0, now);
+        assert_eq!((full.left_trigger, full.right_trigger), (game_l, game_r));
+        let mut explicit = p.clone();
+        explicit.virtual_out.left_game_trigger_strength = 100;
+        explicit.virtual_out.right_game_trigger_strength = 100;
+        let o = Composer::new().compose(&explicit, &InputState::default(), &none, &fb, &toggles, false, 0.0, now);
+        assert_eq!(bytes(&o), bytes(&full));
+        // L2 and R2 each have their own strength.
+        p.virtual_out.left_game_trigger_strength = 50;
+        let o = Composer::new().compose(&p, &InputState::default(), &none, &fb, &toggles, false, 0.0, now);
+        assert_eq!(o.left_trigger, ds_proto::TriggerEffect::Weapon { start: 2, end: 6, strength: 4 }.encode());
+        assert_eq!(o.right_trigger, game_r);
+        p.virtual_out.right_game_trigger_strength = 0;
+        let o = Composer::new().compose(&p, &InputState::default(), &none, &fb, &toggles, false, 0.0, now);
+        assert_eq!(o.right_trigger, ds_proto::trigger::OFF);
+        // A mod's effect and the profile's own effect stay as they are.
+        let shoot = ds_proto::TriggerEffect::Feedback { position: 1, strength: 8 };
+        let modded = crate::device::Overrides { left_trigger: Some(shoot.encode()), ..Default::default() };
+        let o = Composer::new().compose(&p, &InputState::default(), &modded, &fb, &toggles, false, 0.0, now);
+        assert_eq!(o.left_trigger, shoot.encode());
+        p.triggers.left = shoot.clone();
+        let o = Composer::new().compose(&p, &InputState::default(), &none, &crate::device::Feedback::default(), &toggles, false, 0.0, now);
+        assert_eq!(o.left_trigger, shoot.encode());
     }
 
     #[test]

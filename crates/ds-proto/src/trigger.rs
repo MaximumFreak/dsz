@@ -556,6 +556,72 @@ impl TriggerEffect {
     }
 }
 
+/// `percent` of a force that is 1..=`max` while on: never rounded down to
+/// none, so a weaker effect keeps its shape.
+fn scale_level(v: u8, percent: u8, max: u8) -> u8 {
+    if v == 0 {
+        return 0;
+    }
+    ((v as u32 * percent as u32 + 50) / 100).clamp(1, max as u32) as u8
+}
+
+/// A 3-bit field stored as level - 1 (levels 1..=8).
+fn scale_minus_one(field: u8, percent: u8) -> u8 {
+    scale_level((field & 7) + 1, percent, 8) - 1
+}
+
+/// The effect a game sent, with its resistance or vibration strength at
+/// `percent` (issue 66). 100 and above return the bytes untouched; 0 turns
+/// the trigger off. Positions, timing and frequencies stay as the game set
+/// them. Mode bytes and layouts are Nielk1's (README, Protocol sources);
+/// modes it doesn't list, and Galloping (rhythm only), pass unchanged.
+pub fn scale_effect(b: EffectBytes, percent: u8) -> EffectBytes {
+    if percent >= 100 {
+        return b;
+    }
+    if percent == 0 {
+        return OFF;
+    }
+    let mut o = b;
+    match b[0] {
+        // Simple_Feedback / Simple_Vibration: byte 2 is the force or
+        // amplitude (0..=255); Limited_Feedback: strength 0..=10.
+        0x01 | 0x06 => o[2] = scale_level(b[2], percent, 255),
+        0x11 => o[2] = scale_level(b[2], percent, 10),
+        // Simple_Weapon (0..=255) and Limited_Weapon (0..=10): byte 3.
+        0x02 => o[3] = scale_level(b[3], percent, 255),
+        0x12 => o[3] = scale_level(b[3], percent, 10),
+        // Feedback and Vibration: a 3-bit level per active zone.
+        0x21 | 0x26 => {
+            let mask = u16::from_le_bytes([b[1], b[2]]);
+            let mut packed = u32::from_le_bytes([b[3], b[4], b[5], b[6]]);
+            for i in 0..10 {
+                if mask & (1 << i) != 0 {
+                    let at = 3 * i;
+                    let v = scale_minus_one((packed >> at) as u8, percent) as u32;
+                    packed = (packed & !(7 << at)) | (v << at);
+                }
+            }
+            o[3..7].copy_from_slice(&packed.to_le_bytes());
+        }
+        // Weapon: strength - 1.
+        0x25 => o[3] = (b[3] & !7) | scale_minus_one(b[3], percent),
+        // Bow: strength - 1 and snap force - 1.
+        0x22 => {
+            let snap = scale_minus_one(b[3] >> 3, percent);
+            o[3] = (b[3] & 0xC0) | scale_minus_one(b[3], percent) | (snap << 3);
+        }
+        // Machine: amplitudes A and B, 0..=7.
+        0x27 => {
+            let a = scale_level(b[3] & 7, percent, 7);
+            let bb = scale_level((b[3] >> 3) & 7, percent, 7);
+            o[3] = (b[3] & 0xC0) | a | (bb << 3);
+        }
+        _ => {}
+    }
+    o
+}
+
 /// Custom trigger mode index from a mod to the mode byte the firmware takes,
 /// for the modes pydualsense (MIT) documents in `TriggerModes`: Off, then
 /// Rigid and Pulse, each plain, A (`0x20`), B (`0x04`), and A+B. Mods number
@@ -582,6 +648,67 @@ pub fn custom_mode_byte(mode: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_effect_at_full_strength_changes_nothing() {
+        let effects: [EffectBytes; 6] = [
+            OFF,
+            [0x26, 1, 2, 3, 4, 5, 6, 0, 0, 9, 0],
+            [0x21, 0xF8, 0x03, 0xFF, 0xFF, 0xFF, 0x3F, 0, 0, 0, 0],
+            [0x01, 3, 200, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0xFC, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [0x23, 0x02, 0x01, 0x0B, 20, 0, 0, 0, 0, 0, 0],
+        ];
+        for b in effects {
+            assert_eq!(scale_effect(b, 100), b);
+            assert_eq!(scale_effect(b, 255), b);
+        }
+    }
+
+    #[test]
+    fn scale_effect_weakens_each_mode() {
+        let half = |e: TriggerEffect| scale_effect(e.encode(), 50);
+        assert_eq!(
+            half(TriggerEffect::Feedback { position: 3, strength: 8 }),
+            TriggerEffect::Feedback { position: 3, strength: 4 }.encode()
+        );
+        assert_eq!(
+            half(TriggerEffect::Weapon { start: 2, end: 6, strength: 7 }),
+            TriggerEffect::Weapon { start: 2, end: 6, strength: 4 }.encode()
+        );
+        assert_eq!(
+            half(TriggerEffect::Vibration { position: 1, amplitude: 6, frequency: 30 }),
+            TriggerEffect::Vibration { position: 1, amplitude: 3, frequency: 30 }.encode()
+        );
+        assert_eq!(
+            half(TriggerEffect::Bow { start: 1, end: 5, strength: 8, snap: 6 }),
+            TriggerEffect::Bow { start: 1, end: 5, strength: 4, snap: 3 }.encode()
+        );
+        assert_eq!(
+            half(TriggerEffect::Machine { start: 1, end: 8, amp_a: 6, amp_b: 2, frequency: 20, period: 3 }),
+            TriggerEffect::Machine { start: 1, end: 8, amp_a: 3, amp_b: 1, frequency: 20, period: 3 }.encode()
+        );
+        assert_eq!(
+            half(TriggerEffect::MultiFeedback { strengths: [0, 1, 2, 3, 4, 5, 6, 7, 8, 0] }),
+            TriggerEffect::MultiFeedback { strengths: [0, 1, 1, 2, 2, 3, 3, 4, 4, 0] }.encode()
+        );
+        let gallop = TriggerEffect::Galloping { start: 1, end: 8, first_foot: 2, second_foot: 5, frequency: 20 }.encode();
+        assert_eq!(scale_effect(gallop, 50), gallop);
+        assert_eq!(scale_effect([0x01, 3, 200, 0, 0, 0, 0, 0, 0, 0, 0], 50), [0x01, 3, 100, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(scale_effect([0x02, 4, 8, 255, 0, 0, 0, 0, 0, 0, 0], 50), [0x02, 4, 8, 128, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(scale_effect([0x06, 30, 100, 2, 0, 0, 0, 0, 0, 0, 0], 50), [0x06, 30, 50, 2, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(scale_effect([0x11, 2, 10, 0, 0, 0, 0, 0, 0, 0, 0], 50), [0x11, 2, 5, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(scale_effect([0x12, 0x20, 0x40, 9, 0, 0, 0, 0, 0, 0, 0], 50), [0x12, 0x20, 0x40, 5, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn scale_effect_keeps_weak_effects_and_turns_off_at_zero() {
+        let soft = TriggerEffect::Feedback { position: 0, strength: 1 }.encode();
+        assert_eq!(scale_effect(soft, 10), soft, "never rounded down to nothing");
+        assert_eq!(scale_effect([0x01, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0], 10)[2], 1);
+        assert_eq!(scale_effect([0x01, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0], 50)[2], 0);
+        assert_eq!(scale_effect(soft, 0), OFF);
+    }
 
     #[test]
     fn feedback_matches_known_bytes() {

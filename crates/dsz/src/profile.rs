@@ -1008,6 +1008,12 @@ pub struct VirtualOutput {
     pub game_rumble: bool,
     /// Adaptive-trigger effects the game sends to the virtual DualSense.
     pub game_triggers: bool,
+    /// Strength of the game's L2 and R2 effects in percent, 0..=100
+    /// (issue 66); 100 passes them through untouched and isn't saved.
+    #[serde(skip_serializing_if = "is_full_strength")]
+    pub left_game_trigger_strength: u8,
+    #[serde(skip_serializing_if = "is_full_strength")]
+    pub right_game_trigger_strength: u8,
     /// Lightbar, player, and mute LEDs the game sends.
     pub game_leds: bool,
     /// Game haptics: the virtual DualSense's actuator channels.
@@ -1030,6 +1036,10 @@ pub struct VirtualOutput {
     pub touch_passthrough: bool,
 }
 
+fn is_full_strength(v: &u8) -> bool {
+    *v == 100
+}
+
 impl Default for VirtualOutput {
     fn default() -> Self {
         VirtualOutput {
@@ -1037,6 +1047,8 @@ impl Default for VirtualOutput {
             hide_physical: true,
             game_rumble: true,
             game_triggers: true,
+            left_game_trigger_strength: 100,
+            right_game_trigger_strength: 100,
             game_leds: false,
             game_haptics: true,
             game_haptics_level: 100,
@@ -1439,6 +1451,26 @@ mod tests {
         on.triggers.hold_at = 25;
         let json = serde_json::to_string(&on).unwrap();
         assert!(json.contains(r#""right_needs_l2":true"#) && json.contains(r#""hold_at":25"#));
+        assert_eq!(serde_json::from_str::<Profile>(&json).unwrap(), on);
+    }
+
+    #[test]
+    fn game_trigger_strength_is_full_and_left_out_until_changed() {
+        let p: Profile =
+            serde_json::from_str(r#"{"name":"Old","virtual":{"kind":"DualSense","game_triggers":true}}"#).unwrap();
+        assert_eq!(p.virtual_out.left_game_trigger_strength, 100);
+        assert_eq!(p.virtual_out.right_game_trigger_strength, 100);
+        for p in Profile::starter_set() {
+            assert_eq!(p.virtual_out.left_game_trigger_strength, 100, "{}", p.name);
+            assert_eq!(p.virtual_out.right_game_trigger_strength, 100, "{}", p.name);
+            let json = serde_json::to_string(&p).unwrap();
+            assert!(!json.contains("game_trigger_strength"), "{}", p.name);
+        }
+        let mut on = Profile::default();
+        on.virtual_out.right_game_trigger_strength = 60;
+        let json = serde_json::to_string(&on).unwrap();
+        assert!(json.contains(r#""right_game_trigger_strength":60"#));
+        assert!(!json.contains("left_game_trigger_strength"));
         assert_eq!(serde_json::from_str::<Profile>(&json).unwrap(), on);
     }
 

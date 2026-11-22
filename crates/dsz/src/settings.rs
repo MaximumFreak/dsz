@@ -287,6 +287,20 @@ mod tests {
     }
 
     #[test]
+    fn overlay_input_legacy_key_is_ignored() {
+        // The Game Bar input fallback is always on; a settings.json from
+        // the short-lived opt-in still loads, and the key is not saved.
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        old.as_object_mut().unwrap().insert("overlay_input".into(), true.into());
+        let parsed: Settings = serde_json::from_value(old).unwrap();
+        assert_eq!(parsed, Settings::default());
+        let saved = serde_json::to_value(&parsed).unwrap();
+        assert!(saved.get("overlay_input").is_none());
+        let parsed: Settings = serde_json::from_str(r#"{"overlay_input":false}"#).unwrap();
+        assert_eq!(parsed, Settings::default());
+    }
+
+    #[test]
     fn battery_label_is_the_percentage_unless_bars_are_on() {
         let input = ds_proto::InputState {
             full: true,
