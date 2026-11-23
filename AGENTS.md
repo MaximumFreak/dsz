@@ -45,5 +45,5 @@ Protocol facts come from public documentation, captures, or code with open licen
 
 - One feature per PR, without unrelated changes or reformatting.
 - Comments explain why, not what. Match the naming and style of the surrounding code.
-- DSZ is released as one commit per version, so a PR is brought in through the release commit rather than merged, and closed with a link to the release that shipped it.
+- PRs are squash-merged into `main`.
 - The app must never download or start executables by itself (antivirus engines flag that). Updates go through the user's browser.

@@ -299,8 +299,8 @@ fn plug_with(
 /// Send the pad plugged in at startup's idle report again once Windows has
 /// it (ring LED lit), then at [`STARTUP_RELEASES`], while nobody drives it.
 /// An idle Xbox 360 pad otherwise sends one report in its life, and after
-/// some boots Explorer acted on a held Guide while XInput read the pad idle
-/// (research/STUCK-GUIDE-2026-10-14.md). A driven pad sends its own.
+/// some boots Explorer acted on a held Guide while XInput read the pad idle.
+/// A driven pad sends its own.
 fn startup_releases(pad: &Pad) {
     let start = Instant::now();
     while pad.target.xinput_slot().is_none() && start.elapsed() < STARTUP_RELEASES[0] {
