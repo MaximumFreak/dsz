@@ -12,7 +12,13 @@
 //! gets one request per silence, not a stream, and "No signal" still
 //! appears after the usual quiet timeout. DualShock 4 is unchanged: the
 //! long-standing 100 ms read, and no requests.
+//!
+//! When an ask fails, [`Stall::fail`] yields one always-on log line for
+//! that silence: the Win32 error, a timeout, a short or wrong report, a
+//! CRC failure, or that the request was not attempted, plus the connection
+//! and report id. Later failures in the same silence are silent.
 
+use std::io;
 use std::time::{Duration, Instant};
 
 use ds_proto::{Connection, Model};
@@ -49,12 +55,104 @@ pub fn report_id(model: Model, conn: Connection) -> Option<u8> {
     })
 }
 
+/// Why one current-report request failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskFail {
+    /// `IOCTL_HID_GET_INPUT_REPORT` / `GetLastError` returned a Win32 error.
+    Win32 { code: i32, message: String },
+    /// The request was cancelled after [`ASK_TIMEOUT_MS`].
+    Timeout,
+    /// An answer came back, but it wasn't a full input report.
+    BadReport {
+        len: usize,
+        head: [u8; 8],
+        head_n: usize,
+    },
+    /// The answer failed the Bluetooth CRC.
+    Crc,
+    /// The request was not sent (wrong model, or no report id).
+    NotAttempted,
+}
+
+impl AskFail {
+    pub fn from_io(e: &io::Error) -> AskFail {
+        let code = e.raw_os_error().unwrap_or(0);
+        // `io::Error` Display ends with " (os error N)"; the line already
+        // carries the code, so drop that suffix.
+        let message = {
+            let s = e.to_string();
+            match s.rfind(" (os error ") {
+                Some(i) => s[..i].to_string(),
+                None => s,
+            }
+        };
+        AskFail::Win32 { code, message }
+    }
+
+    pub fn bad_report(buf: &[u8]) -> AskFail {
+        let n = buf.len().min(8);
+        let mut head = [0u8; 8];
+        head[..n].copy_from_slice(&buf[..n]);
+        AskFail::BadReport {
+            len: buf.len(),
+            head,
+            head_n: n,
+        }
+    }
+
+    fn reason(&self) -> String {
+        match self {
+            AskFail::Win32 { code, message } => {
+                format!("Win32 error {code} ({message})")
+            }
+            AskFail::Timeout => "timed out".to_string(),
+            AskFail::BadReport { len, head, head_n } => {
+                if *head_n == 0 {
+                    "short or wrong report (0 bytes)".to_string()
+                } else {
+                    let mut hex = String::with_capacity(head_n * 3);
+                    for (i, b) in head[..*head_n].iter().enumerate() {
+                        if i > 0 {
+                            hex.push(' ');
+                        }
+                        hex.push_str(&format!("{b:02X}"));
+                    }
+                    format!("short or wrong report ({len} bytes, first {hex})")
+                }
+            }
+            AskFail::Crc => "CRC check failed".to_string(),
+            AskFail::NotAttempted => "unsupported or not attempted".to_string(),
+        }
+    }
+
+    /// The always-on log line: connection, report id, and reason.
+    pub fn line(&self, model: Model, conn: Connection, id: Option<u8>) -> String {
+        let over = match conn {
+            Connection::Usb => "USB",
+            Connection::Bluetooth => "Bluetooth",
+        };
+        let reason = self.reason();
+        match id {
+            Some(id) => format!(
+                "{} current-report request failed over {over} (report 0x{id:02X}): {reason}",
+                model.name()
+            ),
+            None => format!(
+                "{} current-report request failed over {over}: {reason}",
+                model.name()
+            ),
+        }
+    }
+}
+
 /// `a` came after `b` on the controller's sensor clock, which wraps.
 fn newer(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
 }
 
 pub struct Stall {
+    model: Model,
+    conn: Connection,
     id: Option<u8>,
     /// An ask failed during this silence: don't ask again until the stream
     /// delivers.
@@ -69,6 +167,8 @@ pub struct Stall {
 impl Stall {
     pub fn new(model: Model, conn: Connection) -> Stall {
         Stall {
+            model,
+            conn,
             id: report_id(model, conn),
             failed: false,
             asking: false,
@@ -96,9 +196,21 @@ impl Stall {
         self.id
     }
 
-    /// An ask got no answer or no input state.
-    pub fn ask_failed(&mut self) {
+    /// An ask got no answer or no input state, and returns the log line
+    /// for the first failure in this silence. Later calls return None so
+    /// one Game Bar open is one line, not a stream. With no report id
+    /// (DualShock 4) the reason is always that the request was not attempted.
+    pub fn fail(&mut self, reason: AskFail) -> Option<String> {
+        if self.failed {
+            return None;
+        }
         self.failed = true;
+        let reason = if self.id.is_none() {
+            AskFail::NotAttempted
+        } else {
+            reason
+        };
+        Some(reason.line(self.model, self.conn, self.id))
     }
 
     /// A state arrived, from an ask (`asked`) or the stream, stamped
@@ -190,7 +302,7 @@ mod tests {
     fn a_failed_ask_waits_for_the_stream() {
         let t0 = Instant::now();
         let mut s = Stall::new(Model::DualSense, Connection::Bluetooth);
-        s.ask_failed();
+        assert!(s.fail(AskFail::Timeout).is_some());
         assert_eq!(s.read_ms(), READ_MS);
         assert_eq!(s.ask(t0 + 5_000 * MS, t0, true), None);
         assert!(s.accept(false, 10, t0));
@@ -240,5 +352,88 @@ mod tests {
         assert!(s.accept(true, u32::MAX - 5, t0));
         assert!(s.accept(true, 3, t0));
         assert!(s.accept(false, 10, t0));
+    }
+
+    #[test]
+    fn ask_fail_lines() {
+        assert_eq!(
+            AskFail::Win32 {
+                code: 1,
+                message: "Incorrect function.".into(),
+            }
+            .line(Model::DualSense, Connection::Usb, Some(0x01)),
+            "DualSense current-report request failed over USB (report 0x01): Win32 error 1 (Incorrect function.)"
+        );
+        assert_eq!(
+            AskFail::Timeout.line(Model::DualSense, Connection::Bluetooth, Some(0x31)),
+            "DualSense current-report request failed over Bluetooth (report 0x31): timed out"
+        );
+        assert_eq!(
+            AskFail::bad_report(&[0x01, 0x00, 0x00, 0x00]).line(
+                Model::DualSenseEdge,
+                Connection::Usb,
+                Some(0x01)
+            ),
+            "DualSense Edge current-report request failed over USB (report 0x01): short or wrong report (4 bytes, first 01 00 00 00)"
+        );
+        assert_eq!(
+            AskFail::bad_report(&[]).line(Model::DualSense, Connection::Usb, Some(0x01)),
+            "DualSense current-report request failed over USB (report 0x01): short or wrong report (0 bytes)"
+        );
+        assert_eq!(
+            AskFail::Crc.line(Model::DualSense, Connection::Bluetooth, Some(0x31)),
+            "DualSense current-report request failed over Bluetooth (report 0x31): CRC check failed"
+        );
+        assert_eq!(
+            AskFail::NotAttempted.line(Model::DualShock4, Connection::Usb, None),
+            "DualShock 4 current-report request failed over USB: unsupported or not attempted"
+        );
+    }
+
+    #[test]
+    fn win32_error_line_uses_the_os_message() {
+        let e = io::Error::from_raw_os_error(1);
+        let line = AskFail::from_io(&e).line(Model::DualSense, Connection::Usb, Some(0x01));
+        assert!(
+            line.starts_with(
+                "DualSense current-report request failed over USB (report 0x01): Win32 error 1 ("
+            ),
+            "{line}"
+        );
+        assert!(line.ends_with(')'), "{line}");
+        assert!(!line.contains("os error"), "{line}");
+    }
+
+    #[test]
+    fn dualshock4_fail_is_not_attempted() {
+        let mut s = Stall::new(Model::DualShock4, Connection::Usb);
+        assert_eq!(
+            s.fail(AskFail::Timeout).as_deref(),
+            Some("DualShock 4 current-report request failed over USB: unsupported or not attempted")
+        );
+    }
+
+    #[test]
+    fn a_failed_ask_is_logged_once_per_silence() {
+        let t0 = Instant::now();
+        let mut s = Stall::new(Model::DualSense, Connection::Usb);
+        let first = s.fail(AskFail::Timeout).expect("first failure is logged");
+        assert_eq!(
+            first,
+            "DualSense current-report request failed over USB (report 0x01): timed out"
+        );
+        assert!(s
+            .fail(AskFail::from_io(&io::Error::from_raw_os_error(1)))
+            .is_none());
+        assert_eq!(s.read_ms(), READ_MS);
+        assert_eq!(s.ask(t0 + 5_000 * MS, t0, true), None);
+        // The stream coming back starts a new silence.
+        assert!(s.accept(false, 10, t0));
+        assert_eq!(
+            s.fail(AskFail::Crc).as_deref(),
+            Some(
+                "DualSense current-report request failed over USB (report 0x01): CRC check failed"
+            )
+        );
     }
 }

@@ -1667,8 +1667,16 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
             Ok(None) => match ask {
                 Some(id) => match reader.current(id, crate::stall::ASK_TIMEOUT_MS) {
                     Ok(Some(buf)) => Ok(Some((buf, true))),
-                    Ok(None) | Err(_) => {
-                        stall.ask_failed();
+                    Ok(None) => {
+                        if let Some(line) = stall.fail(crate::stall::AskFail::Timeout) {
+                            log::warn!("{line}");
+                        }
+                        Ok(None)
+                    }
+                    Err(e) => {
+                        if let Some(line) = stall.fail(crate::stall::AskFail::from_io(&e)) {
+                            log::warn!("{line}");
+                        }
                         Ok(None)
                     }
                 },
@@ -1724,7 +1732,13 @@ fn reader_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 if asked && !matches!(parsed, Ok(ref st) if st.full) {
                     // Anything but full input state ends asking until the
                     // stream is back.
-                    stall.ask_failed();
+                    let reason = match parsed {
+                        Err(ParseError::BadCrc) => crate::stall::AskFail::Crc,
+                        _ => crate::stall::AskFail::bad_report(buf),
+                    };
+                    if let Some(line) = stall.fail(reason) {
+                        log::warn!("{line}");
+                    }
                     continue;
                 }
                 match parsed {
