@@ -172,6 +172,58 @@ pub struct Settings {
     pub check_updates: bool,
     /// Motion server for emulators (cemuhook/DSU, UDP 26760).
     pub dsu_enabled: bool,
+    /// On-screen battery overlay (see `battery_overlay`). Off by default.
+    pub battery_overlay: BatteryOverlay,
+}
+
+/// Screen corner the battery overlay sits in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OverlayCorner {
+    TopLeft,
+    #[default]
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl OverlayCorner {
+    pub const ALL: [OverlayCorner; 4] = [
+        OverlayCorner::TopLeft,
+        OverlayCorner::TopRight,
+        OverlayCorner::BottomLeft,
+        OverlayCorner::BottomRight,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            OverlayCorner::TopLeft => "Top left",
+            OverlayCorner::TopRight => "Top right",
+            OverlayCorner::BottomLeft => "Bottom left",
+            OverlayCorner::BottomRight => "Bottom right",
+        }
+    }
+}
+
+/// The battery overlay's low-battery warning. A mapping (Show battery
+/// overlay) shows it on a button, with its own corner and time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BatteryOverlay {
+    /// Show it once when a controller on battery drops below
+    /// `low_percent`, and again at each lower step.
+    pub on_low: bool,
+    pub low_percent: u8,
+    /// How long the warning stays, in milliseconds.
+    pub show_ms: u32,
+}
+
+impl Default for BatteryOverlay {
+    fn default() -> Self {
+        BatteryOverlay {
+            on_low: false,
+            low_percent: 20,
+            show_ms: crate::battery_overlay::DEFAULT_MS,
+        }
+    }
 }
 
 /// A fresh install's default profile, and the one to fall back on while it
@@ -216,6 +268,7 @@ impl Default for Settings {
             audio_on_virtual: [false; 6],
             check_updates: true,
             dsu_enabled: false,
+            battery_overlay: BatteryOverlay::default(),
         }
     }
 }

@@ -28,6 +28,7 @@ enum AKind {
     Gamepad,
     Xbox,
     TurnOff,
+    Battery,
 }
 
 fn akind(a: &Action) -> AKind {
@@ -49,10 +50,11 @@ fn akind(a: &Action) -> AKind {
         Action::Gamepad { .. } => AKind::Gamepad,
         Action::Xbox { .. } => AKind::Xbox,
         Action::TurnOffController => AKind::TurnOff,
+        Action::ShowBatteryOverlay { .. } => AKind::Battery,
     }
 }
 
-const KINDS: [(AKind, &str); 17] = [
+const KINDS: [(AKind, &str); 18] = [
     (AKind::None, "Nothing"),
     (AKind::Gamepad, "PlayStation button"),
     (AKind::Xbox, "Xbox button"),
@@ -66,6 +68,7 @@ const KINDS: [(AKind, &str); 17] = [
     (AKind::Prev, "Previous profile"),
     (AKind::Gyro, "Toggle gyro"),
     (AKind::Touch, "Toggle touchpad mouse"),
+    (AKind::Battery, "Show battery overlay"),
     (AKind::Run, "Open a program / file"),
     (AKind::Profile, "Switch to profile"),
     (AKind::HoldProfile, "Use profile while held"),
@@ -234,6 +237,10 @@ impl App {
                                 AKind::Run => Action::Run { path: String::new() },
                                 AKind::Text => Action::Text { text: String::new() },
                                 AKind::TurnOff => Action::TurnOffController,
+                                AKind::Battery => Action::ShowBatteryOverlay {
+                                    corner: Default::default(),
+                                    ms: crate::battery_overlay::DEFAULT_MS,
+                                },
                                 AKind::Profile => Action::Profile {
                                     name: profile_names.iter().find(|n| **n != p_name).cloned().unwrap_or_default(),
                                 },
@@ -391,6 +398,21 @@ impl App {
                             Action::TurnOffController => {
                                 ui.label(RichText::new(crate::i18n::tr("powers off over Bluetooth")).size(12.0).color(MUTED))
                                     .on_hover_text(crate::i18n::tr("Drops the Bluetooth link, which turns the controller off. Plugged in over USB, it stays on."));
+                            }
+                            Action::ShowBatteryOverlay { corner, ms } => {
+                                fit(ui, 130.0);
+                                egui::ComboBox::from_id_salt(("map-overlay-corner", i))
+                                    .width(130.0)
+                                    .selected_text(crate::i18n::tr(corner.label()))
+                                    .show_ui(ui, |ui| {
+                                        for c in crate::settings::OverlayCorner::ALL {
+                                            ui.selectable_value(corner, c, crate::i18n::tr(c.label()));
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(crate::i18n::tr("Not over games in exclusive fullscreen; borderless and windowed work"));
+                                fit(ui, 220.0);
+                                ui.add(egui::Slider::new(ms, crate::battery_overlay::MIN_MS..=crate::battery_overlay::MAX_MS).step_by(100.0).suffix(" ms").text(crate::i18n::tr("show for")));
                             }
                             _ => {}
                         }

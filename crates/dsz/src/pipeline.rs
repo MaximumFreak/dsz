@@ -810,7 +810,7 @@ fn sends_input(a: &Action) -> bool {
     )
 }
 
-fn action_down(engine: &Engine, device: &Device, a: &Action) {
+fn action_down(engine: &Arc<Engine>, device: &Device, a: &Action) {
     // Windows drops the input without an error, so say why nothing happens.
     if sends_input(a) && !crate::platform::is_elevated() && crate::platform::foreground_elevated() {
         engine.warn_toast(crate::i18n::tr("That window runs as administrator, so Windows blocks DSZ's keys. Turn on Run as administrator in Settings."));
@@ -878,6 +878,7 @@ fn action_down(engine: &Engine, device: &Device, a: &Action) {
         // Started by the mapping, which knows the buttons to watch.
         Action::HoldProfile { .. } => {}
         Action::TurnOffController => turn_off_controller(engine, device),
+        Action::ShowBatteryOverlay { corner, ms } => crate::battery_overlay::show(engine, *corner, *ms),
         Action::Text { text } => sim::type_text(text),
         Action::Run { path } => {
             if !path.trim().is_empty() {
@@ -1022,6 +1023,9 @@ pub struct Pipeline {
     /// Buttons a held profile hid from the game; each stays hidden until it
     /// is let go, also after the hold ends, like a muted combo.
     held_hide: u32,
+    /// Battery overlay settings, refetched when the settings change.
+    overlay: Option<(u64, crate::settings::BatteryOverlay)>,
+    low_battery: crate::battery_overlay::LowWatch,
 }
 
 impl Pipeline {
@@ -1043,6 +1047,8 @@ impl Pipeline {
             overlay_hide: 0,
             touch_zone: None,
             held_hide: 0,
+            overlay: None,
+            low_battery: Default::default(),
         }
     }
 
@@ -1305,6 +1311,8 @@ impl Pipeline {
         self.helper_sent = helper;
         self.to_gamebar = to_gamebar;
 
+        self.battery_overlay(engine, &s);
+
         engine.dsu.publish(device, &s, dps);
 
         // Publish for the UI and the haptics thread.
@@ -1322,12 +1330,28 @@ impl Pipeline {
         live.touch_mouse_active = touch_active;
     }
 
+    /// Show the battery overlay when this controller runs low (a mapping
+    /// shows it on a button). Only reads the report; with the warning off
+    /// it costs one atomic load.
+    fn battery_overlay(&mut self, engine: &Arc<Engine>, s: &InputState) {
+        let rev = engine.settings_revision();
+        if self.overlay.as_ref().is_none_or(|(r, _)| *r != rev) {
+            self.overlay = Some((rev, engine.settings.read().battery_overlay.clone()));
+        }
+        let Some((_, cfg)) = &self.overlay else {
+            return;
+        };
+        if cfg.on_low && self.low_battery.update(s, cfg.low_percent) {
+            crate::battery_overlay::show(engine, Default::default(), cfg.show_ms);
+        }
+    }
+
     /// Run the mappings. Returns the buttons to hide from the virtual
     /// controller, the virtual buttons mappings are pressing, and the Xbox
     /// buttons they press with no virtual Xbox pad of this controller's own.
     fn mappings(
         &mut self,
-        engine: &Engine,
+        engine: &Arc<Engine>,
         device: &Device,
         profile: &Profile,
         s: &InputState,
@@ -2327,6 +2351,153 @@ mod hold_profile_tests {
         assert_eq!(r.engine.unheld_profile(&r.device).unwrap().name, "Base");
         r.step(&[]);
         assert!(r.engine.unheld_profile(&r.device).is_none());
+    }
+}
+
+#[cfg(test)]
+mod battery_overlay_tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use ds_proto::input::{BatteryStatus, Button};
+    use ds_proto::{Connection, InputState, OutputState};
+
+    use super::turn_off_tests::gate;
+    use super::Pipeline;
+    use crate::battery_overlay::{take_shown, DEFAULT_MS};
+    use crate::composer::Composer;
+    use crate::device::Device;
+    use crate::engine::Engine;
+    use crate::profile::{
+        Action, GyroMode, Mapping, Profile, StickMode, TouchMode, VirtualKind,
+    };
+    use crate::settings::OverlayCorner;
+
+    struct Rig {
+        dir: PathBuf,
+        engine: Arc<Engine>,
+        device: Arc<Device>,
+        pipe: Pipeline,
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn rig(mappings: Vec<Mapping>, on_low: bool) -> Rig {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("dsz-overlay-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::new(dir.clone());
+        let device = Device::for_test(Connection::Bluetooth, "");
+        let mut profile = Profile::named("Overlay");
+        profile.mappings = mappings;
+        profile.gyro.mode = GyroMode::Off;
+        profile.touchpad.mode = TouchMode::Passthrough;
+        profile.sticks.left.mode = StickMode::Passthrough;
+        profile.sticks.right.mode = StickMode::Passthrough;
+        profile.virtual_out.kind = VirtualKind::Off;
+        profile.haptics.buttons.enabled = false;
+        let name = engine.profiles.add(profile);
+        engine.set_device_profile(&device, &name);
+        engine.settings.write().battery_overlay.on_low = on_low;
+        engine.settings_changed();
+        Rig {
+            dir,
+            engine,
+            device,
+            pipe: Pipeline::new(),
+        }
+    }
+
+    /// A full report from a controller on battery at `percent`.
+    fn report(percent: u8, buttons: &[Button]) -> InputState {
+        let mut s = InputState {
+            lx: 128,
+            ly: 128,
+            rx: 128,
+            ry: 128,
+            full: true,
+            battery_percent: percent,
+            battery_status: BatteryStatus::Discharging,
+            ..InputState::default()
+        };
+        for b in buttons {
+            s.buttons.set(*b, true);
+        }
+        s
+    }
+
+    /// The control report the writer would send next, from what the
+    /// pipeline left on the device.
+    fn sent(rig: &Rig, at: Instant) -> Vec<u8> {
+        let input = rig.device.live.lock().input;
+        let overrides = rig.device.overrides.lock().clone();
+        let toggles = rig.device.toggles.load();
+        let fb = rig.device.feedback.lock();
+        let o: OutputState = Composer::new().compose(
+            &Profile::default(),
+            &input,
+            &overrides,
+            &fb,
+            &toggles,
+            false,
+            0.0,
+            at,
+        );
+        let mut b = [0u8; 128];
+        o.build(Connection::Bluetooth, &mut b).to_vec()
+    }
+
+    #[test]
+    fn showing_the_overlay_leaves_the_reports_byte_for_byte() {
+        // The overlay only reads reports. With a mapping that shows it and
+        // the low-battery warning on, the controller gets exactly what it
+        // gets without them, while both fire.
+        let _g = gate();
+        let _ = take_shown();
+        let show = Mapping {
+            button: Button::Ps,
+            action: Action::ShowBatteryOverlay {
+                corner: OverlayCorner::BottomLeft,
+                ms: 2000,
+            },
+            ..Mapping::default()
+        };
+        let mut on = rig(vec![show], true);
+        let mut off = rig(vec![], false);
+        let steps = [
+            report(60, &[]),
+            report(60, &[Button::Ps]),
+            report(60, &[]),
+            report(10, &[]),
+            report(10, &[Button::Ps]),
+            report(10, &[]),
+        ];
+        let t0 = Instant::now();
+        let mut prev = report(60, &[]);
+        for (i, s) in steps.iter().enumerate() {
+            let at = t0 + Duration::from_millis(10 * i as u64);
+            on.pipe.process(&on.engine, &on.device, s, &prev, None, at);
+            off.pipe.process(&off.engine, &off.device, s, &prev, None, at);
+            assert_eq!(sent(&on, at), sent(&off, at), "step {i}");
+            prev = *s;
+        }
+        // Both ways of showing it fired, and only on the rig that has them.
+        let shown = take_shown();
+        assert_eq!(
+            shown,
+            vec![
+                (OverlayCorner::BottomLeft, 2000),
+                (OverlayCorner::TopRight, DEFAULT_MS),
+                (OverlayCorner::BottomLeft, 2000),
+            ]
+        );
     }
 }
 

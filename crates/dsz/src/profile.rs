@@ -727,6 +727,18 @@ pub enum Action {
     /// Drop the Bluetooth link, which powers the controller off. A controller
     /// plugged in over USB stays on.
     TurnOffController,
+    /// Show the battery overlay (see `battery_overlay`) in a screen corner
+    /// for a few seconds.
+    ShowBatteryOverlay {
+        #[serde(default)]
+        corner: crate::settings::OverlayCorner,
+        #[serde(default = "overlay_ms")]
+        ms: u32,
+    },
+}
+
+fn overlay_ms() -> u32 {
+    crate::battery_overlay::DEFAULT_MS
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

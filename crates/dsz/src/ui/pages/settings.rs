@@ -244,6 +244,8 @@ impl App {
                         engine.settings_changed();
                     }
                 });
+                ui.add_space(12.0);
+                self.battery_overlay_card(ui);
             } else {
                 card(
                     ui,
@@ -373,6 +375,54 @@ impl App {
                 });
             }
         });
+    }
+
+    /// Battery overlay: the low-battery warning. A mapping (Show battery
+    /// overlay) shows it on a button, with its own corner and time.
+    fn battery_overlay_card(&mut self, ui: &mut egui::Ui) {
+        let engine = self.engine.clone();
+        card(
+            ui,
+            crate::i18n::tr("Battery overlay"),
+            crate::i18n::tr("Every controller's battery, on top of games and the desktop"),
+            |ui| {
+                let mut cfg = engine.settings.read().battery_overlay.clone();
+                let before = cfg.clone();
+                muted(ui, crate::i18n::tr("To show it with a button, map one to Show battery overlay on the Button mapping page, and pick its corner and time there."));
+                toggle_row(
+                    ui,
+                    crate::i18n::tr("Show when a battery runs low"),
+                    crate::i18n::tr("Once, and again at each lower step, while on battery"),
+                    &mut cfg.on_low,
+                );
+                ui.add_enabled_ui(cfg.on_low, |ui| {
+                    row(ui, crate::i18n::tr("Low below"), "", |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut cfg.low_percent, 10..=50)
+                                .step_by(10.0)
+                                .suffix(" %")
+                                .trailing_fill(true),
+                        );
+                    });
+                    row(ui, crate::i18n::tr("Show for"), "", |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut cfg.show_ms, crate::battery_overlay::MIN_MS..=crate::battery_overlay::MAX_MS)
+                                .step_by(100.0)
+                                .suffix(" ms")
+                                .trailing_fill(true),
+                        );
+                    });
+                });
+                // Shows the warning as it will look: its time, top right.
+                if button(ui, crate::i18n::tr("Show now")).clicked() {
+                    crate::battery_overlay::show(&engine, Default::default(), cfg.show_ms);
+                }
+                if cfg != before {
+                    engine.settings.write().battery_overlay = cfg;
+                    engine.settings_changed();
+                }
+            },
+        );
     }
 
     /// Emulator motion: the DSU (cemuhook) server.
