@@ -256,7 +256,9 @@ impl App {
                                             return;
                                         }
                                         ui.label(RichText::new(&prof.name).font(heading(15.0)));
-                                        ui.horizontal(|ui| {
+                                        // Wraps: Active, Default, DualSense games and a
+                                        // game count overflowed a narrow card (issue 72).
+                                        ui.horizontal_wrapped(|ui| {
                                             ui.spacing_mut().item_spacing.x = 4.0;
                                             if is_active {
                                                 pill(ui, crate::i18n::tr("Active"), ACCENT);

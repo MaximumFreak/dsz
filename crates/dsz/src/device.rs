@@ -1959,6 +1959,30 @@ fn min_gap(conn: Connection, pcm: bool) -> Duration {
     }
 }
 
+/// Resend the unchanged state this long after the last report, so the
+/// controller comes back to the profile after another app wrote to it.
+/// Never while games see the controller itself (no virtual pad): a
+/// resend twice a second took a game's haptics, trigger effects and
+/// lights back from it (issue 72). Reports still go out on every change.
+fn keepalive_due(native: bool, pcm: bool, since_last: Duration) -> bool {
+    !native && since_last > Duration::from_millis(if pcm { 1000 } else { 500 })
+}
+
+/// No virtual controller is in front of this one, so games talk to it
+/// directly: the profile under any held one (which the virtual pad
+/// follows) asks for none, after the fallback pad for a running game.
+fn games_see_controller(engine: &Engine, device: &Device, profile: &crate::profile::Profile) -> bool {
+    let pad_profile = engine.unheld_profile(device);
+    let kind = pad_profile.as_deref().unwrap_or(profile).virtual_out.kind;
+    let fallback = engine.settings.read().fallback_pad;
+    crate::settings::effective_virtual_kind(
+        kind,
+        engine.game_override.read().is_some(),
+        engine.fallback_exe.read().is_some(),
+        fallback,
+    ) == crate::profile::VirtualKind::Off
+}
+
 fn control_report<'a>(
     device: &Device,
     state: &ds_proto::OutputState,
@@ -2088,6 +2112,7 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
         }
 
         let profile = profile_cache.get(engine, device);
+        let native = games_see_controller(engine, device, &profile);
         if profile.lighting.mode == crate::profile::LightMode::Audio {
             let source = profile.haptics.device.as_str();
             if meter.as_ref().map(|s| s.device.as_str()) != Some(source) {
@@ -2158,8 +2183,10 @@ fn writer_loop(engine: &Arc<Engine>, device: &Arc<Device>, dev: &HidDevice) {
                 });
             }
         }
-        let keepalive =
-            now.duration_since(last_write) > Duration::from_millis(if pcm { 1000 } else { 500 });
+        if native {
+            crate::composer::leave_to_game(&mut state, last_sent.as_ref());
+        }
+        let keepalive = keepalive_due(native, pcm, now.duration_since(last_write));
         let changed = last_sent.as_ref() != Some(&state);
         let throttled = changed
             && last_sent
@@ -3131,4 +3158,54 @@ mod rumble_pulse_tests {
         assert!(!c.classic_owns());
     }
 
+}
+
+#[cfg(test)]
+mod native_output_tests {
+    //! Issue 72: with no virtual pad, a game writes to the controller
+    //! itself, and DSZ's twice-a-second resend took its haptics away.
+    use super::*;
+    use crate::profile::{Profile, VirtualKind};
+
+    #[test]
+    fn keepalive_only_with_a_virtual_pad() {
+        let ms = Duration::from_millis;
+        // With a virtual pad, the same cadence as before.
+        assert!(!keepalive_due(false, false, ms(500)));
+        assert!(keepalive_due(false, false, ms(501)));
+        assert!(!keepalive_due(false, true, ms(1000)));
+        assert!(keepalive_due(false, true, ms(1001)));
+        // Native: never, however long since the last report.
+        for pcm in [false, true] {
+            assert!(!keepalive_due(true, pcm, Duration::from_secs(3600)));
+        }
+    }
+
+    #[test]
+    fn native_follows_the_pad_games_get() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("dsz-native-out-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::new(dir.clone());
+        let d = Device::for_test(Connection::Usb, "A0-00-00-00-00-72");
+        let mut p = Profile::default();
+        for (kind, native) in [
+            (VirtualKind::Off, true),
+            (VirtualKind::Xbox360, false),
+            (VirtualKind::DualSense, false),
+            (VirtualKind::DualShock4, false),
+        ] {
+            p.virtual_out.kind = kind;
+            assert_eq!(games_see_controller(&engine, &d, &p), native, "{kind:?}");
+        }
+        // A game without DualSense support that gets the fallback pad.
+        p.virtual_out.kind = VirtualKind::Off;
+        engine.settings.write().fallback_pad = crate::settings::FallbackPad::Xbox360;
+        *engine.fallback_exe.write() = Some("game.exe".into());
+        assert!(!games_see_controller(&engine, &d, &p));
+        *engine.fallback_exe.write() = None;
+        assert!(games_see_controller(&engine, &d, &p));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

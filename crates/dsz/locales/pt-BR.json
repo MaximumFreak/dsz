@@ -423,6 +423,7 @@
   "Test game haptics": "Testar háptica do jogo",
   "Testing…": "Testando…",
   "Plays a sweep on the left grip, then the right, through the game-haptics path.": "Reproduz uma varredura na empunhadura esquerda e depois na direita, pelo canal de háptica do jogo.",
+  "Over USB, game haptics need a virtual DualSense. Games with their own DualSense support play them directly.": "No USB, a háptica do jogo precisa de um DualSense virtual. Jogos com suporte próprio ao DualSense a reproduzem diretamente.",
   "This profile does not use a virtual DualSense, so over Bluetooth the game cannot send its haptics to the controller.": "Este perfil não usa um DualSense virtual; por Bluetooth, o jogo não pode enviar sua háptica ao controle.",
   "Virtual DualSense": "DualSense virtual",
   "Virtual DualShock 4": "DualShock 4 virtual",

@@ -520,10 +520,17 @@ impl App {
                             ui.add_space(6.0);
                             let testing = self.game_test.is_some();
                             let label = if testing { crate::i18n::tr("Testing…") } else { crate::i18n::tr("Test game haptics") };
-                            if button(ui, label).clicked() {
+                            // On a cable the game-haptics path plays only for a
+                            // virtual DualSense (haptics::usb::wanted).
+                            let playable = d.is_bluetooth() || vo.kind == VirtualKind::DualSense;
+                            if ui.add_enabled_ui(playable, |ui| button(ui, label).clicked()).inner {
                                 self.start_game_test(d, TestSignal::Actuators);
                             }
-                            muted(ui, crate::i18n::tr("Plays a sweep on the left grip, then the right, through the game-haptics path."));
+                            if playable {
+                                muted(ui, crate::i18n::tr("Plays a sweep on the left grip, then the right, through the game-haptics path."));
+                            } else {
+                                muted(ui, crate::i18n::tr("Over USB, game haptics need a virtual DualSense. Games with their own DualSense support play them directly."));
+                            }
                             if !testing && d.virt.status.lock().game_audio_open {
                                 muted(ui, crate::i18n::tr("A game is using the virtual DualSense; its haptics play here."));
                             }

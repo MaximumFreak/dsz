@@ -19,6 +19,10 @@ pub struct OutputState {
     pub rumble_valid: bool,
     pub right_trigger: trigger::EffectBytes,
     pub left_trigger: trigger::EffectBytes,
+    /// When false that trigger's effect is not marked valid, so the
+    /// firmware keeps the effect it has (another app's, issue 72).
+    pub right_trigger_valid: bool,
+    pub left_trigger_valid: bool,
     pub lightbar: [u8; 3],
     /// Player LED bits 0..=4.
     pub player_leds: u8,
@@ -97,6 +101,8 @@ impl Default for OutputState {
             rumble_valid: true,
             right_trigger: trigger::OFF,
             left_trigger: trigger::OFF,
+            right_trigger_valid: true,
+            left_trigger_valid: true,
             lightbar: [0, 0, 255],
             player_leds: 0x04,
             led_brightness: 0,
@@ -119,7 +125,13 @@ impl OutputState {
     fn write_body(&self, b: &mut [u8]) {
         // valid_flag0: bit0 compatible vibration, bit1 haptics select,
         // bit2 right trigger, bit3 left trigger.
-        let mut flag0 = 0x04 | 0x08;
+        let mut flag0 = 0;
+        if self.right_trigger_valid {
+            flag0 |= 0x04;
+        }
+        if self.left_trigger_valid {
+            flag0 |= 0x08;
+        }
         if self.rumble_valid {
             flag0 |= 0x01 | 0x02;
         }
@@ -347,5 +359,32 @@ mod tests {
         let mut a = [0u8; 100];
         let r = s.build(Connection::Bluetooth, &mut a);
         assert_eq!(r[2] & 0x03, 0);
+    }
+
+    #[test]
+    fn default_report_flags_unchanged() {
+        // Every report DSZ sent before issue 72 marks both triggers and the
+        // motors: flag0 0x0F, flag1 0x55, flag2 0x07.
+        let mut a = [0u8; 100];
+        let r = OutputState::default().build(Connection::Usb, &mut a).to_vec();
+        assert_eq!((r[1], r[2], r[39]), (0x0F, 0x55, 0x07));
+    }
+
+    #[test]
+    fn trigger_invalid_clears_only_its_bit() {
+        let mut a = [0u8; 100];
+        let mut b = [0u8; 100];
+        let all = OutputState { right_trigger: [1; 11], ..Default::default() };
+        let full = all.build(Connection::Usb, &mut b).to_vec();
+        let r = OutputState { right_trigger_valid: false, ..all }.build(Connection::Usb, &mut a).to_vec();
+        assert_eq!(r[1], 0x0B, "right trigger bit off, left and motors on");
+        assert_eq!(&r[2..], &full[2..], "the rest is the same");
+        let r = OutputState { left_trigger_valid: false, ..all }.build(Connection::Usb, &mut a).to_vec();
+        assert_eq!(r[1], 0x07);
+        let r = OutputState { left_trigger_valid: false, right_trigger_valid: false, rumble_valid: false, ..all }
+            .build(Connection::Bluetooth, &mut a)
+            .to_vec();
+        assert_eq!(r[2] & 0x0F, 0);
+        assert!(crc::verify(crc::PREFIX_OUTPUT, &r));
     }
 }

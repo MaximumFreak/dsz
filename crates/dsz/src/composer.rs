@@ -172,6 +172,35 @@ pub fn profile_player_leds(l: &crate::profile::Lighting, input: &InputState) -> 
     }
 }
 
+/// With no virtual controller in front of it, games (and Steam) talk to
+/// the controller directly, so the motor and trigger fields are theirs
+/// unless DSZ is using them itself (issue 72). Each stays marked while
+/// DSZ's own value is on, and until a report with it off has gone out
+/// marked (`last`, the last report sent; none at connect or after a failed
+/// write), which stops DSZ's rumble or trigger effect. After that it is
+/// left unmarked: a marked motor field, even at zero, puts the firmware in
+/// rumble emulation, and the actuators then ignore a game's haptic audio,
+/// as SDL notes ("Leaving emulated rumble bits off will restore audio
+/// haptics"); a marked trigger field replaces the game's effect. The
+/// lights stay DSZ's: they are the profile's own setting.
+pub fn leave_to_game(state: &mut OutputState, last: Option<&OutputState>) {
+    let motors_off = |s: &OutputState| s.rumble_left == 0 && s.rumble_right == 0;
+    if state.rumble_valid && motors_off(state) && last.is_some_and(|l| !l.rumble_valid || motors_off(l)) {
+        state.rumble_valid = false;
+    }
+    let off = ds_proto::trigger::OFF;
+    if state.right_trigger == off
+        && last.is_some_and(|l| !l.right_trigger_valid || l.right_trigger == off)
+    {
+        state.right_trigger_valid = false;
+    }
+    if state.left_trigger == off
+        && last.is_some_and(|l| !l.left_trigger_valid || l.left_trigger == off)
+    {
+        state.left_trigger_valid = false;
+    }
+}
+
 impl Composer {
     pub fn new() -> Self {
         let now = Instant::now();
@@ -1062,5 +1091,55 @@ mod tests {
             }
             assert_eq!(bytes(&got), bytes(&want), "{ms}");
         }
+    }
+
+    #[test]
+    fn leave_to_game_marks_only_what_dsz_uses() {
+        let off = ds_proto::trigger::OFF;
+        let profile = OutputState { lightbar: [10, 20, 30], ..Default::default() };
+        // At connect (nothing sent yet) the first report is the full one,
+        // which also stops whatever an earlier app left running.
+        let mut first = profile;
+        leave_to_game(&mut first, None);
+        assert_eq!(first, profile);
+        // After that, idle motors and triggers are left to the game.
+        let mut idle = profile;
+        leave_to_game(&mut idle, Some(&first));
+        assert!(!idle.rumble_valid && !idle.left_trigger_valid && !idle.right_trigger_valid);
+        assert_eq!(idle.lightbar, [10, 20, 30], "the lights stay the profile's");
+        let mut again = profile;
+        leave_to_game(&mut again, Some(&idle));
+        assert_eq!(again, idle, "and stay left alone");
+        let mut b = [0u8; 100];
+        let r = idle.build(ds_proto::Connection::Usb, &mut b).to_vec();
+        assert_eq!(r[1] & 0x0F, 0, "no motor, haptics-select or trigger bits");
+        // DSZ's own rumble (test, mod, click) goes out marked, then one
+        // report with the motors marked at zero stops it, then unmarked.
+        let mut rumble = OutputState { rumble_left: 200, ..profile };
+        leave_to_game(&mut rumble, Some(&idle));
+        assert!(rumble.rumble_valid);
+        let mut stop = profile;
+        leave_to_game(&mut stop, Some(&rumble));
+        assert!(stop.rumble_valid && stop.rumble_left == 0 && stop.rumble_right == 0);
+        let mut after = profile;
+        leave_to_game(&mut after, Some(&stop));
+        assert!(!after.rumble_valid);
+        // The same for the profile's or a mod's trigger effect, per trigger.
+        let effect = [0x01, 0x05, 0x80, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut own = OutputState { right_trigger: effect, ..profile };
+        leave_to_game(&mut own, Some(&idle));
+        assert!(own.right_trigger_valid && !own.left_trigger_valid);
+        let mut release = profile;
+        leave_to_game(&mut release, Some(&own));
+        assert!(release.right_trigger_valid && release.right_trigger == off);
+        assert!(!release.left_trigger_valid);
+        let mut done = profile;
+        leave_to_game(&mut done, Some(&release));
+        assert!(!done.right_trigger_valid);
+        // A virtual pad's reports never go through here; with the motors
+        // unmarked (haptics streaming) nothing needs releasing either.
+        let mut streaming = OutputState { rumble_valid: false, ..profile };
+        leave_to_game(&mut streaming, Some(&first));
+        assert!(!streaming.rumble_valid);
     }
 }

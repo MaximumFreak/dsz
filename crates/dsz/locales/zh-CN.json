@@ -423,6 +423,7 @@
   "Test game haptics": "测试游戏触觉",
   "Testing…": "测试中…",
   "Plays a sweep on the left grip, then the right, through the game-haptics path.": "通过游戏触觉通道，先在左握把、再在右握把播放一段扫频。",
+  "Over USB, game haptics need a virtual DualSense. Games with their own DualSense support play them directly.": "通过 USB 时，游戏触觉需要虚拟 DualSense。自带 DualSense 支持的游戏会直接播放触觉。",
   "This profile does not use a virtual DualSense, so over Bluetooth the game cannot send its haptics to the controller.": "此配置文件没有使用虚拟 DualSense，因此通过蓝牙时游戏无法把触觉发送到手柄。",
   "Virtual DualSense": "虚拟 DualSense",
   "Virtual DualShock 4": "虚拟 DualShock 4",
