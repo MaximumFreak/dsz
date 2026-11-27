@@ -20,6 +20,7 @@ enum AKind {
     Next,
     Prev,
     Gyro,
+    GyroEnabled,
     Touch,
     Run,
     Text,
@@ -42,6 +43,7 @@ fn akind(a: &Action) -> AKind {
         Action::NextProfile => AKind::Next,
         Action::PreviousProfile => AKind::Prev,
         Action::ToggleGyroMouse => AKind::Gyro,
+        Action::ToggleGyroEnabled => AKind::GyroEnabled,
         Action::ToggleTouchpadMouse => AKind::Touch,
         Action::Run { .. } => AKind::Run,
         Action::Text { .. } => AKind::Text,
@@ -54,7 +56,7 @@ fn akind(a: &Action) -> AKind {
     }
 }
 
-const KINDS: [(AKind, &str); 18] = [
+const KINDS: [(AKind, &str); 19] = [
     (AKind::None, "Nothing"),
     (AKind::Gamepad, "PlayStation button"),
     (AKind::Xbox, "Xbox button"),
@@ -67,6 +69,7 @@ const KINDS: [(AKind, &str); 18] = [
     (AKind::Next, "Next profile"),
     (AKind::Prev, "Previous profile"),
     (AKind::Gyro, "Toggle gyro"),
+    (AKind::GyroEnabled, "Enable / disable gyro"),
     (AKind::Touch, "Toggle touchpad mouse"),
     (AKind::Battery, "Show battery overlay"),
     (AKind::Run, "Open a program / file"),
@@ -233,6 +236,7 @@ impl App {
                                 AKind::Next => Action::NextProfile,
                                 AKind::Prev => Action::PreviousProfile,
                                 AKind::Gyro => Action::ToggleGyroMouse,
+                                AKind::GyroEnabled => Action::ToggleGyroEnabled,
                                 AKind::Touch => Action::ToggleTouchpadMouse,
                                 AKind::Run => Action::Run { path: String::new() },
                                 AKind::Text => Action::Text { text: String::new() },
@@ -394,6 +398,10 @@ impl App {
                             Action::Text { text } => {
                                 ui.add(egui::TextEdit::singleline(text).hint_text(crate::i18n::tr("Text to type")).desired_width(220.0))
                                     .on_hover_text(crate::i18n::tr("Typed once each time the mapping fires, into whichever window has focus. It's saved in the profile file as plain text."));
+                            }
+                            Action::ToggleGyroEnabled => {
+                                ui.label(RichText::new(crate::i18n::tr("keeps the activation rule")).size(12.0).color(MUTED))
+                                    .on_hover_text(crate::i18n::tr("Off keeps the gyro off, even while its activation button is held. On brings back the profile's gyro and its activation rule. Toggle gyro instead turns the gyro on all the time."));
                             }
                             Action::TurnOffController => {
                                 ui.label(RichText::new(crate::i18n::tr("powers off over Bluetooth")).size(12.0).color(MUTED))

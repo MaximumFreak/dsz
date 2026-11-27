@@ -471,6 +471,10 @@ pub struct Toggles {
     pub touchpad: Option<bool>,
     pub mute_engaged: bool,
     pub gyro_toggled_on: bool,
+    /// Set by the Enable / disable gyro mapping: `Some(false)` keeps the
+    /// gyro off whatever the activation rule, `Some(true)` puts the
+    /// profile's activation rule back. `None` until that mapping is used.
+    pub gyro_enabled: Option<bool>,
 }
 
 /// Lock-free atomic storage for [`Toggles`], read on every HID input report.
@@ -488,6 +492,7 @@ impl AtomicToggles {
             | (opt(t.touchpad) << 2)
             | (u32::from(t.mute_engaged) << 4)
             | (u32::from(t.gyro_toggled_on) << 5)
+            | (opt(t.gyro_enabled) << 6)
     }
 
     fn unpack(v: u32) -> Toggles {
@@ -501,6 +506,7 @@ impl AtomicToggles {
             touchpad: opt(v >> 2),
             mute_engaged: (v & (1 << 4)) != 0,
             gyro_toggled_on: (v & (1 << 5)) != 0,
+            gyro_enabled: opt(v >> 6),
         }
     }
 
@@ -2406,14 +2412,17 @@ mod microphone_tests {
             for touchpad in [None, Some(false), Some(true)] {
                 for mute_engaged in [false, true] {
                     for gyro_toggled_on in [false, true] {
-                        let want = Toggles {
-                            gyro,
-                            touchpad,
-                            mute_engaged,
-                            gyro_toggled_on,
-                        };
-                        at.update(|t| *t = want);
-                        assert_eq!(at.load(), want);
+                        for gyro_enabled in [None, Some(false), Some(true)] {
+                            let want = Toggles {
+                                gyro,
+                                touchpad,
+                                mute_engaged,
+                                gyro_toggled_on,
+                                gyro_enabled,
+                            };
+                            at.update(|t| *t = want);
+                            assert_eq!(at.load(), want);
+                        }
                     }
                 }
             }

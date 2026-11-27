@@ -687,6 +687,10 @@ pub enum Action {
     NextProfile,
     PreviousProfile,
     ToggleGyroMouse,
+    /// Turn the gyro off whatever the activation rule, or back to the
+    /// profile's own rule. Unlike `ToggleGyroMouse`, whose "on" means
+    /// always on, this keeps the rule (hold, toggle, touch) in charge.
+    ToggleGyroEnabled,
     ToggleTouchpadMouse,
     Run {
         path: String,
@@ -1703,6 +1707,25 @@ mod tests {
         .unwrap();
         assert_eq!(p.mappings[0].action, Action::TurnOffController);
         assert_eq!(p.mappings[0].button, Button::Cross);
+    }
+
+    #[test]
+    fn gyro_enable_action_round_trips_and_old_profiles_load_unchanged() {
+        let a = Action::ToggleGyroEnabled;
+        let j = serde_json::to_string(&a).unwrap();
+        assert_eq!(j, r#"{"kind":"toggle_gyro_enabled"}"#);
+        assert_eq!(serde_json::from_str::<Action>(&j).unwrap(), a);
+        // A profile saved before it, with Toggle gyro, loads and saves as it did.
+        let old = r#"{"name":"old","gyro":{"mode":"Mouse","activation":{"WhileHeld":"L2"}},"mappings":[{"button":"Triangle","action":{"kind":"toggle_gyro_mouse"}}]}"#;
+        let p: Profile = serde_json::from_str(old).unwrap();
+        assert_eq!(p.mappings[0].action, Action::ToggleGyroMouse);
+        assert_eq!(p.gyro.activation, GyroActivation::WhileHeld(Button::L2));
+        let saved = serde_json::to_string(&p).unwrap();
+        assert!(!saved.contains("toggle_gyro_enabled"));
+        assert!(saved.contains(r#""kind":"toggle_gyro_mouse""#));
+        assert_eq!(serde_json::from_str::<Profile>(&saved).unwrap(), p);
+        let d = serde_json::to_string(&Profile::default()).unwrap();
+        assert!(!d.contains("toggle_gyro_enabled"));
     }
 
     #[test]
